@@ -8,12 +8,22 @@ import time
 
 import mcp.types as mt
 
+from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import ToolResult
 
 from linkedin_mcp_server.tools.meta import META_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
+
+# Patchright/Playwright error message emitted when the browser context dies.
+# Matched as a substring so it works across Playwright versions and transports.
+_BROWSER_CONTEXT_CLOSED = "Target page, context or browser has been closed"
+
+
+def _is_browser_context_closed(exc: Exception) -> bool:
+    """Return True if *exc* indicates the Patchright browser context has died."""
+    return _BROWSER_CONTEXT_CLOSED in str(exc)
 
 
 class SequentialToolExecutionMiddleware(Middleware):
@@ -68,6 +78,30 @@ class SequentialToolExecutionMiddleware(Middleware):
             hold_started = time.perf_counter()
             try:
                 return await call_next(context)
+            except Exception as exc:
+                if _is_browser_context_closed(exc):
+                    # The Patchright browser context died mid-operation.
+                    # Reset the browser singleton so the next tool call gets a
+                    # fresh context (cookies are safe on disk — no re-login needed).
+                    logger.warning(
+                        "Browser context closed during tool '%s' — resetting for next call",
+                        tool_name,
+                    )
+                    try:
+                        # Lazy import avoids a circular dependency at module load time.
+                        from linkedin_mcp_server.drivers.browser import close_browser
+                        await close_browser()
+                    except Exception:
+                        logger.debug(
+                            "close_browser() failed during crash recovery",
+                            exc_info=True,
+                        )
+                    raise ToolError(
+                        "The browser context crashed mid-operation. "
+                        "The browser has been reset — please retry this tool. "
+                        "Your LinkedIn session is still active."
+                    ) from exc
+                raise
             finally:
                 hold_seconds = time.perf_counter() - hold_started
                 logger.debug(
