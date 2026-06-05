@@ -46,10 +46,10 @@ logger = logging.getLogger(__name__)
 
 WaitUntil = Literal["commit", "domcontentloaded", "load", "networkidle"]
 
-# Delay between page navigations to avoid rate limiting
+# Pacing between page navigations
 _NAV_DELAY = 2.0
 
-# Backoff before retrying a rate-limited page
+# Backoff before retrying a temporarily blocked page
 _RATE_LIMIT_RETRY_DELAY = 5.0
 
 # Returned as section text when LinkedIn rate-limits the page

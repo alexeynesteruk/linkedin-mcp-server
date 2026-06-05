@@ -22,7 +22,7 @@ The scraping engine is built around a **one-section-one-navigation** design. Und
 
 ### Why This Design?
 
-AI assistants (LLMs) call our MCP tools. Each LinkedIn page navigation takes time and risks rate limits. By mapping each section to exactly one URL, the LLM can request only the sections it needs — skipping unnecessary navigations while still capturing all available info from each visited page via `innerText` extraction.
+AI assistants (LLMs) call our MCP tools. Each LinkedIn page navigation takes time. By mapping each section to exactly one URL, the LLM can request only the sections it needs — skipping unnecessary navigations while still capturing all available info from each visited page via `innerText` extraction.
 
 ### How It Works
 
