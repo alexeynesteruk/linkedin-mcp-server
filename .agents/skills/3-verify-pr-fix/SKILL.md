@@ -11,7 +11,9 @@ Goal: take a PR number, check it out cleanly, re-run the same tool call that fai
 ## Phase 1 — Resolve the PR and its linked issue
 
 ```bash
-PR="$ARGUMENTS"
+# Accept "498", "#498", or "https://github.com/.../pull/498" — extract the digits only
+PR=$(echo "$ARGUMENTS" | sed -E 's|.*/||; s|#||g' | grep -oE '^[0-9]+' | head -1)
+[ -z "$PR" ] && { echo "Invalid input: '$ARGUMENTS'. Pass a PR number or URL." >&2; exit 1; }
 REPO=stickerdaniel/linkedin-mcp-server
 
 gh pr view $PR --repo $REPO --json title,body,baseRefName,headRefName,headRepositoryOwner,mergeable,mergeStateStatus,additions,deletions,changedFiles,maintainerCanModify,statusCheckRollup
@@ -19,17 +21,26 @@ gh pr view $PR --repo $REPO --json title,body,baseRefName,headRefName,headReposi
 
 Extract the **linked issue number** from the PR body (`Closes #`, `Fixes #`, `Resolves #`, or plain `#N`). Call it `ISSUE`. If multiple, ask the user which one is the verification target.
 
-## Phase 2 — Pick up or create the baseline
+## Phase 2 — Pick up the baseline + request metadata
 
-`/2-repro-issue` writes `/tmp/repro-issue-<ISSUE>-main.json` and remembers the exact tool + args used. Check that file exists.
+`/2-repro-issue` writes two files for each issue:
+
+- `/tmp/repro-issue-<ISSUE>-main.json` — the on-main response baseline
+- `/tmp/repro-issue-<ISSUE>-meta.json` — the `{tool, arguments}` used to call it
+
+Both must exist. The meta file is how this skill replays the *exact* same call instead of guessing tool and args from the response body.
 
 ```bash
-ls -la /tmp/repro-issue-$ISSUE-main.json 2>&1
+ls -la /tmp/repro-issue-$ISSUE-main.json /tmp/repro-issue-$ISSUE-meta.json 2>&1
+[ -s /tmp/repro-issue-$ISSUE-meta.json ] || { echo "Missing or empty meta file. Re-run /2-repro-issue $ISSUE." >&2; exit 1; }
+TOOL=$(jq -r .tool /tmp/repro-issue-$ISSUE-meta.json)
+ARGS_JSON=$(jq -c .arguments /tmp/repro-issue-$ISSUE-meta.json)
+echo "Replaying: $TOOL($ARGS_JSON)"
 ```
 
-If missing, stop and tell the user: *"No baseline for #$ISSUE. Run `/2-repro-issue $ISSUE` first so we have an on-main reference to diff against."* Do not silently re-run the reproduction — `/2-repro-issue` is the canonical source of "what's the call, what's the failure mode".
+If either file is missing, stop and tell the user: *"No baseline for #$ISSUE. Run `/2-repro-issue $ISSUE` first so we have an on-main reference to diff against."* Do not silently re-run the reproduction, `/2-repro-issue` is the canonical source of "what's the call, what's the failure mode".
 
-If the baseline is older than 24 h, warn — LinkedIn DOM/data may have shifted. Offer to re-run `/2-repro-issue` first.
+If the baseline is older than 24 h, warn, LinkedIn DOM/data may have shifted. Offer to re-run `/2-repro-issue` first.
 
 ## Phase 3 — Check out the PR
 
@@ -37,8 +48,13 @@ If the baseline is older than 24 h, warn — LinkedIn DOM/data may have shifted.
 git status --porcelain | head -5     # must be clean
 git stash list | head -3             # warn if there are stashes the user may forget
 
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)   # remember where to return
-git fetch origin pull/$PR/head:pr-$PR
+# Remember where to return. `--abbrev-ref HEAD` returns the literal string "HEAD"
+# in detached state (CI worktrees, prior PR checkouts), so fall back to the SHA.
+CURRENT_REF=$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)
+
+# Force-update the local pr-$PR ref so a leftover from a failed prior run does
+# not block the fetch.
+git fetch origin "+pull/$PR/head:pr-$PR"
 git checkout pr-$PR
 
 # Scope sanity check
@@ -52,14 +68,22 @@ If `maintainerCanModify: true`, mention that to the user; it unlocks the "take o
 
 ## Phase 4 — Re-run the same MCP call on the PR branch
 
-Extract the original tool + args from the baseline JSON (`/2-repro-issue` saves the full response which includes the request envelope in the conversation). Restart the server because old workers hold the old code. Probe a free port (default 8000 is commonly taken):
+`$TOOL` and `$ARGS_JSON` came from the meta file in Phase 2. Restart the server because old workers hold the old code. Probe a free port (default 8000 is commonly taken):
 
 ```bash
 PORT=8765
 while lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; do PORT=$((PORT+1)); done
 uv run -m linkedin_mcp_server --transport streamable-http --port $PORT --log-level INFO > /tmp/verify-pr-$PR.log 2>&1 &
 SERVER_PID=$!
-sleep 8
+
+# Wait for the port to actually start LISTENing (cap 30s) — a blind sleep would
+# let a startup crash silently become a "does not fix" verdict.
+for i in $(seq 1 30); do
+  lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 && break
+  kill -0 $SERVER_PID 2>/dev/null || { echo "Server died during startup. Tail of /tmp/verify-pr-$PR.log:" >&2; tail -20 /tmp/verify-pr-$PR.log >&2; exit 1; }
+  sleep 1
+done
+lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 || { echo "Server never bound port $PORT after 30s" >&2; tail -20 /tmp/verify-pr-$PR.log >&2; exit 1; }
 
 curl -s -D /tmp/verify-pr-$PR-headers -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
@@ -67,21 +91,22 @@ curl -s -D /tmp/verify-pr-$PR-headers -X POST http://127.0.0.1:$PORT/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"verify-pr","version":"1.0"}}}' > /dev/null
 
 SESSION_ID=$(grep -i 'Mcp-Session-Id' /tmp/verify-pr-$PR-headers | awk '{print $2}' | tr -d '\r')
+[ -z "$SESSION_ID" ] && { echo "MCP initialize returned no Mcp-Session-Id. Tail of /tmp/verify-pr-$PR.log:" >&2; tail -20 /tmp/verify-pr-$PR.log >&2; kill $SERVER_PID 2>/dev/null; exit 1; }
 
 # notifications/initialized often replies with a pydantic validation error.
-# Harmless — same session ID still works for tools/call.
+# Harmless, same session ID still works for tools/call.
 curl -s -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
   -d '{"jsonrpc":"2.0","id":2,"method":"notifications/initialized","params":{}}' > /dev/null
 
-# Same tool + args as baseline:
+# Same tool + args as baseline, pulled verbatim from /tmp/repro-issue-$ISSUE-meta.json:
 curl -s -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"<TOOL>","arguments":{<ARGS>}}}' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"$TOOL\",\"arguments\":$ARGS_JSON}}" \
   | tee /tmp/verify-pr-$PR.json | head -200
 
 kill $SERVER_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null
@@ -136,10 +161,10 @@ Then one short paragraph: what the PR actually changes, why it does/doesn't addr
 ## Phase 8 — Cleanup
 
 ```bash
-git checkout "$CURRENT_BRANCH"
+git checkout "$CURRENT_REF"
 git branch -D pr-$PR 2>/dev/null
 rm -f /tmp/verify-pr-$PR.json /tmp/verify-pr-$PR-headers /tmp/verify-pr-$PR.log /tmp/pr-$PR-meta.json
-# Keep /tmp/repro-issue-$ISSUE-main.json so the user can re-verify against another PR later.
+# Keep /tmp/repro-issue-$ISSUE-main.json + meta.json so the user can re-verify against another PR later.
 ```
 
 Leave the user on the branch they started on, with a clean working tree.

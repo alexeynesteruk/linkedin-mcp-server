@@ -48,7 +48,7 @@ For every open PR, on top of its linked-issue score:
 
 - **Mergeability**: `mergeable: MERGEABLE` + `mergeStateStatus: CLEAN` + `statusCheckRollup` all green → ✓. Otherwise note what blocks (CI red, conflicts, requested changes, draft).
 - **Scope**: `additions + deletions` and `changedFiles`. Flag scope creep — does it touch unrelated files? Cross-check `gh pr diff <N> --name-only`.
-- **Locale + DOM safety audit**: do `gh pr diff <N> | grep -E '"(Connect|Follow|Message|Pending|1st|2nd|3rd)"'` — any string match on locale-dependent button text is a red flag per `CLAUDE.md → Scraping Rules → detection must be locale-independent`. Also flag class-name selectors (`.entity-result__item`) — minimal generic selectors only.
+- **Locale + DOM safety audit**: do `gh pr diff <N> | grep -E "['\"](Connect|Follow|Message|Pending|1st|2nd|3rd)['\"]"` (matches both Python-style `'Connect'` and JS/Go-style `"Connect"`). Any string match on locale-dependent button text is a red flag per `CLAUDE.md → Scraping Rules → detection must be locale-independent`. Also flag class-name selectors (`.entity-result__item`), minimal generic selectors only.
 - **One-section-one-navigation**: if the PR touches `PERSON_SECTIONS` / `COMPANY_SECTIONS` in `scraping/fields.py`, check that each entry still maps to exactly one URL.
 - **Test coverage**: does the diff add a test in `tests/test_scraping.py`? Mandatory for new tool surfaces, strongly preferred for bug fixes.
 - **Contributor audit**:

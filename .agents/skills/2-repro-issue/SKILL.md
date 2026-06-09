@@ -11,7 +11,9 @@ Goal: take an issue number, run the exact failing tool call against the real Lin
 ## Phase 1 — Read and map
 
 ```bash
-NUM="$ARGUMENTS"
+# Accept "442", "#442", or "https://github.com/.../issues/442" — extract the digits only
+NUM=$(echo "$ARGUMENTS" | sed -E 's|.*/||; s|#||g' | grep -oE '^[0-9]+' | head -1)
+[ -z "$NUM" ] && { echo "Invalid input: '$ARGUMENTS'. Pass an issue number or URL." >&2; exit 1; }
 REPO=stickerdaniel/linkedin-mcp-server
 
 gh issue view $NUM --repo $REPO --comments
@@ -58,11 +60,20 @@ echo $PORT > /tmp/repro-$NUM.port
 # Start in background
 uv run -m linkedin_mcp_server --transport streamable-http --port $PORT --log-level INFO > /tmp/repro-$NUM.log 2>&1 &
 SERVER_PID=$!
-sleep 8
-echo "Server PID: $SERVER_PID  Port: $PORT"
+echo $SERVER_PID > /tmp/repro-$NUM.pid
+
+# Wait for the port to actually start LISTENing instead of a blind sleep.
+# Cap at ~30s so a stuck startup doesn't hang the run.
+for i in $(seq 1 30); do
+  lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 && break
+  kill -0 $SERVER_PID 2>/dev/null || { echo "Server died during startup. Tail of /tmp/repro-$NUM.log:" >&2; tail -20 /tmp/repro-$NUM.log >&2; exit 1; }
+  sleep 1
+done
+lsof -nP -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1 || { echo "Server never bound port $PORT after 30s" >&2; tail -20 /tmp/repro-$NUM.log >&2; exit 1; }
+echo "Server PID: $SERVER_PID  Port: $PORT  Ready"
 ```
 
-If `/tmp/repro-$NUM.log` shows login failure or browser issues, stop and report — do not try to brute-force around it.
+If `/tmp/repro-$NUM.log` shows login failure or browser issues, stop and report, do not try to brute-force around it.
 
 ## Phase 4 — Initialize MCP session
 
@@ -86,14 +97,21 @@ The `notifications/initialized` post often returns `{"error":{"code":-32602,"mes
 
 ## Phase 5 — Call the failing tool
 
-Substitute the tool name and arguments from Phase 1 verbatim. Save the full response to a stable path so `/3-verify-pr-fix` can pick it up later.
+Substitute the tool name and arguments from Phase 1 verbatim. Save the response to a stable path **and** persist the request metadata so `/3-verify-pr-fix` can replay the exact same call without guessing.
 
 ```bash
+TOOL="<TOOL>"                 # e.g. get_person_profile
+ARGS_JSON='{<ARGS>}'           # e.g. {"linkedin_username":"williamhgates","sections":"basic_info"}
+
+# Persist what we are about to call so the verifier can re-run identically
+jq -n --arg t "$TOOL" --argjson a "$ARGS_JSON" '{tool: $t, arguments: $a}' \
+  > /tmp/repro-issue-$NUM-meta.json
+
 curl -s -X POST http://127.0.0.1:$PORT/mcp \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "Mcp-Session-Id: $SESSION_ID" \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"<TOOL>","arguments":{<ARGS>}}}' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"$TOOL\",\"arguments\":$ARGS_JSON}}" \
   | tee /tmp/repro-issue-$NUM-main.json | head -200
 ```
 
@@ -125,8 +143,9 @@ Locate the failure in code:
 ```bash
 kill $SERVER_PID 2>/dev/null
 wait $SERVER_PID 2>/dev/null
-rm -f /tmp/repro-$NUM-headers /tmp/repro-$NUM.log /tmp/repro-$NUM.port
-# Keep /tmp/repro-issue-$NUM-main.json — /3-verify-pr-fix uses it as baseline.
+rm -f /tmp/repro-$NUM-headers /tmp/repro-$NUM.log /tmp/repro-$NUM.port /tmp/repro-$NUM.pid
+# Keep /tmp/repro-issue-$NUM-main.json (response baseline) and
+# /tmp/repro-issue-$NUM-meta.json (tool + args) — /3-verify-pr-fix uses both.
 ```
 
 Report format:
