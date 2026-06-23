@@ -22,7 +22,7 @@ An MCP server that lets AI assistants like Claude read LinkedIn data through you
   </a>
 </p>
 
-This MCP server is **free** and **open source**, supported by [**Unipile**](https://golink.onl/unipile-link). It runs locally with your own browser session. Unipile is the fully managed cloud alternative: a LinkedIn API for Classic, Sales Navigator, and Recruiter that handles all the infrastructure for you, with white-label auth (credential login without an extension, captcha solving, in-app validation, OTP/2FA, geo proxies), real-time webhooks, profile/company/post extraction and search, and outreach sequences (invitations, InMail, messages, post comments). [Try every feature free for 7 days →](https://golink.onl/unipile-free-trial)
+This MCP server is **free** and **open source**, supported by [**Unipile**](https://golink.onl/unipile-link). It runs locally with your own browser session. Unipile is the fully managed cloud alternative: a hosted LinkedIn API for Classic, Sales Navigator, and Recruiter that handles auth, sessions, and infrastructure for you. [Try it free for 7 days →](https://golink.onl/unipile-free-trial)
 
 ---
 
