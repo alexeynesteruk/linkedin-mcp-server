@@ -228,7 +228,7 @@ class TestExtractPage:
         assert result.error == {"issue_template_path": "/tmp/issue.md"}
 
     async def test_extract_page_raises_auth_error_for_account_picker(self, mock_page):
-        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_NAME_NOT_RESOLVED"))
         extractor = LinkedInExtractor(mock_page)
 
         with (
@@ -408,7 +408,7 @@ class TestNavigationDiagnostics:
 
         async def goto_side_effect(*args, **kwargs):
             if mock_page.goto.await_count == 1:
-                raise Exception("net::ERR_TOO_MANY_REDIRECTS")
+                raise Exception("net::ERR_NAME_NOT_RESOLVED")
             return None
 
         mock_page.goto = AsyncMock(side_effect=goto_side_effect)
@@ -476,7 +476,7 @@ class TestNavigationDiagnostics:
         extractor = LinkedInExtractor(mock_page)
         mock_page.goto = AsyncMock(
             side_effect=[
-                Exception("net::ERR_TOO_MANY_REDIRECTS"),
+                Exception("net::ERR_NAME_NOT_RESOLVED"),
                 Exception("retry failed"),
             ]
         )
@@ -512,12 +512,12 @@ class TestNavigationDiagnostics:
         )
         assert (
             trace_call.kwargs["extra"]["error"]
-            == "Exception: net::ERR_TOO_MANY_REDIRECTS"
+            == "Exception: net::ERR_NAME_NOT_RESOLVED"
         )
 
     async def test_goto_with_auth_checks_logs_failure_context(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
-        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS"))
+        mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_NAME_NOT_RESOLVED"))
 
         with (
             patch(
@@ -535,7 +535,7 @@ class TestNavigationDiagnostics:
                 "_log_navigation_failure",
                 new_callable=AsyncMock,
             ) as mock_log_failure,
-            pytest.raises(Exception, match="ERR_TOO_MANY_REDIRECTS"),
+            pytest.raises(Exception, match="ERR_NAME_NOT_RESOLVED"),
         ):
             await extractor._goto_with_auth_checks(
                 "https://www.linkedin.com/in/testuser/"
