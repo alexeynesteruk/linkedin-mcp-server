@@ -211,7 +211,7 @@ def register_person_tools(
         Returns:
             Dict with url, status, message, and note_sent.
             Statuses: pending, already_connected, follow_only,
-            connect_unavailable, unavailable, send_failed,
+            connect_unavailable, note_required, unavailable, send_failed,
             note_not_supported, custom_note_limit_reached,
             connected, or accepted.
 

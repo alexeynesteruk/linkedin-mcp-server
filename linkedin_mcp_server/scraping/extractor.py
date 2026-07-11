@@ -94,6 +94,17 @@ _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
 _NETWORK_TOKENS = ("F", "S", "O")
 
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
+# Invite/custom-invite dialogs expose a textarea; the messaging overlay is a
+# contenteditable textbox inside [role="dialog"] (#432).
+_INVITE_DIALOG_SELECTOR = (
+    '[role="dialog"]:not(:has(div[role="textbox"][contenteditable="true"])), '
+    "dialog:not(:has(div[role=\"textbox\"][contenteditable=\"true\"]))"
+)
+_INVITE_DIALOG_BUTTONS_SELECTOR = (
+    f"{_INVITE_DIALOG_SELECTOR} button, "
+    f"{_INVITE_DIALOG_SELECTOR} [role='button']"
+)
+_INVITE_DIALOG_TEXTAREA_SELECTOR = f"{_INVITE_DIALOG_SELECTOR} textarea"
 _DIALOG_PREMIUM_LINK_SELECTOR = (
     'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
 )
@@ -966,16 +977,43 @@ class LinkedInExtractor:
         except Exception:
             return False
 
+    async def _invite_dialog_is_open(self, *, timeout: int = 1000) -> bool:
+        """Return whether an invite (non-messaging) dialog is open."""
+        locator = self._page.locator(_INVITE_DIALOG_SELECTOR)
+        try:
+            if await locator.count() == 0:
+                return False
+            await locator.first.wait_for(state="visible", timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    async def _invite_primary_button_disabled(self) -> bool:
+        """True when the invite dialog's primary action is disabled (#407)."""
+        buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
+        try:
+            count = await buttons.count()
+        except Exception:
+            return False
+        if count == 0:
+            return False
+        primary = buttons.nth(count - 1)
+        try:
+            if await primary.is_disabled():
+                return True
+        except Exception:
+            pass
+        aria_disabled = await primary.get_attribute("aria-disabled")
+        return aria_disabled == "true"
+
     async def _click_dialog_primary_button(self, *, timeout: int = 5000) -> bool:
-        """Click the last (primary/Send) button in the open dialog.
+        """Click the last (primary/Send) button in the open invite dialog.
 
         LinkedIn consistently places the primary action as the last button.
         Returns False (rather than raising) when the click is intercepted or
         times out, so callers can fall back to a keyboard submit.
         """
-        buttons = self._page.locator(
-            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-        )
+        buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
         count = await buttons.count()
         if count == 0:
             return False
@@ -987,10 +1025,10 @@ class LinkedInExtractor:
             return False
 
     async def _fill_dialog_textarea(self, value: str, *, timeout: int = 5000) -> bool:
-        """Fill the first textarea inside the open dialog (structural)."""
-        locator = self._page.locator(_DIALOG_TEXTAREA_SELECTOR).first
+        """Fill the first textarea inside the open invite dialog (structural)."""
+        locator = self._page.locator(_INVITE_DIALOG_TEXTAREA_SELECTOR).first
         try:
-            if await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count() == 0:
+            if await self._page.locator(_INVITE_DIALOG_TEXTAREA_SELECTOR).count() == 0:
                 return False
             await locator.fill(value, timeout=timeout)
             return True
@@ -1883,52 +1921,30 @@ class LinkedInExtractor:
 
     async def _submit_invite_dialog(
         self, note: str | None
-    ) -> tuple[bool, bool, str | None]:
+    ) -> tuple[bool, bool, str | None, str | None]:
         """Submit the invite dialog opened by the custom-invite deeplink.
 
-        Returns ``(submitted, note_sent, note_limit_message)``.
+        Returns ``(submitted, note_sent, note_limit_message, block_reason)``.
 
-        ``note_sent`` reports *delivery*, not textarea fill — it stays
-        False on any failure path, including the Premium upsell that
-        LinkedIn shows when the free personalized-note quota is exhausted.
-        ``note_limit_message`` is the raw LinkedIn Premium dialog text when
-        the upsell was detected; in that case ``submitted`` is False, the
-        dialog is dismissed, and callers should surface that text directly.
-
-        All interaction uses structural selectors and positional indexing
-        — no localized text matching. Owns dialog cleanup: the dialog is
-        dismissed on every failure path, callers must not dismiss again.
+        ``block_reason`` is ``"note_required"`` when LinkedIn disables Send
+        until a personalized note is provided (#407).
         """
-        if not await self._dialog_is_open(timeout=5000):
-            return False, False, None
+        if not await self._invite_dialog_is_open(timeout=5000):
+            return False, False, None, None
 
         note_filled = False
         if note:
-            textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
+            textarea_count = await self._page.locator(
+                _INVITE_DIALOG_TEXTAREA_SELECTOR
+            ).count()
             if textarea_count == 0:
-                # Reveal the note textarea via the secondary action.
-                # Two layouts are now in the wild and both place "Add a
-                # note" at index ``btn_count - 2``:
-                #   * Legacy invite dialog (3 buttons): dismiss, secondary
-                #     "Add a note", primary "Send" -> nth(1) is secondary.
-                #   * "Add a note to your invitation?" gating dialog (2
-                #     buttons, rolled out 2026-05): "Add a note",
-                #     "Send without a note" -> nth(0) is the only path
-                #     that mounts the textarea. See issue #455.
-                # If LinkedIn ever serves a 2-button dismiss/primary
-                # no-note layout, the click below misroutes to dismiss;
-                # the textarea-presence recheck via _fill_dialog_textarea
-                # then fails and the caller returns connect_unavailable
-                # without sending — the same outcome as today.
-                buttons = self._page.locator(
-                    f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-                )
+                buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
                 btn_count = await buttons.count()
                 if btn_count >= 2:
                     await buttons.nth(btn_count - 2).click()
                     try:
                         await self._page.wait_for_selector(
-                            _DIALOG_TEXTAREA_SELECTOR,
+                            _INVITE_DIALOG_TEXTAREA_SELECTOR,
                             state="visible",
                             timeout=3000,
                         )
@@ -1938,7 +1954,7 @@ class LinkedInExtractor:
                     if note_limit_message is not None:
                         logger.info("Premium upsell blocked opening invite note editor")
                         await self._dismiss_dialog()
-                        return False, False, note_limit_message
+                        return False, False, note_limit_message, None
 
             note_filled = await self._fill_dialog_textarea(note)
             if not note_filled:
@@ -1946,34 +1962,26 @@ class LinkedInExtractor:
                 if note_limit_message is not None:
                     logger.info("Premium upsell blocked filling invite note")
                     await self._dismiss_dialog()
-                    return False, False, note_limit_message
+                    return False, False, note_limit_message, None
                 await self._dismiss_dialog()
-                return False, False, None
+                return False, False, None, None
+
+        if not note and await self._invite_primary_button_disabled():
+            await self._dismiss_dialog()
+            return False, False, None, "note_required"
 
         sent = await self._click_dialog_primary_button()
         if not sent:
-            # Fallback: focus the primary button positionally so a subsequent
-            # Enter targets it instead of a focused textarea (where Enter
-            # would just insert a newline).
-            buttons = self._page.locator(
-                f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-            )
+            buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
             btn_count = await buttons.count()
             if btn_count > 0:
                 try:
                     await buttons.nth(btn_count - 1).focus()
                     await self._page.keyboard.press("Enter")
-                    sent = not await self._dialog_is_open(timeout=2000)
+                    sent = not await self._invite_dialog_is_open(timeout=2000)
                 except Exception:
                     logger.debug("Keyboard submit fallback failed", exc_info=True)
             if not sent:
-                # The Send click can also fail because LinkedIn swapped the
-                # invite dialog for the Premium upsell at submit time — the
-                # original primary button is then detached or pointer-event
-                # covered, so the click raises or times out. Check for the
-                # upsell here so we surface the raw note-limit message
-                # instead of dismissing silently and returning
-                # connect_unavailable.
                 if note:
                     note_limit_message = await self._get_premium_upsell_message()
                     if note_limit_message is not None:
@@ -1981,28 +1989,25 @@ class LinkedInExtractor:
                             "Premium upsell modal intercepted invite submit click"
                         )
                         await self._dismiss_dialog()
-                        return False, False, note_limit_message
+                        return False, False, note_limit_message, None
                 await self._dismiss_dialog()
-                return False, False, None
+                return False, False, None, None
 
-        # LinkedIn may swap the invite dialog for a Premium upsell when the
-        # free note quota is exhausted. The textarea was filled but the
-        # invite was not delivered — surface LinkedIn's raw dialog text.
         if note:
             note_limit_message = await self._get_premium_upsell_message()
             if note_limit_message is not None:
                 logger.info("Premium upsell modal intercepted invite submit")
                 await self._dismiss_dialog()
-                return False, False, note_limit_message
+                return False, False, note_limit_message, None
 
         try:
             await self._page.wait_for_selector(
-                _DIALOG_SELECTOR, state="hidden", timeout=5000
+                _INVITE_DIALOG_SELECTOR, state="hidden", timeout=5000
             )
         except PlaywrightTimeoutError:
             logger.debug("Invite dialog did not close after submit")
 
-        return True, note_filled, None
+        return True, note_filled, None, None
 
     async def _probe_invite_note_limit(self) -> str | None:
         """Open the note editor only to read a Premium note-quota message.
@@ -2015,7 +2020,7 @@ class LinkedInExtractor:
         text if LinkedIn shows it while opening the note editor, then
         dismisses the dialog.
         """
-        if not await self._dialog_is_open(timeout=5000):
+        if not await self._invite_dialog_is_open(timeout=5000):
             return None
         note_limit_message = await self._get_premium_upsell_message(timeout=500)
         if note_limit_message is not None:
@@ -2023,16 +2028,16 @@ class LinkedInExtractor:
             return note_limit_message
 
         try:
-            textarea_count = await self._page.locator(_DIALOG_TEXTAREA_SELECTOR).count()
+            textarea_count = await self._page.locator(
+                _INVITE_DIALOG_TEXTAREA_SELECTOR
+            ).count()
         except Exception:
             textarea_count = 0
         if textarea_count > 0:
             await self._dismiss_dialog()
             return None
 
-        buttons = self._page.locator(
-            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-        )
+        buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
         try:
             btn_count = await buttons.count()
         except Exception:
@@ -2044,7 +2049,7 @@ class LinkedInExtractor:
                 logger.debug("Could not open invite note editor", exc_info=True)
             try:
                 await self._page.wait_for_selector(
-                    _DIALOG_TEXTAREA_SELECTOR,
+                    _INVITE_DIALOG_TEXTAREA_SELECTOR,
                     state="visible",
                     timeout=3000,
                 )
@@ -2077,6 +2082,8 @@ class LinkedInExtractor:
         or buried under the More menu.
         """
         from linkedin_mcp_server.scraping.connection import detect_connection_state
+
+        await self._reset_stale_messaging_ui()
 
         url = f"https://www.linkedin.com/in/{username}/"
 
@@ -2184,12 +2191,12 @@ class LinkedInExtractor:
             f"?vanityName={quote_plus(username)}"
         )
 
-        # Write-gate: submit only when LinkedIn exposed the vanityName invite
-        # anchor. When a note is requested without that anchor, open the
-        # deeplink only as a non-submitting probe so we can report the Premium
-        # note-quota block without accidentally sending from a follow-only or
-        # otherwise unavailable profile.
-        if not signals.has_invite_anchor:
+        # Write-gate: submit when LinkedIn exposed the vanityName invite
+        # anchor, or when detection was inconclusive but the deeplink may
+        # still open an invite dialog (#454).
+        can_use_deeplink = signals.has_invite_anchor or state == "unavailable"
+
+        if not can_use_deeplink:
             if note:
                 logger.info(
                     "No visible invite anchor for %s; probing custom-invite deeplink "
@@ -2215,9 +2222,16 @@ class LinkedInExtractor:
 
         await self._navigate_to_page(invite_url)
 
-        submitted, note_sent, note_limit_message = await self._submit_invite_dialog(
-            note
+        submitted, note_sent, note_limit_message, block_reason = (
+            await self._submit_invite_dialog(note)
         )
+        if block_reason == "note_required":
+            return _connection_result(
+                url,
+                "note_required",
+                "LinkedIn requires a personalized note for this profile.",
+                profile=page_text,
+            )
         if note_limit_message is not None:
             return _connection_result(
                 url,
@@ -2227,10 +2241,20 @@ class LinkedInExtractor:
                 profile=page_text,
             )
         if not submitted:
+            if await self._invite_dialog_is_open(timeout=1000):
+                failure_message = (
+                    "LinkedIn opened the invite dialog but could not submit the invitation."
+                    if note
+                    else "LinkedIn opened the invite dialog but Send is disabled."
+                )
+            else:
+                failure_message = (
+                    "LinkedIn did not open a usable invite dialog for this profile."
+                )
             return _connection_result(
                 url,
                 "connect_unavailable",
-                "LinkedIn did not open a usable invite dialog for this profile.",
+                failure_message,
                 profile=page_text,
             )
 
@@ -2683,8 +2707,128 @@ class LinkedInExtractor:
         )
         return bool(matched)
 
+    async def _reset_stale_messaging_ui(self) -> None:
+        """Close leftover messaging overlays before connect/send (#432, #433)."""
+        await self._dismiss_message_ui()
+        for _ in range(2):
+            try:
+                await self._page.keyboard.press("Escape")
+            except Exception:
+                logger.debug("Escape while resetting messaging UI failed", exc_info=True)
+            await asyncio.sleep(0.25)
+
+    async def _type_message_in_compose(self, message: str) -> None:
+        """Type into the focused compose box; Shift+Enter for line breaks (#441)."""
+        for char in message:
+            if char == "\n":
+                await self._page.keyboard.down("Shift")
+                await self._page.keyboard.press("Enter")
+                await self._page.keyboard.up("Shift")
+            else:
+                await self._page.keyboard.type(char, delay=15)
+
+    async def _dismiss_share_profile_prompt(self) -> None:
+        """Decline post-send share-profile/contact-info prompts (#573)."""
+        try:
+            await self._page.evaluate(
+                """() => {
+                    const dialogs = Array.from(
+                        document.querySelectorAll('[role="dialog"], dialog')
+                    );
+                    for (const dialog of dialogs) {
+                        const buttons = Array.from(
+                            dialog.querySelectorAll('button, [role="button"]')
+                        );
+                        if (buttons.length >= 2) {
+                            const dismiss = buttons[0];
+                            if (dismiss && !dismiss.disabled) {
+                                dismiss.click();
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }"""
+            )
+        except Exception:
+            logger.debug("Could not dismiss share-profile prompt", exc_info=True)
+        await asyncio.sleep(0.5)
+
+    async def _focus_message_compose_box(self) -> bool:
+        """Focus the visible message compose textbox via JavaScript."""
+        return bool(
+            await self._page.evaluate(
+                """() => {
+                    const el = document.querySelector(
+                        'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
+                        + 'div[role="textbox"][contenteditable="true"]'
+                    );
+                    if (!el) return false;
+                    el.focus();
+                    return true;
+                }"""
+            )
+        )
+
+    async def _click_message_send_button(self) -> bool:
+        """Click a visible enabled send button, or return False for Enter fallback."""
+        return bool(
+            await self._page.evaluate(
+                """() => {
+                    const btn = Array.from(document.querySelectorAll(
+                        'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
+                        + 'button[data-control-name="send"]'
+                    )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
+                    if (!btn) return false;
+                    btn.click();
+                    return true;
+                }"""
+            )
+        )
+
+    async def _submit_compose_message(
+        self,
+        page_url: str,
+        message: str,
+        *,
+        recipient_selected: bool,
+        success_message: str,
+    ) -> dict[str, Any]:
+        """Focus, type, send, and verify a message from the active composer."""
+        if not await self._focus_message_compose_box():
+            await self._reset_stale_messaging_ui()
+            return self._message_action_result(
+                page_url,
+                "compose_interact_failed",
+                "Could not focus compose box via JavaScript.",
+                recipient_selected=recipient_selected,
+            )
+        await asyncio.sleep(0.1)
+        await self._type_message_in_compose(message)
+        await asyncio.sleep(0.3)
+        await asyncio.sleep(1.0)
+        if not await self._click_message_send_button():
+            await self._page.keyboard.press("Enter")
+        await self._dismiss_share_profile_prompt()
+        if not await self._message_text_visible(message):
+            await self._reset_stale_messaging_ui()
+            return self._message_action_result(
+                page_url,
+                "send_unavailable",
+                "LinkedIn did not confirm that the message was sent.",
+                recipient_selected=recipient_selected,
+            )
+        await self._reset_stale_messaging_ui()
+        return self._message_action_result(
+            page_url,
+            "sent",
+            success_message,
+            recipient_selected=recipient_selected,
+            sent=True,
+        )
+
     async def _message_text_visible(self, message: str) -> bool:
-        """Wait until the compose page visibly contains the just-sent message text.
+        """Wait until the sent message appears outside the active composer (#573).
 
         Uses the page-level default timeout (``BrowserConfig.default_timeout``).
         """
@@ -2693,8 +2837,22 @@ class LinkedInExtractor:
                 """({ expected }) => {
                     const normalize = value =>
                         (value || '').replace(/\\s+/g, ' ').trim();
-                    const bodyText = normalize(document.body?.innerText || '');
-                    return bodyText.includes(normalize(expected));
+                    const expectedNorm = normalize(expected);
+                    if (!expectedNorm) return false;
+
+                    const compose = document.querySelector(
+                        'div[role="textbox"][contenteditable="true"]'
+                    );
+                    const composeText = normalize(
+                        compose?.innerText || compose?.textContent || ''
+                    );
+                    if (composeText && composeText.includes(expectedNorm)) {
+                        return false;
+                    }
+
+                    const main = document.querySelector('main') || document.body;
+                    const threadText = normalize(main?.innerText || '');
+                    return threadText.includes(expectedNorm);
                 }""",
                 arg={"expected": message},
             )
@@ -3821,6 +3979,55 @@ class LinkedInExtractor:
             references=references,
         )
 
+    async def _reply_in_thread(
+        self,
+        thread_id: str,
+        message: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Reply inline on an existing thread page (#483)."""
+        thread_url = f"https://www.linkedin.com/messaging/thread/{thread_id}/"
+        await self._reset_stale_messaging_ui()
+        await self._navigate_to_page(thread_url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Thread page did not load for thread_id=%s", thread_id)
+            return self._message_action_result(
+                thread_url,
+                "send_failed",
+                "Thread page did not load.",
+            )
+
+        await handle_modal_close(self._page)
+        await self._wait_for_conversation_body()
+
+        if await self._resolve_message_compose_box() is None:
+            return self._message_action_result(
+                thread_url,
+                "composer_unavailable",
+                "LinkedIn did not expose a usable reply composer on the thread page.",
+            )
+
+        if not confirm_send:
+            await self._reset_stale_messaging_ui()
+            return self._message_action_result(
+                thread_url,
+                "confirmation_required",
+                "Set confirm_send=true to send the message.",
+                recipient_selected=True,
+            )
+
+        return await self._submit_compose_message(
+            thread_url,
+            message,
+            recipient_selected=True,
+            success_message="Reply sent.",
+        )
+
     async def send_message(
         self,
         linkedin_username: str,
@@ -3828,16 +4035,25 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
         """Send a message to a LinkedIn user with explicit confirmation gating.
 
-        Args:
-            linkedin_username: LinkedIn username of the recipient.
-            message: The message text to send.
-            confirm_send: Must be True to actually send (False does a dry run).
-            profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
-                compose URL directly, bypassing the Message-button lookup.
+        When ``thread_id`` is provided, replies inline to that existing thread
+        instead of opening a profile compose overlay (#483). Profile-based
+        sending may create a separate DM rather than replying to an InMail
+        thread — pass ``thread_id`` from ``get_conversation`` or
+        ``search_conversations`` to reply safely.
         """
+        if thread_id:
+            return await self._reply_in_thread(
+                thread_id,
+                message,
+                confirm_send=confirm_send,
+            )
+
+        await self._reset_stale_messaging_ui()
+
         profile_url = f"https://www.linkedin.com/in/{linkedin_username}/"
         await self._navigate_to_page(profile_url)
         await detect_rate_limit(self._page)
@@ -3900,7 +4116,7 @@ class LinkedInExtractor:
                 recipient_selected,
             )
             if not recipient_selected:
-                await self._dismiss_message_ui()
+                await self._reset_stale_messaging_ui()
                 return self._message_action_result(
                     self._page.url,
                     "recipient_resolution_failed",
@@ -3915,7 +4131,7 @@ class LinkedInExtractor:
 
         compose_box = await self._resolve_message_compose_box()
         if compose_box is None:
-            await self._dismiss_message_ui()
+            await self._reset_stale_messaging_ui()
             return self._message_action_result(
                 self._page.url,
                 "composer_unavailable",
@@ -3936,7 +4152,7 @@ class LinkedInExtractor:
                 "Recipient match still failed for %s after compose hydration",
                 linkedin_username,
             )
-            await self._dismiss_message_ui()
+            await self._reset_stale_messaging_ui()
             return self._message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
@@ -3946,7 +4162,7 @@ class LinkedInExtractor:
         recipient_selected = True
 
         if not confirm_send:
-            await self._dismiss_message_ui()
+            await self._reset_stale_messaging_ui()
             return self._message_action_result(
                 self._page.url,
                 "confirmation_required",
@@ -3954,76 +4170,11 @@ class LinkedInExtractor:
                 recipient_selected=recipient_selected,
             )
 
-        # patchright quirk: compose_box.click() and press_sequentially() use
-        # actionability checks internally and hit the same wait_for timeout.
-        # Instead: focus via page.evaluate() (no actionability check) and type
-        # via page.keyboard.type() which operates on the active element directly
-        # and fires the real keydown/input/keyup events React needs to enable Send.
-        #
-        # DOM dependency: innerText extraction is not applicable here — we need
-        # to call .focus() on the element reference, which requires querySelector.
-        # Selectors use only role + contenteditable + aria-label (ARIA attributes,
-        # not layout class names) so they are stable across LinkedIn UI changes.
-        focused = await self._page.evaluate(
-            """() => {
-                const el = document.querySelector(
-                    'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"],'
-                    + 'div[role="textbox"][contenteditable="true"]'
-                );
-                if (!el) return false;
-                el.focus();
-                return true;
-            }"""
-        )
-        if not focused:
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "compose_interact_failed",
-                "Could not focus compose box via JavaScript.",
-                recipient_selected=recipient_selected,
-            )
-        await asyncio.sleep(0.1)
-        await self._page.keyboard.type(message, delay=15)
-        await asyncio.sleep(0.3)
-
-        # patchright actionability also blocks send_button.click(). Use JS click
-        # on any visible, enabled send button; fall back to Enter key which
-        # LinkedIn's composer also accepts for submission.
-        #
-        # DOM dependency: we need btn.click() on the element reference — not
-        # achievable via innerText or URL navigation. Selectors use only type,
-        # aria-label, and data attributes (no layout class names).
-        await asyncio.sleep(1.0)  # allow React to process keyboard input
-        sent_via_js = await self._page.evaluate(
-            """() => {
-                const btn = Array.from(document.querySelectorAll(
-                    'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
-                    + 'button[data-control-name="send"]'
-                )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
-                if (!btn) return false;
-                btn.click();
-                return true;
-            }"""
-        )
-        if not sent_via_js:
-            await self._page.keyboard.press("Enter")
-
-        if not await self._message_text_visible(message):
-            await self._dismiss_message_ui()
-            return self._message_action_result(
-                self._page.url,
-                "send_unavailable",
-                "LinkedIn did not confirm that the message was sent.",
-                recipient_selected=recipient_selected,
-            )
-
-        return self._message_action_result(
+        return await self._submit_compose_message(
             self._page.url,
-            "sent",
-            "Message sent.",
+            message,
             recipient_selected=recipient_selected,
-            sent=True,
+            success_message="Message sent.",
         )
 
     async def _extract_root_content(

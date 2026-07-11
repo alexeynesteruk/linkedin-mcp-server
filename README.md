@@ -28,12 +28,12 @@ An MCP server that lets AI assistants like Claude read LinkedIn data through you
 | `linkedin_ping` | Capability discovery — lists all registered tools (legacy + `linkedin_*` aliases) | working |
 | `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) | working |
 | `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) | working |
-| `connect_with_person` | Send a connection request or accept an incoming one, with optional note | [#407](https://github.com/stickerdaniel/linkedin-mcp-server/issues/407) [#432](https://github.com/stickerdaniel/linkedin-mcp-server/issues/432) [#454](https://github.com/stickerdaniel/linkedin-mcp-server/issues/454) |
+| `connect_with_person` | Send a connection request or accept an incoming one, with optional note | working |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
 | `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID | working |
 | `search_conversations` | Search messages by keyword | working |
-| `send_message` | Send a message to a LinkedIn user (requires confirmation) | [#433](https://github.com/stickerdaniel/linkedin-mcp-server/issues/433) [#441](https://github.com/stickerdaniel/linkedin-mcp-server/issues/441) [#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483) [#560](https://github.com/stickerdaniel/linkedin-mcp-server/issues/560) [#573](https://github.com/stickerdaniel/linkedin-mcp-server/issues/573) |
+| `send_message` | Send a message or reply to an existing thread via `thread_id` (requires confirmation). Profile-based sends compose a new DM; use `thread_id` to reply in InMail/recruiter threads | working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet | working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_companies` | Search for companies on LinkedIn by keywords | working |
@@ -47,6 +47,8 @@ An MCP server that lets AI assistants like Claude read LinkedIn data through you
 Each scraper tool is also registered under a `linkedin_*` alias (for example `linkedin_get_person_profile`) so agent clients can use a consistent prefix without breaking existing integrations.
 
 **`search_jobs` response:** besides raw text in `sections.search_results`, each call returns `job_ids` (numeric strings for `get_job_details`) and `job_listings` — structured card metadata per result: `job_id`, `title`, `company`, `location`, `work_type`, `pay`, `benefits`, `easy_apply`, `status`. Card metadata heuristics are English-only today; `job_id` and `title` are locale-independent.
+
+**`send_message` threading:** profile-based sends open a compose overlay and may create a separate DM. To reply to an existing InMail or recruiter thread, pass `thread_id` from `get_conversation` or `search_conversations`.
 
 ### Browser profile & session lifecycle
 

@@ -1028,7 +1028,7 @@ class TestConnectWithPerson:
             ) as mock_nav,
             patch.object(
                 extractor,
-                "_dialog_is_open",
+                "_invite_dialog_is_open",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -1064,7 +1064,7 @@ class TestConnectWithPerson:
             ),
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
-                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
             patch.object(
                 extractor,
@@ -1124,7 +1124,7 @@ class TestConnectWithPerson:
 
         with (
             patch.object(
-                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
             patch.object(
                 extractor,
@@ -1142,6 +1142,7 @@ class TestConnectWithPerson:
             False,
             False,
             "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
+            None,
         )
         add_note_button.click.assert_awaited_once()
         mock_message.assert_awaited_once()
@@ -1186,7 +1187,7 @@ class TestConnectWithPerson:
         with (
             patch.object(
                 extractor,
-                "_dialog_is_open",
+                "_invite_dialog_is_open",
                 new_callable=AsyncMock,
                 # First call: dialog open at entry. Second call: still open
                 # after the keyboard fallback, so sent remains False.
@@ -1216,7 +1217,7 @@ class TestConnectWithPerson:
         ):
             result = await extractor._submit_invite_dialog("Hello")
 
-        assert result == (False, False, message)
+        assert result == (False, False, message, None)
         mock_message.assert_awaited_once()
         mock_dismiss.assert_awaited_once()
 
@@ -1235,7 +1236,7 @@ class TestConnectWithPerson:
             ),
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
-                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=False
+                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=False
             ),
             patch.object(extractor, "_dismiss_dialog", new_callable=AsyncMock),
         ):
@@ -1319,7 +1320,7 @@ class TestConnectWithPerson:
             ) as mock_nav,
             patch.object(
                 extractor,
-                "_dialog_is_open",
+                "_invite_dialog_is_open",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
@@ -1654,6 +1655,11 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 return_value=True,
             ),
+            patch.object(
+                extractor,
+                "_reset_stale_messaging_ui",
+                new_callable=AsyncMock,
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
                 new_callable=AsyncMock,
@@ -1662,7 +1668,7 @@ class TestConnectWithPerson:
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "accepted"
-        mock_sleep.assert_awaited_once()
+        mock_sleep.assert_awaited_once_with(3.0)
 
     async def test_returns_unavailable_when_no_signals_and_text(self, mock_page):
         """No structural signals, no actionable text → connect_unavailable."""
@@ -1679,7 +1685,7 @@ class TestConnectWithPerson:
             ),
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
-                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=False
+                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=False
             ),
             patch.object(extractor, "_dismiss_dialog", new_callable=AsyncMock),
         ):
@@ -1765,7 +1771,7 @@ class TestConnectWithPerson:
 
         with (
             patch.object(
-                extractor, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
             patch.object(
                 extractor,
@@ -1778,15 +1784,84 @@ class TestConnectWithPerson:
                 submitted,
                 note_sent,
                 note_limit_message,
+                block_reason,
             ) = await extractor._submit_invite_dialog("Hi from a test")
 
         assert submitted is True
         assert note_sent is True
         assert note_limit_message is None
+        assert block_reason is None
         # Clicked "Add a note" (index 0) to reveal the textarea, then the
         # primary button (index 1) to send.
         assert clicks == [0, 1]
         textarea_locator.fill.assert_awaited_once()
+
+    async def test_connect_unavailable_state_still_uses_deeplink(self, mock_page):
+        """Inconclusive detection still tries the vanityName deeplink (#454)."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 2nd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+        post_text = "Jane\n\n· 2nd\n\nEngineer\n\nMessage\nPending\nMore\nAbout\n"
+
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                self._mock_scrape(text, follow_up_text=post_text),
+            ),
+            patch.object(
+                extractor,
+                "_reset_stale_messaging_ui",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[self._signals(), self._signals()],
+            ),
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(True, False, None, None),
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connected"
+        mock_nav.assert_awaited()
+
+    async def test_connect_note_required_status(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_reset_stale_messaging_ui",
+                new_callable=AsyncMock,
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(invite=True),
+            ),
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(False, False, None, "note_required"),
+            ),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "note_required"
 
     async def test_references_are_grouped_by_section(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -5259,6 +5334,11 @@ class TestSendMessageComposerInteraction:
                 "_dismiss_message_ui",
                 new_callable=AsyncMock,
             ),
+            patch.object(
+                extractor,
+                "_reset_stale_messaging_ui",
+                new_callable=AsyncMock,
+            ),
             patch(
                 "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
                 new_callable=AsyncMock,
@@ -5266,15 +5346,16 @@ class TestSendMessageComposerInteraction:
         )
 
     async def test_focus_and_type_via_evaluate_and_keyboard(self, mock_page):
-        """send_message uses page.evaluate to focus and page.keyboard.type to type."""
+        """send_message delegates to _submit_compose_message after hydration."""
         extractor = LinkedInExtractor(mock_page)
-        mock_keyboard = MagicMock()
-        mock_keyboard.type = AsyncMock()
-        mock_keyboard.press = AsyncMock()
-        mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), True (send button click)
-        mock_page.evaluate = AsyncMock(side_effect=[True, True])
         patches = self._patch_send_message_to_compose(extractor, mock_page)
+        expected = {
+            "url": "https://www.linkedin.com/messaging/compose/?recipient=ACoAAB",
+            "status": "sent",
+            "message": "Message sent.",
+            "recipient_selected": True,
+            "sent": True,
+        }
 
         with (
             patches[0],
@@ -5287,30 +5368,24 @@ class TestSendMessageComposerInteraction:
             patches[7],
             patches[8],
             patches[9],
+            patches[10],
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_submit_compose_message",
                 new_callable=AsyncMock,
-                return_value=True,
-            ),
+                return_value=expected,
+            ) as mock_submit,
         ):
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=True
             )
 
-        assert result["status"] == "sent"
-        assert result["sent"] is True
-        # Verify keyboard.type was used (not press_sequentially)
-        mock_keyboard.type.assert_awaited_once_with("Hello!", delay=15)
+        assert result == expected
+        mock_submit.assert_awaited_once()
 
     async def test_compose_interact_failed_when_focus_fails(self, mock_page):
-        """send_message returns compose_interact_failed when JS focus fails."""
+        """send_message returns compose_interact_failed when focus fails."""
         extractor = LinkedInExtractor(mock_page)
-        mock_keyboard = MagicMock()
-        mock_keyboard.type = AsyncMock()
-        mock_page.keyboard = mock_keyboard
-        # evaluate returns False (focus failed)
-        mock_page.evaluate = AsyncMock(return_value=False)
         patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
@@ -5324,6 +5399,17 @@ class TestSendMessageComposerInteraction:
             patches[7],
             patches[8],
             patches[9],
+            patches[10],
+            patch.object(
+                extractor,
+                "_submit_compose_message",
+                new_callable=AsyncMock,
+                return_value=extractor._message_action_result(
+                    "https://example.com",
+                    "compose_interact_failed",
+                    "Could not focus compose box via JavaScript.",
+                ),
+            ),
         ):
             result = await extractor.send_message(
                 "testuser", "Hello!", confirm_send=True
@@ -5333,41 +5419,122 @@ class TestSendMessageComposerInteraction:
         assert result["sent"] is False
 
     async def test_enter_fallback_when_send_button_not_found(self, mock_page):
-        """send_message falls back to Enter key when JS cannot find send button."""
+        """_submit_compose_message falls back to Enter when send click fails."""
         extractor = LinkedInExtractor(mock_page)
         mock_keyboard = MagicMock()
+        mock_keyboard.down = AsyncMock()
+        mock_keyboard.up = AsyncMock()
         mock_keyboard.type = AsyncMock()
         mock_keyboard.press = AsyncMock()
         mock_page.keyboard = mock_keyboard
-        # evaluate returns: True (focus), False (no send button found)
-        mock_page.evaluate = AsyncMock(side_effect=[True, False])
-        patches = self._patch_send_message_to_compose(extractor, mock_page)
 
         with (
-            patches[0],
-            patches[1],
-            patches[2],
-            patches[3],
-            patches[4],
-            patches[5],
-            patches[6],
-            patches[7],
-            patches[8],
-            patches[9],
             patch.object(
                 extractor,
-                "_message_text_visible",
+                "_focus_message_compose_box",
                 new_callable=AsyncMock,
                 return_value=True,
             ),
+            patch.object(
+                extractor, "_type_message_in_compose", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_click_message_send_button",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_dismiss_share_profile_prompt", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor, "_message_text_visible", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                extractor, "_reset_stale_messaging_ui", new_callable=AsyncMock
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
         ):
-            result = await extractor.send_message(
-                "testuser", "Hello!", confirm_send=True
+            result = await extractor._submit_compose_message(
+                "https://example.com",
+                "Hello!",
+                recipient_selected=True,
+                success_message="Message sent.",
             )
 
         assert result["status"] == "sent"
-        # Enter was pressed as fallback
+        mock_keyboard.press.assert_any_await("Enter")
+
+    async def test_type_message_in_compose_uses_shift_enter_for_newlines(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_keyboard = MagicMock()
+        mock_keyboard.down = AsyncMock()
+        mock_keyboard.up = AsyncMock()
+        mock_keyboard.type = AsyncMock()
+        mock_keyboard.press = AsyncMock()
+        mock_page.keyboard = mock_keyboard
+
+        await extractor._type_message_in_compose("Line1\nLine2")
+
         mock_keyboard.press.assert_awaited_once_with("Enter")
+        mock_keyboard.down.assert_awaited_once_with("Shift")
+        mock_keyboard.up.assert_awaited_once_with("Shift")
+
+    async def test_submit_invite_dialog_returns_note_required(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_invite_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_invite_primary_button_disabled",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_dismiss_dialog", new_callable=AsyncMock
+            ) as mock_dismiss,
+        ):
+            result = await extractor._submit_invite_dialog(None)
+
+        assert result == (False, False, None, "note_required")
+        mock_dismiss.assert_awaited_once()
+
+    async def test_send_message_with_thread_id_delegates_to_reply(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        expected = {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc/",
+            "status": "sent",
+            "message": "Reply sent.",
+            "recipient_selected": True,
+            "sent": True,
+        }
+        with patch.object(
+            extractor,
+            "_reply_in_thread",
+            new_callable=AsyncMock,
+            return_value=expected,
+        ) as mock_reply:
+            result = await extractor.send_message(
+                "ignored",
+                "Hello",
+                confirm_send=True,
+                thread_id="2-abc",
+            )
+
+        assert result == expected
+        mock_reply.assert_awaited_once_with(
+            "2-abc", "Hello", confirm_send=True
+        )
 
 
 class TestBuildFeedReferences:
