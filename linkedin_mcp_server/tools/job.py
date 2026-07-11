@@ -109,7 +109,9 @@ def register_job_tools(
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
-            numeric job ID strings usable with get_job_details), and optional references.
+            numeric job ID strings usable with get_job_details),
+            job_listings (structured card metadata per result), and optional
+            references.
         """
         try:
             extractor = extractor or await get_ready_extractor(

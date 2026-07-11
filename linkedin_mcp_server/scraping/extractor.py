@@ -2986,6 +2986,123 @@ class LinkedInExtractor:
             result["section_errors"] = section_errors
         return result
 
+    async def _extract_job_listings(self) -> list[dict[str, str]]:
+        """Extract structured job card metadata from the current search page.
+
+        Walks up from each ``a[href*="/jobs/view/"]`` link to its card
+        container and parses card text for company, location, pay, etc.
+
+        ``job_id`` and ``title`` are locale-independent (href + link text).
+        Metadata heuristics (``work_type``, ``easy_apply``, ``status``, pay
+        patterns) are English-only today; non-en cards still return id/title
+        with other fields left empty.
+
+        Returns:
+            [{job_id, title, company, location, work_type, pay, benefits,
+              easy_apply, status}]
+        """
+        return await self._page.evaluate("""() => {
+            const links = document.querySelectorAll('a[href*="/jobs/view/"]');
+            const seen = new Set();
+            const results = [];
+
+            for (const link of links) {
+                const match = link.href.match(/\\/jobs\\/view\\/(\\d+)/);
+                if (!match || seen.has(match[1])) continue;
+                seen.add(match[1]);
+
+                const title = link.innerText.trim().split('\\n')[0];
+                if (!title) continue;
+
+                let card = link;
+                for (let i = 0; i < 8; i++) {
+                    if (!card.parentElement) break;
+                    card = card.parentElement;
+                    if (card.tagName === 'LI' || card.getAttribute('data-occludable-job-id'))
+                        break;
+                }
+
+                const cardText = card.innerText || '';
+                const lines = cardText.split('\\n').map(l => l.trim()).filter(l => l);
+
+                let company = '';
+                let location = '';
+                let work_type = '';
+                let pay = '';
+                let benefits = '';
+                let easy_apply = '';
+                let status = '';
+
+                const workTypes = ['On-site', 'Hybrid', 'Remote'];
+                const statusPhrases = [
+                    'Actively reviewing applicants',
+                    'Be an early applicant',
+                ];
+
+                for (const line of lines) {
+                    if (!pay && (line.match(/^\\$[\\d,.]+/) || line.match(/\\$[\\d,.]+\\/[yh]r/))) {
+                        const parts = line.split('·').map(p => p.trim());
+                        pay = parts[0] || '';
+                        if (parts[1]) benefits = parts[1];
+                        continue;
+                    }
+                    if (!benefits && !pay && line.match(/^(\\d+ benefits|401|Medical|Vision|Dental)/i)) {
+                        benefits = line;
+                        continue;
+                    }
+                    if (!location && line.match(/,\\s*[A-Z]{2}/) && !line.includes('alumni')) {
+                        const locMatch = line.match(/^(.+?)\\s*\\(([^)]+)\\)\\s*$/);
+                        if (locMatch) {
+                            location = locMatch[1].trim();
+                            if (workTypes.includes(locMatch[2])) work_type = locMatch[2];
+                        } else {
+                            location = line;
+                        }
+                        continue;
+                    }
+                    if (!location && line.match(/United States/i)) {
+                        const locMatch = line.match(/^(.+?)\\s*\\(([^)]+)\\)\\s*$/);
+                        if (locMatch) {
+                            location = locMatch[1].trim();
+                            if (workTypes.includes(locMatch[2])) work_type = locMatch[2];
+                        } else {
+                            location = line;
+                        }
+                        continue;
+                    }
+                    if (line === 'Easy Apply') { easy_apply = 'true'; continue; }
+                    if (statusPhrases.includes(line)) { status = line; continue; }
+                }
+
+                for (const line of lines) {
+                    if (line === title) continue;
+                    if (line.includes('with verification')) continue;
+                    if (line === 'Promoted' || line === 'Viewed') continue;
+                    if (line === 'Easy Apply') continue;
+                    if (line.match(/^\\$/) || line.match(/\\/[yh]r/)) continue;
+                    if (line.match(/alumni|school/)) continue;
+                    if (line.match(/,\\s*[A-Z]{2}/) || line.match(/United States/i)) continue;
+                    if (statusPhrases.includes(line)) continue;
+                    if (line.match(/^(\\d+ benefits|401|Medical|Vision|Dental)/i)) continue;
+                    company = line;
+                    break;
+                }
+
+                results.push({
+                    job_id: match[1],
+                    title: title,
+                    company: company,
+                    location: location,
+                    work_type: work_type,
+                    pay: pay,
+                    benefits: benefits,
+                    easy_apply: easy_apply,
+                    status: status,
+                });
+            }
+            return results;
+        }""")
+
     async def _extract_job_ids(self) -> list[str]:
         """Extract unique job IDs from job card links on the current page.
 
@@ -3187,7 +3304,9 @@ class LinkedInExtractor:
             sort_by: Sort results (date, relevance)
 
         Returns:
-            {url, sections: {search_results: text}, job_ids: [str]}
+            {url, sections: {search_results: text}, job_ids: [str],
+             job_listings: [{job_id, title, company, location, work_type,
+             pay, benefits, easy_apply, status}]}
         """
         base_url = self._build_job_search_url(
             keywords,
@@ -3200,7 +3319,9 @@ class LinkedInExtractor:
             sort_by=sort_by,
         )
         all_job_ids: list[str] = []
+        all_job_listings: list[dict[str, str]] = []
         seen_ids: set[str] = set()
+        seen_listing_ids: set[str] = set()
         page_texts: list[str] = []
         page_references: list[Reference] = []
         section_errors: dict[str, dict[str, Any]] = {}
@@ -3258,6 +3379,11 @@ class LinkedInExtractor:
                         page_references.extend(extracted.references)
                     break
                 page_ids = await self._extract_job_ids()
+                try:
+                    page_listings = await self._extract_job_listings()
+                except Exception as e:
+                    logger.warning("Failed to extract job listings: %s", e)
+                    page_listings = []
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
                 if not new_ids:
@@ -3270,6 +3396,12 @@ class LinkedInExtractor:
                 for jid in new_ids:
                     seen_ids.add(jid)
                     all_job_ids.append(jid)
+
+                for listing in page_listings:
+                    listing_id = listing.get("job_id", "")
+                    if listing_id and listing_id not in seen_listing_ids:
+                        seen_listing_ids.add(listing_id)
+                        all_job_listings.append(listing)
 
                 page_texts.append(extracted.text)
                 if extracted.references:
@@ -3293,6 +3425,7 @@ class LinkedInExtractor:
             if page_texts
             else {},
             "job_ids": all_job_ids,
+            "job_listings": all_job_listings,
         }
         if page_references:
             result["references"] = {
