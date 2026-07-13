@@ -6168,6 +6168,145 @@ class TestInviteSubmitDialogShell:
         assert result == (True, False, None, None)
         mock_dismiss.assert_awaited_once()
 
+    async def test_open_dialog_uses_username_for_profile_success_fallback(
+        self, mock_page
+    ):
+        """Dialog shell open: profile success fallback receives target username."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_invite_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_invite_primary_button_disabled",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_get_premium_upsell_message", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_invite_submit_succeeded_on_profile",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_profile_ok,
+            patch.object(
+                extractor, "_dismiss_dialog", new_callable=AsyncMock
+            ) as mock_dismiss,
+        ):
+            mock_page.wait_for_selector = AsyncMock(
+                side_effect=PlaywrightTimeoutError("still open")
+            )
+            result = await extractor._submit_invite_dialog(None, username="target-user")
+
+        assert result == (True, False, None, None)
+        mock_profile_ok.assert_awaited_once_with("target-user")
+        mock_dismiss.assert_awaited_once()
+
+
+class TestResolveInviteUsername:
+    def test_prefers_caller_username(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = (
+            "https://www.linkedin.com/preload/custom-invite/?vanityName=other"
+        )
+        assert extractor._resolve_invite_username("caller-user") == "caller-user"
+
+    def test_falls_back_to_profile_path(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/in/path-user/overlay/contact-info/"
+        assert extractor._resolve_invite_username(None) == "path-user"
+
+    def test_falls_back_to_vanity_name_query(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = (
+            "https://www.linkedin.com/preload/custom-invite/"
+            "?vanityName=vanity-user&trk=people-guest"
+        )
+        assert extractor._resolve_invite_username(None) == "vanity-user"
+        assert extractor._resolve_invite_username("  ") == "vanity-user"
+
+    def test_returns_none_when_unresolvable(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/feed/"
+        assert extractor._resolve_invite_username(None) is None
+        assert extractor._resolve_invite_username("") is None
+
+
+class TestInviteSubmitSucceededOnProfile:
+    async def test_renavigates_from_custom_invite_using_vanity_name(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = (
+            "https://www.linkedin.com/preload/custom-invite/?vanityName=alice"
+        )
+        signals = object()
+        with (
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=signals,
+            ) as mock_signals,
+            patch(
+                "linkedin_mcp_server.scraping.connection.detect_connection_state",
+                return_value="pending",
+            ) as mock_state,
+        ):
+            assert await extractor._invite_submit_succeeded_on_profile() is True
+
+        mock_nav.assert_awaited_once_with("https://www.linkedin.com/in/alice/")
+        mock_signals.assert_awaited_once_with("alice")
+        mock_state.assert_called_once_with(signals)
+
+    async def test_uses_caller_username_and_skips_nav_when_already_on_profile(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/in/alice/"
+        signals = object()
+        with (
+            patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=signals,
+            ) as mock_signals,
+            patch(
+                "linkedin_mcp_server.scraping.connection.detect_connection_state",
+                return_value="already_connected",
+            ),
+        ):
+            assert await extractor._invite_submit_succeeded_on_profile("alice") is True
+
+        mock_nav.assert_not_awaited()
+        mock_signals.assert_awaited_once_with("alice")
+
+    async def test_returns_false_when_username_unresolvable(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.url = "https://www.linkedin.com/feed/"
+        with patch.object(
+            extractor, "_navigate_to_page", new_callable=AsyncMock
+        ) as mock_nav:
+            assert await extractor._invite_submit_succeeded_on_profile() is False
+        mock_nav.assert_not_awaited()
+
 
 class TestBuildFeedReferences:
     """Tests for _build_feed_references SDUI-capture / DOM-anchor merging."""

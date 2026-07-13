@@ -740,7 +740,7 @@ class TestJobTools:
         mcp = FastMCP("test")
         register_job_tools(mcp)
 
-        for tool_name in ("get_job_details", "search_jobs"):
+        for tool_name in ("get_job_details", "search_jobs", "get_saved_jobs"):
             tool = await mcp.get_tool(tool_name)
             assert tool is not None
             assert tool.annotations is not None

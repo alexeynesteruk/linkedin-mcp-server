@@ -184,7 +184,12 @@ def register_job_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Saved Jobs",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
         tags={"job", "scraping"},
         exclude_args=["extractor"],
     )

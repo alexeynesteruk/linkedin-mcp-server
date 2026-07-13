@@ -2214,21 +2214,55 @@ class LinkedInExtractor:
             has_incoming_action_row=bool(data.get("hasIncomingActionRow")),
         )
 
-    async def _invite_submit_succeeded_on_profile(self) -> bool:
+    def _resolve_invite_username(self, username: str | None = None) -> str | None:
+        """Resolve the invite target vanity name after a custom-invite submit.
+
+        Prefer the caller-supplied *username*. Fall back to the current page:
+        profile URLs (``/in/<user>/``) or the custom-invite deeplink
+        (``?vanityName=``). Returns None when no safe target can be derived.
+        """
+        if username and username.strip():
+            return username.strip()
+        page_url = self._page.url or ""
+        match = re.search(r"/in/([^/?#]+)/?", page_url)
+        if match:
+            return match.group(1)
+        try:
+            parsed = urlparse(page_url)
+            vanity = (parse_qs(parsed.query).get("vanityName") or [None])[0]
+            if vanity and vanity.strip():
+                return vanity.strip()
+        except Exception:
+            logger.debug("Could not parse vanityName from %s", page_url, exc_info=True)
+        return None
+
+    async def _invite_submit_succeeded_on_profile(
+        self, username: str | None = None
+    ) -> bool:
         """True when post-submit profile signals show the invite was accepted.
 
         Locale-independent: pending uses the absence of the custom-invite
         anchor and/or presence of the pending connection URL pattern. Used
         only as a success fallback when the invite dialog shell stays open.
+
+        After a custom-invite submit the page is often still on
+        ``/preload/custom-invite/?vanityName=...``, so the target vanity is
+        resolved explicitly (caller username, ``/in/`` path, or query param)
+        and the profile is re-opened before reading action signals.
         """
         try:
             from linkedin_mcp_server.scraping.connection import detect_connection_state
 
-            match = re.search(r"/in/([^/?#]+)/?", self._page.url)
-            username = match.group(1) if match else ""
-            if not username:
+            target = self._resolve_invite_username(username)
+            if not target:
                 return False
-            signals = await self._read_action_signals(username)
+
+            # Leave the invite preload surface so top-card signals are readable.
+            profile_url = f"https://www.linkedin.com/in/{target}/"
+            if "/in/" not in (self._page.url or ""):
+                await self._navigate_to_page(profile_url)
+
+            signals = await self._read_action_signals(target)
             state = detect_connection_state(signals)
             return state in {"pending", "already_connected"}
         except Exception:
@@ -2238,7 +2272,7 @@ class LinkedInExtractor:
             return False
 
     async def _submit_invite_dialog(
-        self, note: str | None
+        self, note: str | None, *, username: str | None = None
     ) -> tuple[bool, bool, str | None, str | None]:
         """Submit the invite dialog opened by the custom-invite deeplink.
 
@@ -2246,6 +2280,9 @@ class LinkedInExtractor:
 
         ``block_reason`` is ``"note_required"`` when LinkedIn disables Send
         until a personalized note is provided (#407).
+
+        *username* is the invite target vanity name, used when the dialog
+        shell stays open so post-submit profile state can be re-checked.
         """
         if not await self._invite_dialog_is_open(timeout=5000):
             return False, False, None, None
@@ -2333,7 +2370,7 @@ class LinkedInExtractor:
                 )
                 await self._dismiss_dialog()
                 return True, note_filled, None, None
-            if await self._invite_submit_succeeded_on_profile():
+            if await self._invite_submit_succeeded_on_profile(username):
                 logger.debug(
                     "Invite dialog stayed open but profile signals pending; "
                     "treating submit as success"
@@ -2564,7 +2601,7 @@ class LinkedInExtractor:
             note_sent,
             note_limit_message,
             block_reason,
-        ) = await self._submit_invite_dialog(note)
+        ) = await self._submit_invite_dialog(note, username=username)
         if block_reason == "note_required":
             return _connection_result(
                 url,
