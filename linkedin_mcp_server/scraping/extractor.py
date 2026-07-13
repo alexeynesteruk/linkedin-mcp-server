@@ -146,6 +146,126 @@ _MESSAGING_CLOSE_SELECTOR = (
     'button[aria-label*="Close"]'
 )
 
+# Shared by baseline counting and post-send polling so both paths always use
+# identical visibility and editable-ancestor rules.
+_MESSAGE_CONFIRMATION_RETRY_TIMEOUT_MS = 5_000
+_PROFILE_INFO_SHARE_PROMPT_LOCALES = {
+    "de": {
+        "prompts": (
+            "profilinformationen teilen",
+            "profil teilen",
+            "kontaktdaten teilen",
+        ),
+        "negative_actions": (
+            "nicht teilen",
+            "jetzt nicht",
+            "überspringen",
+            "nein, danke",
+        ),
+    },
+    "en": {
+        "prompts": (
+            "profile information",
+            "share profile",
+            "share your profile",
+            "share your contact",
+        ),
+        "negative_actions": (
+            "don't share",
+            "do not share",
+            "not now",
+            "skip",
+            "no, thanks",
+        ),
+    },
+    "es": {
+        "prompts": (
+            "compartir la información del perfil",
+            "compartir tu perfil",
+            "compartir tus datos de contacto",
+        ),
+        "negative_actions": (
+            "no compartir",
+            "ahora no",
+            "omitir",
+            "no, gracias",
+        ),
+    },
+    "fr": {
+        "prompts": (
+            "partager les informations du profil",
+            "partager votre profil",
+            "partager vos coordonnées",
+        ),
+        "negative_actions": (
+            "ne pas partager",
+            "pas maintenant",
+            "ignorer",
+            "non merci",
+        ),
+    },
+    "pl": {
+        "prompts": (
+            "udostępn",
+            "informacje profil",
+        ),
+        "negative_actions": (
+            "nie udostępniaj",
+            "nie teraz",
+            "pomiń",
+            "odrzuć",
+        ),
+    },
+    "pt": {
+        "prompts": (
+            "compartilhar informações do perfil",
+            "compartilhar seu perfil",
+            "compartilhar suas informações de contato",
+        ),
+        "negative_actions": (
+            "não compartilhar",
+            "agora não",
+            "pular",
+            "não, obrigado",
+            "não, obrigada",
+        ),
+    },
+}
+_MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS = r"""({ expected, afterCount }) => {
+    const normalize = value =>
+        (value || '').replace(/\s+/g, ' ').trim();
+    const target = normalize(expected);
+    if (!target) return afterCount === null ? 0 : false;
+    const root = document.querySelector('main') || document.body;
+    if (!root) return afterCount === null ? 0 : false;
+    const walker = document.createTreeWalker(
+        root,
+        NodeFilter.SHOW_TEXT,
+        {
+            acceptNode: node => {
+                const parent = node.parentElement;
+                if (!parent) return NodeFilter.FILTER_REJECT;
+                if (parent.closest('[contenteditable="true"], [role="textbox"]')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                if (!(parent.offsetWidth || parent.offsetHeight || parent.getClientRects().length)) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                return NodeFilter.FILTER_ACCEPT;
+            },
+        }
+    );
+    let count = 0;
+    let node;
+    while ((node = walker.nextNode())) {
+        if (normalize(node.nodeValue || '').includes(target)) {
+            count++;
+        }
+    }
+    return afterCount === null ? count : count > afterCount;
+}"""
+
+
 # Shared JS function that walks up from any /messaging/compose/ anchor
 # inside <main> to find the smallest ancestor that satisfies the
 # action-root predicate (>=2 interactive children, >=1 button). This is
@@ -2824,33 +2944,6 @@ class LinkedInExtractor:
             else:
                 await self._page.keyboard.type(char, delay=15)
 
-    async def _dismiss_share_profile_prompt(self) -> None:
-        """Decline post-send share-profile/contact-info prompts (#573)."""
-        try:
-            await self._page.evaluate(
-                """() => {
-                    const dialogs = Array.from(
-                        document.querySelectorAll('[role="dialog"], dialog')
-                    );
-                    for (const dialog of dialogs) {
-                        const buttons = Array.from(
-                            dialog.querySelectorAll('button, [role="button"]')
-                        );
-                        if (buttons.length >= 2) {
-                            const dismiss = buttons[0];
-                            if (dismiss && !dismiss.disabled) {
-                                dismiss.click();
-                                return true;
-                            }
-                        }
-                    }
-                    return false;
-                }"""
-            )
-        except Exception:
-            logger.debug("Could not dismiss share-profile prompt", exc_info=True)
-        await asyncio.sleep(0.5)
-
     async def _focus_message_compose_box(self) -> bool:
         """Focus the visible message compose textbox via JavaScript."""
         return bool(
@@ -2868,20 +2961,159 @@ class LinkedInExtractor:
         )
 
     async def _click_message_send_button(self) -> bool:
-        """Click a visible enabled send button, or return False for Enter fallback."""
+        """Click a visible enabled send button scoped near the active composer.
+
+        Walks ancestors of the focused textbox so a random page-level Send
+        control is not clicked. Falls back to false so Enter can submit.
+        """
         return bool(
             await self._page.evaluate(
                 """() => {
-                    const btn = Array.from(document.querySelectorAll(
-                        'button[type="submit"], button[aria-label*="Send"], button[aria-label*="send"],'
-                        + 'button[data-control-name="send"]'
-                    )).find(b => !b.disabled && (b.offsetWidth || b.offsetHeight || b.getClientRects().length));
-                    if (!btn) return false;
-                    btn.click();
-                    return true;
+                    const visible = el => !!(
+                        el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                    );
+                    const textbox = document.activeElement?.closest(
+                        '[contenteditable="true"], [role="textbox"]'
+                    );
+                    if (!textbox) return false;
+                    // Structural only: aria-label verbs are locale-dependent (#574).
+                    const sendSelector = [
+                        'button[type="submit"]',
+                        'button[data-control-name="send"]',
+                    ].join(',');
+                    let scope = textbox;
+                    while (scope && scope !== document.body) {
+                        const btn = Array.from(scope.querySelectorAll(sendSelector))
+                            .find(b => !b.disabled && visible(b));
+                        if (btn) {
+                            btn.click();
+                            return true;
+                        }
+                        scope = scope.parentElement;
+                    }
+                    return false;
                 }"""
             )
         )
+
+    async def _message_text_occurrences_outside_composer(self, message: str) -> int:
+        """Count visible non-composer occurrences of *message* (shared JS)."""
+        try:
+            count = await self._page.evaluate(
+                _MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS,
+                {"expected": message, "afterCount": None},
+            )
+            return int(count or 0)
+        except Exception:
+            logger.debug(
+                "Could not count message text occurrences", exc_info=True
+            )
+            return 0
+
+    async def _message_text_visible_outside_composer(
+        self,
+        message: str,
+        *,
+        after_count: int = 0,
+        timeout_ms: float | None = None,
+    ) -> bool:
+        """Wait until message text gains a non-composer occurrence beyond after_count."""
+        wait_options: dict[str, Any] = {
+            "arg": {"expected": message, "afterCount": after_count}
+        }
+        if timeout_ms is not None:
+            wait_options["timeout"] = timeout_ms
+        try:
+            await self._page.wait_for_function(
+                _MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS,
+                **wait_options,
+            )
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
+    # Back-compat alias used by older tests / call sites.
+    async def _count_message_text_occurrences(self, message: str) -> int:
+        return await self._message_text_occurrences_outside_composer(message)
+
+    async def _message_text_visible(
+        self, message: str, *, min_count: int = 1
+    ) -> bool:
+        """Compatibility wrapper: require at least min_count occurrences."""
+        # after_count is exclusive lower bound in the shared JS (count > afterCount).
+        return await self._message_text_visible_outside_composer(
+            message, after_count=max(min_count - 1, 0)
+        )
+
+    async def _handle_profile_info_share_prompt(self) -> bool:
+        """Dismiss LinkedIn's optional profile-info sharing prompt after Send.
+
+        Uses an explicit per-document-language table (DE/EN/ES/FR/PL/PT) because
+        LinkedIn exposes no stable URL or data attribute for this modal (#573).
+        """
+        try:
+            handled = await self._page.evaluate(
+                r"""({ localeTable }) => {
+                    const visible = el => !!(
+                        el &&
+                        (el.offsetWidth || el.offsetHeight || el.getClientRects().length)
+                    );
+                    const norm = value => (value || '')
+                        .replace(/\s+/g, ' ')
+                        .trim()
+                        .toLowerCase();
+
+                    const language = norm(document.documentElement.lang || 'en')
+                        .split('-')[0];
+                    const locale = localeTable[language];
+                    if (!locale) return false;
+                    const promptNeedles = locale.prompts.map(norm);
+                    const negativeButtonNeedles = locale.negative_actions.map(norm);
+
+                    const dialogSelectors = [
+                        'dialog[open]',
+                        '[role="dialog"]',
+                        '[aria-modal="true"]',
+                    ];
+                    const dialogs = [...new Set(
+                        dialogSelectors.flatMap(sel => [...document.querySelectorAll(sel)])
+                    )].filter(visible);
+
+                    for (const dialog of dialogs) {
+                        const text = norm(dialog.innerText || dialog.textContent || '');
+                        if (!promptNeedles.some(n => text.includes(n))) continue;
+                        const buttons = Array.from(
+                            dialog.querySelectorAll('button, [role="button"]')
+                        ).filter(b => visible(b) && !b.disabled);
+                        const negative = buttons.find(b => {
+                            const label = norm(
+                                b.getAttribute('aria-label') || b.innerText || b.textContent
+                            );
+                            return negativeButtonNeedles.some(n => label.includes(n));
+                        });
+                        if (negative) {
+                            negative.click();
+                            return true;
+                        }
+                    }
+                    return false;
+                }""",
+                {"localeTable": _PROFILE_INFO_SHARE_PROMPT_LOCALES},
+            )
+            if handled:
+                await asyncio.sleep(1.0)
+                logger.debug("Dismissed LinkedIn profile-info sharing prompt")
+            return bool(handled)
+        except Exception:
+            logger.debug(
+                "Could not handle LinkedIn profile-info sharing prompt",
+                exc_info=True,
+            )
+            return False
+
+    async def _dismiss_share_profile_prompt(self) -> None:
+        """Back-compat wrapper around locale-aware share-prompt dismissal."""
+        await self._handle_profile_info_share_prompt()
 
     async def _submit_compose_message(
         self,
@@ -2891,7 +3123,13 @@ class LinkedInExtractor:
         recipient_selected: bool,
         success_message: str,
     ) -> dict[str, Any]:
-        """Focus, type, send, and verify a message from the active composer."""
+        """Focus, type, send, and verify a message from the active composer.
+
+        Confirmation requires a new non-composer occurrence of the message text
+        relative to a pre-send baseline (#573 / #574). Multiline bodies use
+        Shift+Enter (#441). Optional profile-share prompts are declined via
+        explicit per-locale tables.
+        """
         if not await self._focus_message_compose_box():
             await self._reset_stale_messaging_ui()
             return self._message_action_result(
@@ -2900,17 +3138,37 @@ class LinkedInExtractor:
                 "Could not focus compose box via JavaScript.",
                 recipient_selected=recipient_selected,
             )
-        # Snapshot how many times this text already appears outside the
-        # composer so a re-send of identical text is not false-confirmed.
-        baseline = await self._count_message_text_occurrences(message)
+        pre_send_count = await self._message_text_occurrences_outside_composer(
+            message
+        )
         await asyncio.sleep(0.1)
         await self._type_message_in_compose(message)
         await asyncio.sleep(0.3)
         await asyncio.sleep(1.0)
         if not await self._click_message_send_button():
             await self._page.keyboard.press("Enter")
-        await self._dismiss_share_profile_prompt()
-        if not await self._message_text_visible(message, min_count=baseline + 1):
+        # Pause so LinkedIn can clear the composer or mount a share prompt.
+        await asyncio.sleep(1.5)
+        await self._handle_profile_info_share_prompt()
+
+        if not await self._message_text_visible_outside_composer(
+            message, after_count=pre_send_count
+        ):
+            # Late-appearing share modal: dismiss and re-check with short timeout.
+            if await self._handle_profile_info_share_prompt():
+                if await self._message_text_visible_outside_composer(
+                    message,
+                    after_count=pre_send_count,
+                    timeout_ms=_MESSAGE_CONFIRMATION_RETRY_TIMEOUT_MS,
+                ):
+                    await self._reset_stale_messaging_ui()
+                    return self._message_action_result(
+                        page_url,
+                        "sent",
+                        success_message,
+                        recipient_selected=recipient_selected,
+                        sent=True,
+                    )
             await self._reset_stale_messaging_ui()
             return self._message_action_result(
                 page_url,
@@ -2927,140 +3185,6 @@ class LinkedInExtractor:
             sent=True,
         )
 
-    async def _count_message_text_occurrences(self, message: str) -> int:
-        """Count visible non-composer occurrences of *message* on the page."""
-        try:
-            count = await self._page.evaluate(
-                self._MESSAGE_OCCURRENCE_JS, {"expected": message}
-            )
-            return int(count or 0)
-        except Exception:
-            logger.debug("Could not count message text occurrences", exc_info=True)
-            return 0
-
-    # Shared DOM predicate: count non-overlapping occurrences of expected text
-    # in main, skipping editable/textbox ancestors (composer, inputs).
-    _MESSAGE_OCCURRENCE_JS = """({ expected }) => {
-        const normalize = value =>
-            (value || '').replace(/\\s+/g, ' ').trim();
-        const expectedNorm = normalize(expected);
-        if (!expectedNorm) return 0;
-
-        const isEditable = node => {
-            if (!node || node.nodeType !== 1) return false;
-            const el = node;
-            if (el.getAttribute('contenteditable') === 'true') return true;
-            if (el.getAttribute('role') === 'textbox') return true;
-            const tag = (el.tagName || '').toLowerCase();
-            return tag === 'textarea' || tag === 'input';
-        };
-
-        const main = document.querySelector('main') || document.body;
-        if (!main) return 0;
-
-        let haystack = '';
-        const walker = document.createTreeWalker(
-            main,
-            NodeFilter.SHOW_TEXT,
-            {
-                acceptNode(node) {
-                    let parent = node.parentElement;
-                    while (parent) {
-                        if (isEditable(parent)) {
-                            return NodeFilter.FILTER_REJECT;
-                        }
-                        parent = parent.parentElement;
-                    }
-                    const text = node.nodeValue || '';
-                    if (!text.trim()) return NodeFilter.FILTER_REJECT;
-                    return NodeFilter.FILTER_ACCEPT;
-                },
-            }
-        );
-        let current = walker.nextNode();
-        while (current) {
-            haystack += ' ' + (current.nodeValue || '');
-            current = walker.nextNode();
-        }
-        const normalized = normalize(haystack);
-        if (!normalized) return 0;
-        let count = 0;
-        let from = 0;
-        while (true) {
-            const idx = normalized.indexOf(expectedNorm, from);
-            if (idx < 0) break;
-            count += 1;
-            from = idx + expectedNorm.length;
-        }
-        return count;
-    }"""
-
-    async def _message_text_visible(self, message: str, *, min_count: int = 1) -> bool:
-        """Wait until *message* appears outside the composer at least min_count times.
-
-        Uses a pre-send baseline so pre-existing thread text cannot false-
-        confirm a failed send (#573 / PR review).
-        """
-        try:
-            await self._page.wait_for_function(
-                """({ expected, minCount }) => {
-                    const normalize = value =>
-                        (value || '').replace(/\\s+/g, ' ').trim();
-                    const expectedNorm = normalize(expected);
-                    if (!expectedNorm) return false;
-
-                    const isEditable = node => {
-                        if (!node || node.nodeType !== 1) return false;
-                        const el = node;
-                        if (el.getAttribute('contenteditable') === 'true') return true;
-                        if (el.getAttribute('role') === 'textbox') return true;
-                        const tag = (el.tagName || '').toLowerCase();
-                        return tag === 'textarea' || tag === 'input';
-                    };
-
-                    const main = document.querySelector('main') || document.body;
-                    if (!main) return false;
-
-                    let haystack = '';
-                    const walker = document.createTreeWalker(
-                        main,
-                        NodeFilter.SHOW_TEXT,
-                        {
-                            acceptNode(node) {
-                                let parent = node.parentElement;
-                                while (parent) {
-                                    if (isEditable(parent)) {
-                                        return NodeFilter.FILTER_REJECT;
-                                    }
-                                    parent = parent.parentElement;
-                                }
-                                const text = node.nodeValue || '';
-                                if (!text.trim()) return NodeFilter.FILTER_REJECT;
-                                return NodeFilter.FILTER_ACCEPT;
-                            },
-                        }
-                    );
-                    let current = walker.nextNode();
-                    while (current) {
-                        haystack += ' ' + (current.nodeValue || '');
-                        current = walker.nextNode();
-                    }
-                    const normalized = normalize(haystack);
-                    let count = 0;
-                    let from = 0;
-                    while (true) {
-                        const idx = normalized.indexOf(expectedNorm, from);
-                        if (idx < 0) break;
-                        count += 1;
-                        from = idx + expectedNorm.length;
-                    }
-                    return count >= minCount;
-                }""",
-                arg={"expected": message, "minCount": min_count},
-            )
-            return True
-        except PlaywrightTimeoutError:
-            return False
 
     async def _dismiss_message_ui(self) -> None:
         """Best-effort dismissal for the profile messaging UI."""
