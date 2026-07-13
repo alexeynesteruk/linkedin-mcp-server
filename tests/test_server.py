@@ -238,15 +238,15 @@ class TestServerVersion:
 
 
 class TestBrowserLifespan:
-    async def test_browser_lifespan_runs_bootstrap_and_closes_browser(self, monkeypatch):
+    async def test_browser_lifespan_runs_bootstrap_and_closes_browser(
+        self, monkeypatch
+    ):
         from linkedin_mcp_server.server import browser_lifespan
 
         init = MagicMock()
         start_setup = AsyncMock()
         close = AsyncMock()
-        monkeypatch.setattr(
-            "linkedin_mcp_server.server.initialize_bootstrap", init
-        )
+        monkeypatch.setattr("linkedin_mcp_server.server.initialize_bootstrap", init)
         monkeypatch.setattr(
             "linkedin_mcp_server.server.start_background_browser_setup_if_needed",
             start_setup,
@@ -284,7 +284,5 @@ class TestCloseSession:
         )
 
         mcp = create_mcp_server()
-        with pytest.raises(
-            ToolError, match="Failed to close the browser session"
-        ):
+        with pytest.raises(ToolError, match="Failed to close the browser session"):
             await mcp.call_tool("close_session", {})

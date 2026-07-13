@@ -1,6 +1,7 @@
 """Tests for linkedin_mcp_server.tools.meta health, ping, and alias registration."""
 
 import logging
+from typing import Any, cast
 
 from fastmcp import FastMCP
 from fastmcp.tools.base import Tool
@@ -122,7 +123,9 @@ class TestRegisterToolAliases:
             return {"ok": True}
 
         register_tool_aliases(mcp)
-        tools = {component.name for component in mcp.local_provider._components.values()}
+        tools = {
+            component.name for component in mcp.local_provider._components.values()
+        }
 
         assert "get_person_profile" in tools
         assert "linkedin_get_person_profile" in tools
@@ -166,13 +169,14 @@ class TestRegisterToolAliases:
                 raise RuntimeError("alias registration failed")
             return original_add_tool(tool)
 
-        mcp.add_tool = flaky_add_tool  # type: ignore[method-assign]
+        mcp.add_tool = cast(Any, flaky_add_tool)
 
         with caplog.at_level(logging.ERROR):
             register_tool_aliases(mcp)
 
         assert any(
-            "Failed to register linkedin_* alias for get_person_profile" in record.message
+            "Failed to register linkedin_* alias for get_person_profile"
+            in record.message
             for record in caplog.records
         )
         tools = {
@@ -182,6 +186,25 @@ class TestRegisterToolAliases:
         }
         assert "get_person_profile" in tools
         assert "linkedin_get_person_profile" not in tools
+
+    def test_skips_when_local_registry_unavailable(self, caplog):
+        """Missing private registry must not raise during server setup."""
+        mcp = FastMCP("test")
+
+        @mcp.tool
+        async def get_person_profile() -> dict[str, bool]:
+            return {"ok": True}
+
+        # Simulate a FastMCP release that removed/renamed the private field.
+        mcp.local_provider._components = cast(Any, None)
+
+        with caplog.at_level(logging.WARNING):
+            register_tool_aliases(mcp)
+
+        assert any(
+            "No local tool registry available" in record.message
+            for record in caplog.records
+        )
 
     async def test_linkedin_health_tool_returns_payload(self):
         from linkedin_mcp_server.server import create_mcp_server

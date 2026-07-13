@@ -342,7 +342,7 @@ docker run -it --rm \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
-  --transport streamable-http --host 0.0.0.0 --port 8080 --path /mcp
+  --transport streamable-http --host 0.0.0.0 --allow-external-bind --port 8080 --path /mcp
 ```
 
 Runtime server logs are emitted by FastMCP/Uvicorn.

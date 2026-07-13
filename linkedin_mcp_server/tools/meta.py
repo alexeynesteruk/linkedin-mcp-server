@@ -106,7 +106,8 @@ def build_health_payload() -> dict[str, Any]:
         warnings.append(f"Bootstrap last error: {bootstrap.last_error}")
 
     payload: dict[str, Any] = {
-        "ok": auth_ready and (browser_ready or bootstrap.setup_state is SetupState.READY),
+        "ok": auth_ready
+        and (browser_ready or bootstrap.setup_state is SetupState.READY),
         "server": "linkedin-mcp",
         "version": __version__,
         "transport": config.server.transport,
@@ -179,16 +180,45 @@ async def build_ping_payload(mcp: FastMCP) -> dict[str, Any]:
     }
 
 
-def register_tool_aliases(mcp: FastMCP) -> None:
-    """Register linkedin_* aliases alongside legacy tool names."""
-    # LocalProvider.list_tools/get_tool are async; during sync server setup we
-    # read the already-registered components directly from the local provider.
-    components = mcp.local_provider._components
-    tools_by_name = {
+def _tools_by_name_from_local_provider(mcp: FastMCP) -> dict[str, Tool]:
+    """Best-effort map of registered tools without requiring async list APIs.
+
+    FastMCP's public ``list_tools``/``get_tool`` are async, so during sync
+    server setup we read the local provider registry when available. If the
+    private layout changes, return an empty map so alias registration skips
+    instead of blocking server startup (PR review).
+    """
+    provider = getattr(mcp, "local_provider", None)
+    if provider is None:
+        return {}
+    components = getattr(provider, "_components", None)
+    if not isinstance(components, dict):
+        return {}
+    return {
         component.name: component
         for component in components.values()
         if isinstance(component, Tool)
     }
+
+
+def register_tool_aliases(mcp: FastMCP) -> None:
+    """Register linkedin_* aliases alongside legacy tool names."""
+    try:
+        tools_by_name = _tools_by_name_from_local_provider(mcp)
+    except Exception:
+        logger.exception(
+            "Could not read registered tools for linkedin_* alias setup; "
+            "skipping aliases"
+        )
+        return
+
+    if not tools_by_name:
+        logger.warning(
+            "No local tool registry available for linkedin_* alias setup; "
+            "skipping aliases"
+        )
+        return
+
     existing = set(tools_by_name)
 
     for name in LEGACY_TOOL_NAMES:

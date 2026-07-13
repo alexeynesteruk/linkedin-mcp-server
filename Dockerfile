@@ -22,12 +22,15 @@ COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/patchright
 
-RUN patchright install-deps chromium && \
+# tini as PID 1 reaps exited Chromium helpers (zombie chrome-headless, #477).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends tini && \
+    patchright install-deps chromium && \
     patchright install chromium && \
     chmod -R 755 /opt/patchright && \
     rm -rf /var/lib/apt/lists/*
 
 USER pwuser
 
-ENTRYPOINT ["python", "-m", "linkedin_mcp_server"]
+ENTRYPOINT ["tini", "--", "python", "-m", "linkedin_mcp_server"]
 CMD []

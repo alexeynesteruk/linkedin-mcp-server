@@ -2,6 +2,8 @@
 
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
 import pytest
 
 from linkedin_mcp_server.callbacks import ProgressCallback
@@ -1082,7 +1084,10 @@ class TestConnectWithPerson:
             ),
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
-                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=True
+                extractor,
+                "_invite_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
@@ -1142,7 +1147,10 @@ class TestConnectWithPerson:
 
         with (
             patch.object(
-                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=True
+                extractor,
+                "_invite_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
@@ -1254,7 +1262,10 @@ class TestConnectWithPerson:
             ),
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
-                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=False
+                extractor,
+                "_invite_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=False,
             ),
             patch.object(extractor, "_dismiss_dialog", new_callable=AsyncMock),
         ):
@@ -1703,7 +1714,10 @@ class TestConnectWithPerson:
             ),
             patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
             patch.object(
-                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=False
+                extractor,
+                "_invite_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=False,
             ),
             patch.object(extractor, "_dismiss_dialog", new_callable=AsyncMock),
         ):
@@ -1789,7 +1803,10 @@ class TestConnectWithPerson:
 
         with (
             patch.object(
-                extractor, "_invite_dialog_is_open", new_callable=AsyncMock, return_value=True
+                extractor,
+                "_invite_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
@@ -2324,14 +2341,41 @@ class TestSearchJobs:
     async def test_job_listings_deduplicated_across_pages(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         page1_listings = [
-            {"job_id": "100", "title": "Job A", "company": "Co", "location": "",
-             "work_type": "", "pay": "", "benefits": "", "easy_apply": "", "status": ""},
+            {
+                "job_id": "100",
+                "title": "Job A",
+                "company": "Co",
+                "location": "",
+                "work_type": "",
+                "pay": "",
+                "benefits": "",
+                "easy_apply": "",
+                "status": "",
+            },
         ]
         page2_listings = [
-            {"job_id": "100", "title": "Job A", "company": "Co", "location": "",
-             "work_type": "", "pay": "", "benefits": "", "easy_apply": "", "status": ""},
-            {"job_id": "200", "title": "Job B", "company": "Co", "location": "",
-             "work_type": "", "pay": "", "benefits": "", "easy_apply": "", "status": ""},
+            {
+                "job_id": "100",
+                "title": "Job A",
+                "company": "Co",
+                "location": "",
+                "work_type": "",
+                "pay": "",
+                "benefits": "",
+                "easy_apply": "",
+                "status": "",
+            },
+            {
+                "job_id": "200",
+                "title": "Job B",
+                "company": "Co",
+                "location": "",
+                "work_type": "",
+                "pay": "",
+                "benefits": "",
+                "easy_apply": "",
+                "status": "",
+            },
         ]
         id_pages = iter([["100"], ["100", "200"]])
         listing_pages = iter([page1_listings, page2_listings])
@@ -2368,7 +2412,10 @@ class TestSearchJobs:
             result = await extractor.search_jobs("python", max_pages=2)
 
         assert result["job_ids"] == ["100", "200"]
-        assert [listing["job_id"] for listing in result["job_listings"]] == ["100", "200"]
+        assert [listing["job_id"] for listing in result["job_listings"]] == [
+            "100",
+            "200",
+        ]
 
     async def test_job_listings_extraction_failure_is_non_fatal(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -5453,9 +5500,7 @@ class TestSendMessageComposerInteraction:
                 new_callable=AsyncMock,
                 return_value=True,
             ),
-            patch.object(
-                extractor, "_type_message_in_compose", new_callable=AsyncMock
-            ),
+            patch.object(extractor, "_type_message_in_compose", new_callable=AsyncMock),
             patch.object(
                 extractor,
                 "_click_message_send_button",
@@ -5466,7 +5511,10 @@ class TestSendMessageComposerInteraction:
                 extractor, "_dismiss_share_profile_prompt", new_callable=AsyncMock
             ),
             patch.object(
-                extractor, "_message_text_visible", new_callable=AsyncMock, return_value=True
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor, "_reset_stale_messaging_ui", new_callable=AsyncMock
@@ -5550,9 +5598,174 @@ class TestSendMessageComposerInteraction:
             )
 
         assert result == expected
-        mock_reply.assert_awaited_once_with(
-            "2-abc", "Hello", confirm_send=True
+        mock_reply.assert_awaited_once_with("2-abc", "Hello", confirm_send=True)
+
+
+class TestThreadIdNormalization:
+    def test_accepts_safe_thread_ids(self):
+        assert LinkedInExtractor._normalize_thread_id("2-abc123") == "2-abc123"
+        assert LinkedInExtractor._normalize_thread_id("  urn%3Ali%3Afsd  ") == (
+            "urn%3Ali%3Afsd"
         )
+
+    def test_rejects_path_and_query_injection(self):
+        for bad in (
+            "",
+            "  ",
+            "2-abc/../evil",
+            "2-abc?x=1",
+            "2-abc#frag",
+            "2-abc/extra",
+            "../messaging",
+        ):
+            assert LinkedInExtractor._normalize_thread_id(bad) is None
+
+    async def test_reply_in_thread_rejects_invalid_id_before_navigation(
+        self, mock_page
+    ):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor, "_navigate_to_page", new_callable=AsyncMock
+        ) as mock_nav:
+            result = await extractor._reply_in_thread(
+                "2-abc/../evil", "Hello", confirm_send=True
+            )
+        assert result["status"] == "send_failed"
+        assert "Invalid thread_id" in result["message"]
+        mock_nav.assert_not_awaited()
+
+
+class TestMessageSendConfirmation:
+    async def test_submit_requires_new_occurrence_beyond_baseline(self, mock_page):
+        """Pre-existing identical thread text must not false-confirm a send."""
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_focus_message_compose_box",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_count_message_text_occurrences",
+                new_callable=AsyncMock,
+                return_value=1,
+            ) as mock_count,
+            patch.object(extractor, "_type_message_in_compose", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_click_message_send_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_dismiss_share_profile_prompt", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_visible,
+            patch.object(
+                extractor, "_reset_stale_messaging_ui", new_callable=AsyncMock
+            ),
+        ):
+            result = await extractor._submit_compose_message(
+                "https://www.linkedin.com/messaging/thread/2-abc/",
+                "Hello again",
+                recipient_selected=True,
+                success_message="Reply sent.",
+            )
+
+        assert result["status"] == "send_unavailable"
+        mock_count.assert_awaited_once_with("Hello again")
+        mock_visible.assert_awaited_once_with("Hello again", min_count=2)
+
+    async def test_submit_sent_when_new_occurrence_appears(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_focus_message_compose_box",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_count_message_text_occurrences",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch.object(extractor, "_type_message_in_compose", new_callable=AsyncMock),
+            patch.object(
+                extractor,
+                "_click_message_send_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_dismiss_share_profile_prompt", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_message_text_visible",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_visible,
+            patch.object(
+                extractor, "_reset_stale_messaging_ui", new_callable=AsyncMock
+            ),
+        ):
+            result = await extractor._submit_compose_message(
+                "https://www.linkedin.com/messaging/thread/2-abc/",
+                "Brand new",
+                recipient_selected=True,
+                success_message="Reply sent.",
+            )
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        mock_visible.assert_awaited_once_with("Brand new", min_count=1)
+
+
+class TestInviteSubmitDialogShell:
+    async def test_open_dialog_with_disabled_primary_counts_as_success(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_invite_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_invite_primary_button_disabled",
+                new_callable=AsyncMock,
+                side_effect=[False, True],
+            ),
+            patch.object(
+                extractor,
+                "_click_dialog_primary_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_get_premium_upsell_message", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor, "_dismiss_dialog", new_callable=AsyncMock
+            ) as mock_dismiss,
+        ):
+            mock_page.wait_for_selector = AsyncMock(
+                side_effect=PlaywrightTimeoutError("still open")
+            )
+            result = await extractor._submit_invite_dialog(None)
+
+        assert result == (True, False, None, None)
+        mock_dismiss.assert_awaited_once()
 
 
 class TestBuildFeedReferences:

@@ -16,7 +16,7 @@ from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping import parse_company_sections
-from linkedin_mcp_server.scraping.extractor import _RATE_LIMITED_MSG
+from linkedin_mcp_server.scraping.constants import RATE_LIMITED_MSG as _RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
 logger = logging.getLogger(__name__)

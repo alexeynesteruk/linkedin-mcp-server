@@ -72,7 +72,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 | `AUTO_IMPORT_FROM_BROWSER` | on by default | Auto-import a LinkedIn session from a locally logged-in browser on the first no-session tool call, before falling back to manual login. On by default across interactive and non-interactive desktop runs; set `false` to require `--login` / `--import-from-browser`. No effect in containers (no host browser or keychain) or on a non-loopback HTTP bind. On macOS the OS keychain may prompt once for Safe Storage access. |
 | `USER_AGENT` | - | Custom browser user agent |
 | `TRANSPORT` | `stdio` | Transport mode: stdio, streamable-http |
-| `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport) |
+| `HOST` | `127.0.0.1` | HTTP server host (for streamable-http transport). Binding `0.0.0.0`/`::` requires `ALLOW_EXTERNAL_BIND=true` / `--allow-external-bind` |
 | `PORT` | `8000` | HTTP server port (for streamable-http transport) |
 | `HTTP_PATH` | `/mcp` | HTTP server path (for streamable-http transport) |
 | `SLOW_MO` | `0` | Delay between browser actions in ms (debugging) |

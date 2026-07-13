@@ -69,6 +69,7 @@ class EnvironmentKeys:
     HOST = "HOST"
     PORT = "PORT"
     HTTP_PATH = "HTTP_PATH"
+    ALLOW_EXTERNAL_BIND = "ALLOW_EXTERNAL_BIND"
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
@@ -193,6 +194,18 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if host_env := os.environ.get(EnvironmentKeys.HOST):
         config.server.host = host_env
 
+    if allow_ext_env := os.environ.get(EnvironmentKeys.ALLOW_EXTERNAL_BIND):
+        value = _normalize_env(allow_ext_env)
+        if value in TRUTHY_VALUES:
+            config.server.allow_external_bind = True
+        elif value in FALSY_VALUES:
+            config.server.allow_external_bind = False
+        else:
+            raise ConfigurationError(
+                f"Invalid ALLOW_EXTERNAL_BIND: '{allow_ext_env}'. "
+                "Must be a boolean (true/false)."
+            )
+
     # HTTP server port (validated in AppConfig.validate())
     if port_env := os.environ.get(EnvironmentKeys.PORT):
         try:
@@ -284,6 +297,16 @@ def load_from_args(config: AppConfig) -> AppConfig:
         type=str,
         default=None,
         help="HTTP server host (default: 127.0.0.1)",
+    )
+
+    parser.add_argument(
+        "--allow-external-bind",
+        action="store_true",
+        default=None,
+        help=(
+            "Allow binding streamable-http to 0.0.0.0 or ::. "
+            "The MCP endpoint is unauthenticated; only use this on a trusted network."
+        ),
     )
 
     parser.add_argument(
@@ -470,6 +493,9 @@ def load_from_args(config: AppConfig) -> AppConfig:
 
     if args.host:
         config.server.host = args.host
+
+    if args.allow_external_bind:
+        config.server.allow_external_bind = True
 
     if args.port:
         config.server.port = args.port

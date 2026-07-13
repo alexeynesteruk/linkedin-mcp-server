@@ -1,5 +1,7 @@
 services:
   linkedin-mcp:
+    # Reap zombie Chromium children (#477); same role as tini in Dockerfile.
+    init: true
     image: stickerdaniel/linkedin-mcp-server:4.17.0
     volumes:
       - ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp

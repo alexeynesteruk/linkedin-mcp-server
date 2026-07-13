@@ -132,6 +132,8 @@ class ServerConfig:
     port: int = 8000
     path: str = "/mcp"
     tool_timeout_seconds: float = DEFAULT_TOOL_TIMEOUT_SECONDS
+    # Required to bind streamable-http to 0.0.0.0 / :: (unauthenticated MCP).
+    allow_external_bind: bool = False
 
     def validate(self) -> None:
         """Validate server configuration values."""
@@ -179,11 +181,18 @@ class AppConfig:
         if not self.server.port:
             raise ConfigurationError("HTTP transport requires a valid port")
         if self.server.host in ("0.0.0.0", "::"):
+            if not self.server.allow_external_bind:
+                raise ConfigurationError(
+                    f"HTTP transport host {self.server.host!r} exposes the "
+                    "unauthenticated MCP endpoint on all network interfaces. "
+                    "Use 127.0.0.1 (default), or pass --allow-external-bind "
+                    "/ ALLOW_EXTERNAL_BIND=true only if you understand the risk."
+                )
             logger.warning(
                 "HTTP transport is binding to %s which exposes the server to "
                 "all network interfaces. The MCP endpoint has no authentication "
-                "— anyone on your network can use your LinkedIn session. "
-                "Use 127.0.0.1 (default) unless you understand the risk.",
+                "- anyone on your network can use your LinkedIn session. "
+                "Proceeding because allow_external_bind is set.",
                 self.server.host,
             )
 

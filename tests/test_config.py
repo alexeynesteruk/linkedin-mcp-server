@@ -116,10 +116,18 @@ class TestAppConfig:
         with pytest.raises(ConfigurationError, match="at least 2 characters"):
             config.validate()
 
-    def test_validate_warns_when_binding_all_interfaces(self, caplog):
+    def test_validate_rejects_all_interfaces_without_allow_external_bind(self):
         config = AppConfig()
         config.server.transport = "streamable-http"
         config.server.host = "0.0.0.0"
+        with pytest.raises(ConfigurationError, match="allow-external-bind"):
+            config.validate()
+
+    def test_validate_allows_all_interfaces_with_allow_external_bind(self, caplog):
+        config = AppConfig()
+        config.server.transport = "streamable-http"
+        config.server.host = "0.0.0.0"
+        config.server.allow_external_bind = True
         config.validate()
         assert any("0.0.0.0" in record.message for record in caplog.records)
 

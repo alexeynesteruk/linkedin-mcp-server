@@ -36,6 +36,9 @@ from linkedin_mcp_server.scraping.link_metadata import (
     build_references,
     dedupe_references,
 )
+from linkedin_mcp_server.scraping.constants import (
+    RATE_LIMITED_MSG as _RATE_LIMITED_MSG,
+)
 
 from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
 
@@ -51,9 +54,6 @@ _NAV_DELAY = 2.0
 
 # Backoff before retrying a temporarily blocked page
 _RATE_LIMIT_RETRY_DELAY = 5.0
-
-# Returned as section text when LinkedIn rate-limits the page
-_RATE_LIMITED_MSG = "[Rate limited] LinkedIn blocked this section. Try again later or request fewer sections."
 
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
@@ -1205,7 +1205,9 @@ class LinkedInExtractor:
             if isinstance(raw, str) and raw in _MESSAGING_CHROME_STRINGS:
                 return raw
         except Exception:
-            logger.debug("Could not read page locale for messaging chrome", exc_info=True)
+            logger.debug(
+                "Could not read page locale for messaging chrome", exc_info=True
+            )
         return "en"
 
     async def _wait_for_conversation_body(self, *, timeout: int = 10000) -> None:
@@ -2015,6 +2017,16 @@ class LinkedInExtractor:
                 _INVITE_DIALOG_SELECTOR, state="hidden", timeout=5000
             )
         except PlaywrightTimeoutError:
+            # LinkedIn sometimes keeps the dialog shell open after a successful
+            # send while the primary CTA becomes disabled. Treat that as success
+            # rather than false-failing a delivered invite (PR review).
+            if await self._invite_primary_button_disabled():
+                logger.debug(
+                    "Invite dialog stayed open but primary is disabled; "
+                    "treating submit as success"
+                )
+                await self._dismiss_dialog()
+                return True, note_filled, None, None
             logger.debug("Invite dialog did not close after submit")
             await self._dismiss_dialog()
             return False, False, None, None
@@ -2234,9 +2246,12 @@ class LinkedInExtractor:
 
         await self._navigate_to_page(invite_url)
 
-        submitted, note_sent, note_limit_message, block_reason = (
-            await self._submit_invite_dialog(note)
-        )
+        (
+            submitted,
+            note_sent,
+            note_limit_message,
+            block_reason,
+        ) = await self._submit_invite_dialog(note)
         if block_reason == "note_required":
             return _connection_result(
                 url,
@@ -2726,7 +2741,9 @@ class LinkedInExtractor:
             try:
                 await self._page.keyboard.press("Escape")
             except Exception:
-                logger.debug("Escape while resetting messaging UI failed", exc_info=True)
+                logger.debug(
+                    "Escape while resetting messaging UI failed", exc_info=True
+                )
             await asyncio.sleep(0.25)
 
     async def _type_message_in_compose(self, message: str) -> None:
@@ -2815,6 +2832,9 @@ class LinkedInExtractor:
                 "Could not focus compose box via JavaScript.",
                 recipient_selected=recipient_selected,
             )
+        # Snapshot how many times this text already appears outside the
+        # composer so a re-send of identical text is not false-confirmed.
+        baseline = await self._count_message_text_occurrences(message)
         await asyncio.sleep(0.1)
         await self._type_message_in_compose(message)
         await asyncio.sleep(0.3)
@@ -2822,7 +2842,7 @@ class LinkedInExtractor:
         if not await self._click_message_send_button():
             await self._page.keyboard.press("Enter")
         await self._dismiss_share_profile_prompt()
-        if not await self._message_text_visible(message):
+        if not await self._message_text_visible(message, min_count=baseline + 1):
             await self._reset_stale_messaging_ui()
             return self._message_action_result(
                 page_url,
@@ -2839,34 +2859,136 @@ class LinkedInExtractor:
             sent=True,
         )
 
-    async def _message_text_visible(self, message: str) -> bool:
-        """Wait until the sent message appears outside the active composer (#573).
+    async def _count_message_text_occurrences(self, message: str) -> int:
+        """Count visible non-composer occurrences of *message* on the page."""
+        try:
+            count = await self._page.evaluate(
+                self._MESSAGE_OCCURRENCE_JS, {"expected": message}
+            )
+            return int(count or 0)
+        except Exception:
+            logger.debug("Could not count message text occurrences", exc_info=True)
+            return 0
 
-        Uses the page-level default timeout (``BrowserConfig.default_timeout``).
+    # Shared DOM predicate: count non-overlapping occurrences of expected text
+    # in main, skipping editable/textbox ancestors (composer, inputs).
+    _MESSAGE_OCCURRENCE_JS = """({ expected }) => {
+        const normalize = value =>
+            (value || '').replace(/\\s+/g, ' ').trim();
+        const expectedNorm = normalize(expected);
+        if (!expectedNorm) return 0;
+
+        const isEditable = node => {
+            if (!node || node.nodeType !== 1) return false;
+            const el = node;
+            if (el.getAttribute('contenteditable') === 'true') return true;
+            if (el.getAttribute('role') === 'textbox') return true;
+            const tag = (el.tagName || '').toLowerCase();
+            return tag === 'textarea' || tag === 'input';
+        };
+
+        const main = document.querySelector('main') || document.body;
+        if (!main) return 0;
+
+        let haystack = '';
+        const walker = document.createTreeWalker(
+            main,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode(node) {
+                    let parent = node.parentElement;
+                    while (parent) {
+                        if (isEditable(parent)) {
+                            return NodeFilter.FILTER_REJECT;
+                        }
+                        parent = parent.parentElement;
+                    }
+                    const text = node.nodeValue || '';
+                    if (!text.trim()) return NodeFilter.FILTER_REJECT;
+                    return NodeFilter.FILTER_ACCEPT;
+                },
+            }
+        );
+        let current = walker.nextNode();
+        while (current) {
+            haystack += ' ' + (current.nodeValue || '');
+            current = walker.nextNode();
+        }
+        const normalized = normalize(haystack);
+        if (!normalized) return 0;
+        let count = 0;
+        let from = 0;
+        while (true) {
+            const idx = normalized.indexOf(expectedNorm, from);
+            if (idx < 0) break;
+            count += 1;
+            from = idx + expectedNorm.length;
+        }
+        return count;
+    }"""
+
+    async def _message_text_visible(self, message: str, *, min_count: int = 1) -> bool:
+        """Wait until *message* appears outside the composer at least min_count times.
+
+        Uses a pre-send baseline so pre-existing thread text cannot false-
+        confirm a failed send (#573 / PR review).
         """
         try:
             await self._page.wait_for_function(
-                """({ expected }) => {
+                """({ expected, minCount }) => {
                     const normalize = value =>
                         (value || '').replace(/\\s+/g, ' ').trim();
                     const expectedNorm = normalize(expected);
                     if (!expectedNorm) return false;
 
-                    const compose = document.querySelector(
-                        'div[role="textbox"][contenteditable="true"]'
-                    );
-                    const composeText = normalize(
-                        compose?.innerText || compose?.textContent || ''
-                    );
-                    if (composeText && composeText.includes(expectedNorm)) {
-                        return false;
-                    }
+                    const isEditable = node => {
+                        if (!node || node.nodeType !== 1) return false;
+                        const el = node;
+                        if (el.getAttribute('contenteditable') === 'true') return true;
+                        if (el.getAttribute('role') === 'textbox') return true;
+                        const tag = (el.tagName || '').toLowerCase();
+                        return tag === 'textarea' || tag === 'input';
+                    };
 
                     const main = document.querySelector('main') || document.body;
-                    const threadText = normalize(main?.innerText || '');
-                    return threadText.includes(expectedNorm);
+                    if (!main) return false;
+
+                    let haystack = '';
+                    const walker = document.createTreeWalker(
+                        main,
+                        NodeFilter.SHOW_TEXT,
+                        {
+                            acceptNode(node) {
+                                let parent = node.parentElement;
+                                while (parent) {
+                                    if (isEditable(parent)) {
+                                        return NodeFilter.FILTER_REJECT;
+                                    }
+                                    parent = parent.parentElement;
+                                }
+                                const text = node.nodeValue || '';
+                                if (!text.trim()) return NodeFilter.FILTER_REJECT;
+                                return NodeFilter.FILTER_ACCEPT;
+                            },
+                        }
+                    );
+                    let current = walker.nextNode();
+                    while (current) {
+                        haystack += ' ' + (current.nodeValue || '');
+                        current = walker.nextNode();
+                    }
+                    const normalized = normalize(haystack);
+                    let count = 0;
+                    let from = 0;
+                    while (true) {
+                        const idx = normalized.indexOf(expectedNorm, from);
+                        if (idx < 0) break;
+                        count += 1;
+                        from = idx + expectedNorm.length;
+                    }
+                    return count >= minCount;
                 }""",
-                arg={"expected": message},
+                arg={"expected": message, "minCount": min_count},
             )
             return True
         except PlaywrightTimeoutError:
@@ -2882,11 +3004,26 @@ class LinkedInExtractor:
         except Exception:
             logger.debug("Could not dismiss LinkedIn messaging UI", exc_info=True)
 
+    # Thread IDs appear in /messaging/thread/<id>/ URLs. Restrict to a safe
+    # path segment so caller-controlled values cannot rewrite destination
+    # path/query/fragment before a confirmed send (PR review).
+    _THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_.+=%-]+$")
+
+    @classmethod
+    def _normalize_thread_id(cls, thread_id: str) -> str | None:
+        """Return a validated thread id path segment, or None if unsafe."""
+        candidate = (thread_id or "").strip()
+        if not candidate or not cls._THREAD_ID_RE.fullmatch(candidate):
+            return None
+        return candidate
+
     @staticmethod
     def _extract_thread_id(url: str) -> str | None:
         """Parse a LinkedIn thread id from a messaging thread URL."""
         match = re.search(r"/messaging/thread/([^/?#]+)/", url)
-        return match.group(1) if match else None
+        if not match:
+            return None
+        return LinkedInExtractor._normalize_thread_id(match.group(1))
 
     async def _resolve_conversation_thread_urls(self, display_name: str) -> list[str]:
         """Return all thread URLs whose participant name matches display_name.
@@ -3999,6 +4136,15 @@ class LinkedInExtractor:
         confirm_send: bool,
     ) -> dict[str, Any]:
         """Reply inline on an existing thread page (#483)."""
+        safe_thread_id = self._normalize_thread_id(thread_id)
+        if safe_thread_id is None:
+            return self._message_action_result(
+                "https://www.linkedin.com/messaging/",
+                "send_failed",
+                "Invalid thread_id. Pass the id from get_conversation or "
+                "search_conversations (path segment only, no /, ?, or #).",
+            )
+        thread_id = safe_thread_id
         thread_url = f"https://www.linkedin.com/messaging/thread/{thread_id}/"
         await self._reset_stale_messaging_ui()
         await self._navigate_to_page(thread_url)
