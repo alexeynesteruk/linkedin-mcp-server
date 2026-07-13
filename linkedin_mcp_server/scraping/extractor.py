@@ -96,15 +96,25 @@ _NETWORK_TOKENS = ("F", "S", "O")
 _DIALOG_SELECTOR = 'dialog[open], [role="dialog"]'
 # Invite/custom-invite dialogs expose a textarea; the messaging overlay is a
 # contenteditable textbox inside [role="dialog"] (#432).
-_INVITE_DIALOG_SELECTOR = (
-    '[role="dialog"]:not(:has(div[role="textbox"][contenteditable="true"])), '
-    "dialog:not(:has(div[role=\"textbox\"][contenteditable=\"true\"]))"
+_INVITE_DIALOG_ALT_SELECTORS = (
+    '[role="dialog"]:not(:has(div[role="textbox"][contenteditable="true"]))',
+    'dialog:not(:has(div[role="textbox"][contenteditable="true"]))',
 )
-_INVITE_DIALOG_BUTTONS_SELECTOR = (
-    f"{_INVITE_DIALOG_SELECTOR} button, "
-    f"{_INVITE_DIALOG_SELECTOR} [role='button']"
-)
-_INVITE_DIALOG_TEXTAREA_SELECTOR = f"{_INVITE_DIALOG_SELECTOR} textarea"
+_INVITE_DIALOG_SELECTOR = ", ".join(_INVITE_DIALOG_ALT_SELECTORS)
+
+
+def _scoped_invite_dialog_selector(child: str) -> str:
+    """Scope *child* under each invite-dialog root alternative.
+
+    ``_INVITE_DIALOG_SELECTOR`` is a comma-OR of two roots. Appending
+    `` button`` to the raw string would parse as ``root1, root2 button``
+    and match the bare dialog node instead of its buttons.
+    """
+    return ", ".join(f"{root} {child}" for root in _INVITE_DIALOG_ALT_SELECTORS)
+
+
+_INVITE_DIALOG_BUTTONS_SELECTOR = _scoped_invite_dialog_selector("button")
+_INVITE_DIALOG_TEXTAREA_SELECTOR = _scoped_invite_dialog_selector("textarea")
 _DIALOG_PREMIUM_LINK_SELECTOR = (
     'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
 )
@@ -2006,6 +2016,8 @@ class LinkedInExtractor:
             )
         except PlaywrightTimeoutError:
             logger.debug("Invite dialog did not close after submit")
+            await self._dismiss_dialog()
+            return False, False, None, None
 
         return True, note_filled, None, None
 

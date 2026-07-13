@@ -964,6 +964,24 @@ class TestDetectConnectionState:
         )
 
 
+class TestInviteDialogSelectors:
+    def test_child_selectors_scope_each_dialog_root(self):
+        from linkedin_mcp_server.scraping.extractor import (
+            _INVITE_DIALOG_ALT_SELECTORS,
+            _INVITE_DIALOG_BUTTONS_SELECTOR,
+            _INVITE_DIALOG_TEXTAREA_SELECTOR,
+        )
+
+        for selector, child in (
+            (_INVITE_DIALOG_BUTTONS_SELECTOR, "button"),
+            (_INVITE_DIALOG_TEXTAREA_SELECTOR, "textarea"),
+        ):
+            parts = [part.strip() for part in selector.split(",")]
+            assert len(parts) == len(_INVITE_DIALOG_ALT_SELECTORS)
+            for root, part in zip(_INVITE_DIALOG_ALT_SELECTORS, parts, strict=True):
+                assert part == f"{root} {child}"
+
+
 class TestConnectWithPerson:
     def _mock_scrape(
         self, profile_text: str, *, follow_up_text: str | None = None
