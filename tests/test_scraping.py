@@ -3008,6 +3008,124 @@ class TestSearchJobs:
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
 
+    async def test_search_people_geo_urn_filter(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        ):
+            result = await extractor.search_people("engineer", geo_urn=["101728296"])
+
+        assert "geoUrn=%5B%22101728296%22%5D" in result["url"]
+
+    async def test_search_people_geo_urn_multi(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        ):
+            result = await extractor.search_people(
+                "engineer", geo_urn=["101728296", "102257491"]
+            )
+
+        assert "geoUrn=%5B%22101728296%22%2C%22102257491%22%5D" in result["url"]
+
+    async def test_search_people_rejects_non_numeric_geo_urn(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="numeric LinkedIn geo URN"):
+            await extractor.search_people("engineer", geo_urn=["abc"])
+
+    async def test_search_people_rejects_unicode_digit_geo_urn(self, mock_page):
+        """geoUrn ids are ASCII decimal; reject Unicode digits that
+        ``str.isdigit()`` would otherwise accept."""
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="numeric LinkedIn geo URN"):
+            await extractor.search_people("engineer", geo_urn=["١٠١"])
+
+    async def test_search_people_default_loads_single_page(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "Jane Doe",
+                [{"kind": "person", "url": "/in/jane/", "text": "Jane Doe"}],
+            ),
+        ) as mock_extract:
+            result = await extractor.search_people("engineer")
+
+        assert mock_extract.await_count == 1
+        assert "&page=" not in result["url"]
+        assert result["sections"]["search_results"] == "Jane Doe"
+
+    async def test_search_people_paginates_and_joins_pages(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        pages = [
+            extracted(
+                "Jane Doe",
+                [{"kind": "person", "url": "/in/jane/", "text": "Jane Doe"}],
+            ),
+            extracted(
+                "John Roe",
+                [
+                    {"kind": "person", "url": "/in/jane/", "text": "Jane Doe"},
+                    {"kind": "person", "url": "/in/john/", "text": "John Roe"},
+                ],
+            ),
+        ]
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=pages,
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_people("engineer", max_pages=2)
+
+        assert mock_extract.await_count == 2
+        second_url = mock_extract.await_args_list[1].args[0]
+        assert "&page=2" in second_url
+        assert result["sections"]["search_results"] == "Jane Doe\n---\nJohn Roe"
+        urls = [ref["url"] for ref in result["references"]["search_results"]]
+        assert urls == ["/in/jane/", "/in/john/"]
+
+    async def test_search_people_stops_when_page_adds_no_new_people(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        repeated: list[Reference] = [
+            {"kind": "person", "url": "/in/jane/", "text": "Jane Doe"}
+        ]
+        pages = [
+            extracted("Jane Doe", repeated),
+            extracted("Jane Doe again", repeated),
+            extracted("should not be reached", repeated),
+        ]
+        with (
+            patch.object(
+                extractor,
+                "extract_page",
+                new_callable=AsyncMock,
+                side_effect=pages,
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.search_people("engineer", max_pages=5)
+
+        assert mock_extract.await_count == 2
+        assert result["sections"]["search_results"] == "Jane Doe"
+
 
 class TestStripLinkedInNoise:
     def test_strips_footer(self):

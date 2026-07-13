@@ -85,7 +85,7 @@
     },
     {
       "name": "search_people",
-      "description": "Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company"
+      "description": "Search for people on LinkedIn by keywords, location (free text or geo URN), connection degree, current company, and optional multi-page pagination via max_pages"
     },
     {
       "name": "get_inbox",
@@ -181,7 +181,7 @@
     },
     {
       "name": "linkedin_search_people",
-      "description": "Alias for search_people. Search for people on LinkedIn by keywords, location, connection degree (1st/2nd/3rd), and current company"
+      "description": "Alias for search_people. Search for people on LinkedIn by keywords, location (free text or geo URN), connection degree, current company, and optional multi-page pagination"
     },
     {
       "name": "linkedin_send_message",
