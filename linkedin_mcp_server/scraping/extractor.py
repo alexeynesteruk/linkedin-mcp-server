@@ -33,6 +33,7 @@ from linkedin_mcp_server.core.utils import (
 from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.link_metadata import (
     Reference,
+    _is_linkedin_host,
     build_references,
     dedupe_references,
 )
@@ -40,7 +41,12 @@ from linkedin_mcp_server.scraping.constants import (
     RATE_LIMITED_MSG as _RATE_LIMITED_MSG,
 )
 
-from .fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from .fields import (
+    ANALYTICS_SECTIONS,
+    ANALYTICS_TIME_RANGE_SECTIONS,
+    COMPANY_SECTIONS,
+    PERSON_SECTIONS,
+)
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -57,6 +63,8 @@ _RATE_LIMIT_RETRY_DELAY = 5.0
 
 # LinkedIn shows 25 results per page
 _PAGE_SIZE = 25
+
+_SAVED_JOBS_URL = "https://www.linkedin.com/my-items/saved-jobs/"
 
 # Normalization maps for job search filters
 _DATE_POSTED_MAP = {
@@ -303,7 +311,7 @@ function findActionRoot(main) {
 #   [button aria-expanded, no aria-label (More)]
 #
 # All checks are attribute presence and structural counts per the
-# AGENTS.md Scraping Rules — no label values are read. Every guard kills
+# AGENTS.md Scraping Rules - no label values are read. Every guard kills
 # a known false positive: total-button-count === 3 and labeled === 2
 # exclude video-player control bars (play/mute/captions all carry
 # aria-label); the unlabeled-expander check excludes player settings
@@ -314,7 +322,7 @@ function findActionRoot(main) {
 # expander candidates because cover-video profiles render the player's
 # expander before the top-card row in DOM order.
 #
-# The search is scoped to the top card — the first <section> of <main>
+# The search is scoped to the top card - the first <section> of <main>
 # (falling back to main's first child, then main). Profile pages render
 # the action row in the top card; feed, "people also viewed", and other
 # widgets live in later sections. Without the scope an unrelated widget
@@ -361,7 +369,7 @@ function findIncomingActionRow(main) {
 
 # Locale-independent connection-state probe. Returns four booleans;
 # per AGENTS.md Scraping Rules, every signal is based on URL patterns
-# or ARIA-attribute *presence* — never on label text values.
+# or ARIA-attribute *presence* - never on label text values.
 #
 # - hasInvite: vanityName-scoped invite anchor anywhere in document.
 #   Searches document (not main) so a post-More-menu reread sees
@@ -444,7 +452,7 @@ _ACTION_SIGNALS_JS = (
 # Open the profile's More button, located inside the action root via the
 # aria-expanded attribute. The aria-expanded attribute uniquely identifies
 # the menu opener without text labels (the More button has no aria-label,
-# while Follow/Connect/Pending buttons do — the inverse pattern). Returns
+# while Follow/Connect/Pending buttons do - the inverse pattern). Returns
 # true iff the click landed; the caller waits for [role='menu'] visibility
 # before re-scanning signals.
 _OPEN_MORE_BUTTON_JS = (
@@ -466,7 +474,7 @@ _OPEN_MORE_BUTTON_JS = (
 )
 
 # Click Accept on an incoming-request profile. Accept is the FIRST labeled
-# button in the fingerprinted row — primary actions render first in
+# button in the fingerprinted row - primary actions render first in
 # top-card action rows (Connect/Message lead on other profile states; the
 # inverse of dialogs, where the primary button renders last). Clicking the
 # second button would silently and irreversibly Ignore the request, so the
@@ -600,7 +608,7 @@ def _build_feed_references(
       for permalinks that the DOM does not surface as an anchor.
 
     Both are deduped on exact URL string. The two shapes pointing at
-    the same underlying post will *not* collapse — ``dedupe_references``
+    the same underlying post will *not* collapse - ``dedupe_references``
     matches strings, not URNs. Both are valid LinkedIn permalinks, so
     consumers should treat ``feed_post`` as polymorphic on URL form;
     URN-based equivalence is left to the consumer.
@@ -701,7 +709,7 @@ def _truncate_linkedin_noise(text: str) -> str:
 # Messaging-page chrome around an opened conversation thread. innerText on
 # /messaging/thread/ pages carries no URL or attribute signal separating the
 # inbox sidebar from the thread, so the boundaries are matched on visible
-# strings — guarded by an explicit per-locale table (CLAUDE.md → Scraping
+# strings - guarded by an explicit per-locale table (CLAUDE.md → Scraping
 # Rules). BrowserManager forces the context locale to en-US (core/browser.py),
 # so the "en" entry is the operative one; a locale without a table entry
 # passes through unstripped.
@@ -778,7 +786,7 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
     # exact companion control follows within the next few lines. The real
     # composer block is contiguous (label + controls observed within 6
     # lines), so a nearby companion confirms chrome, while a message that
-    # quotes the label — or control text with any suffix — falls through to
+    # quotes the label - or control text with any suffix - falls through to
     # the missing-marker fallback. A verbatim multi-line reproduction of the
     # block inside a message remains indistinguishable from the block itself;
     # that ambiguity is inherent to text-only stripping.
@@ -796,7 +804,7 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
     # Start boundary: the sidebar's pagination line, when present, pins the
     # real thread header as the first options line after it; quoted UI text
     # inside messages can no longer pull the boundary into the thread. The
-    # sidebar omits the pagination control when there are few conversations —
+    # sidebar omits the pagination control when there are few conversations -
     # then fall back to the last options line before the composer.
     start = 0
     sidebar_end = next(
@@ -819,6 +827,74 @@ def strip_conversation_chrome(text: str, locale: str = "en") -> str:
                 break
 
     return "\n".join(lines[start:end]).strip()
+
+
+# Canonical values LinkedIn's analytics ?timeRange= param accepts (verified
+# live 2026-07-07), plus short aliases for tool ergonomics.
+_ANALYTICS_TIME_RANGE_MAP = {
+    "7d": "past_7_days",
+    "28d": "past_28_days",
+    "90d": "past_90_days",
+    "365d": "past_365_days",
+    "past_7_days": "past_7_days",
+    "past_28_days": "past_28_days",
+    "past_90_days": "past_90_days",
+    "past_365_days": "past_365_days",
+}
+
+# Post permalink path shapes: /feed/update/<urn>/ (colons in the URN may be
+# percent-encoded in copied URLs) and /posts/<slug>. Matched against the URL
+# path only - query and fragment are stripped before navigation.
+_POST_PATH_RE = re.compile(
+    r"^/(?:feed/update/urn(?::|%3[Aa])li(?::|%3[Aa])(?:activity|ugcPost|share)"
+    r"(?::|%3[Aa])\d+|posts/[^/?#]+)/?$"
+)
+_POST_URN_RE = re.compile(r"^urn:li:(?:activity|ugcPost|share):\d+$")
+
+
+def normalize_post_url(post: str) -> str | None:
+    """Canonicalize a user-supplied post identifier to a permalink URL.
+
+    Accepts a bare activity/ugcPost/share URN, a relative permalink path
+    (``/feed/update/<urn>/`` or ``/posts/<slug>``), or a full http(s) URL on
+    a LinkedIn host with one of those paths. Returns None for anything else
+    so the tool layer can reject non-post targets before navigating.
+    """
+    value = post.strip()
+    if not value:
+        return None
+    if _POST_URN_RE.match(value):
+        return f"https://www.linkedin.com/feed/update/{value}/"
+    if value.startswith("/"):
+        path = value
+    else:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"}:
+            return None
+        if not _is_linkedin_host(parsed.netloc.lower()):
+            return None
+        path = parsed.path
+    if not _POST_PATH_RE.match(path):
+        return None
+    if not path.endswith("/"):
+        path += "/"
+    return f"https://www.linkedin.com{path}"
+
+
+# Comment pagination on a post permalink page is a plain <button> with no
+# structural signal - no href, no distinguishing ARIA attribute - so per the
+# Scraping Rules the visible label is matched via an explicit per-locale
+# table. BrowserManager forces the context locale to en-US (core/browser.py),
+# so the "en" entry is the operative one; a locale without an entry skips
+# pagination and returns only the initially rendered comments. The pattern
+# covers both thread-level pagination ("Load more comments") and collapsed
+# reply expansion ("See previous replies" / "Show more replies").
+_POST_MORE_COMMENTS_RE: dict[str, re.Pattern[str]] = {
+    "en": re.compile(
+        r"^(?:Load|Show|See)\s+(?:more|previous)\s+(?:comments|replies)\b",
+        re.IGNORECASE,
+    ),
+}
 
 
 class LinkedInExtractor:
@@ -946,10 +1022,10 @@ class LinkedInExtractor:
         A ``net::ERR_TOO_MANY_REDIRECTS`` navigation failure is treated as a
         stale/corrupt LinkedIn cookie state (login <-> checkpoint loop): the
         live context's cookies and the persisted auth artifacts are cleared
-        automatically — so a server restart does not re-seed the broken
-        state — and the navigation is retried once. The retry then lands on
+        automatically - so a server restart does not re-seed the broken
+        state - and the navigation is retried once. The retry then lands on
         a logged-out page, the auth-barrier check raises
-        AuthenticationError, and the interactive re-login flow takes over —
+        AuthenticationError, and the interactive re-login flow takes over -
         no manual profile cleanup needed. Artifact cleanup is best-effort
         per target: even if the live profile directory cannot be fully
         removed (locked files on Windows), dropping ``source-state.json``
@@ -993,7 +1069,7 @@ class LinkedInExtractor:
                     exc
                 ):
                     logger.warning(
-                        "Redirect loop navigating to %s — clearing browser "
+                        "Redirect loop navigating to %s - clearing browser "
                         "cookies and persisted auth state, then retrying once "
                         "(stale/corrupt LinkedIn session state).",
                         url,
@@ -1291,7 +1367,7 @@ class LinkedInExtractor:
         """Open the profile's More (three-dot) menu in a locale-independent way.
 
         Locates the More button structurally as ``actionRoot
-        button[aria-expanded]`` — the action-root walk discriminates the
+        button[aria-expanded]`` - the action-root walk discriminates the
         profile More button from any other More-labelled buttons elsewhere
         on the page (notably the video-player More on profiles with
         background videos), and ``aria-expanded`` distinguishes the menu
@@ -1321,7 +1397,7 @@ class LinkedInExtractor:
 
         Delegates to ``_CLICK_INCOMING_ACCEPT_JS``: the click fires only
         when the full incoming-row fingerprint matches, and it targets the
-        FIRST labeled button (Accept renders before Ignore — primary
+        FIRST labeled button (Accept renders before Ignore - primary
         actions lead in top-card rows). Clicking the second button would
         silently and irreversibly Ignore the request; the strict
         fingerprint plus the caller's verify-after-click are the
@@ -1407,10 +1483,10 @@ class LinkedInExtractor:
         that window yields an empty (``sections: {}``) or partially-loaded
         transcript. Block until either a rendered turn's ``thread_turn_marker``
         appears ("... sent the following message ...") or the trailing composer
-        mounts (``composer_start``) — the latter signals an empty thread is
+        mounts (``composer_start``) - the latter signals an empty thread is
         ready and avoids a full timeout waiting for turns that will never
         appear. Locale is read from ``document.documentElement.lang`` with an
-        ``en`` table fallback. On timeout, fall through — the caller still
+        ``en`` table fallback. On timeout, fall through - the caller still
         extracts whatever is present, preserving prior behavior rather than
         raising.
         """
@@ -1565,7 +1641,7 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("Feed content did not appear on %s", url)
 
-        # The feed has its own scroll container — window.scrollTo is a no-op.
+        # The feed has its own scroll container - window.scrollTo is a no-op.
         # mouse.wheel over the viewport center triggers the real scroll.
         _MAX_SCROLLS = 12
         _MAX_STALE = 3
@@ -1593,7 +1669,7 @@ class LinkedInExtractor:
                 # everything Playwright already delivered. Without this,
                 # the count comparison races: the wheel fires a network
                 # response, the listener creates a read task, and the loop
-                # sleeps and re-checks before _read() finishes appending —
+                # sleeps and re-checks before _read() finishes appending -
                 # producing false-stale verdicts.
                 if pending_reads:
                     done, _still = await asyncio.wait(
@@ -1714,7 +1790,7 @@ class LinkedInExtractor:
         Assumes ``self._page`` already points at ``url`` (or its post-redirect
         equivalent). Performs rate-limit detection, modal dismissal, lazy-load
         scrolling, innerText extraction, noise truncation, and reference
-        building — everything ``_extract_page_once`` does after the goto.
+        building - everything ``_extract_page_once`` does after the goto.
         """
         await detect_rate_limit(self._page)
 
@@ -1763,7 +1839,7 @@ class LinkedInExtractor:
         # via JS. Wait until at least one /in/ profile anchor appears inside
         # <main> so innerText extraction sees the actual list. Use a 5s
         # timeout instead of the 10s pattern shared with is_search/is_details
-        # — empty/restricted listings are common here (small companies,
+        # - empty/restricted listings are common here (small companies,
         # privacy settings) and a full 10s wait per call adds up.
         is_company_people = "/company/" in url and "/people/" in url
         if is_company_people:
@@ -1828,7 +1904,7 @@ class LinkedInExtractor:
 
         if is_job:
             # Expand collapsed job description via "See more" (#559).
-            # Text-based selector scoped to <main> — no CSS class names.
+            # Text-based selector scoped to <main> - no CSS class names.
             # Locale limitation: English "See more" only; other locales leave
             # the description collapsed (documented per CLAUDE.md).
             button = self._page.locator("main button").filter(
@@ -1926,7 +2002,7 @@ class LinkedInExtractor:
         except PlaywrightTimeoutError:
             logger.debug("No modal overlay found on %s, falling back to main", url)
 
-        # NOTE: Do NOT call handle_modal_close() here — the contact-info
+        # NOTE: Do NOT call handle_modal_close() here - the contact-info
         # overlay *is* a dialog/modal. Dismissing it would destroy the
         # content before the JS evaluation below can read it.
 
@@ -2109,8 +2185,8 @@ class LinkedInExtractor:
         """Read locale-independent structural signals for a profile's
         relationship state.
 
-        Detection uses URL patterns and ARIA attribute presence only — never
-        text values — per the AGENTS.md Scraping Rules. The vanityName invite
+        Detection uses URL patterns and ARIA attribute presence only - never
+        text values - per the AGENTS.md Scraping Rules. The vanityName invite
         anchor is searched document-wide because LinkedIn renders the More
         menu's contents in a portal-mounted ``[role='menu']`` outside ``<main>``;
         the URL is uniquely scoped to the target user, so document-wide
@@ -2879,7 +2955,7 @@ class LinkedInExtractor:
             # visibility:visible, opacity:1, non-zero bbox, no inert ancestor).
             # This appears to be a patchright bug with React-hydrated contenteditable
             # elements in isolated worlds. Skip the actionability wait when count()
-            # already confirmed the element is present — downstream interactions
+            # already confirmed the element is present - downstream interactions
             # use page.evaluate() which bypasses the same check.
             if candidate_count and candidate_count > 0:
                 return locator.last
@@ -3234,13 +3310,13 @@ class LinkedInExtractor:
 
         Enumerates the plain messaging inbox (`/messaging/`) plus click-to-capture
         because LinkedIn renders the messaging sidebar with no anchor hrefs, no
-        data-thread attributes, and no embedded URNs — clicking each row and
+        data-thread attributes, and no embedded URNs - clicking each row and
         reading the resulting SPA URL is the only available extraction path.
         The inbox is used rather than `?searchTerm=` because LinkedIn's
         messaging search frequently returns "We didn't find anything" for a
         participant whose thread is plainly present in the inbox (issue #434).
         ``name_filter`` is passed to the enumerator so only the matching row is
-        clicked — clicking a row may mark it read, so unrelated threads stay
+        clicked - clicking a row may mark it read, so unrelated threads stay
         untouched.
 
         Matches by case-insensitive equality on the cleaned participant name
@@ -3252,8 +3328,8 @@ class LinkedInExtractor:
         below the scrolled rows), it falls back to the `?searchTerm=` search as
         a last resort.
 
-        For a participant with multiple threads, the returned set — and thus
-        ``index`` selection in the caller — covers the threads visible in the
+        For a participant with multiple threads, the returned set - and thus
+        ``index`` selection in the caller - covers the threads visible in the
         scanned inbox; the search fallback only runs when the inbox scan is
         empty. Open a buried duplicate thread directly via ``thread_id``
         (enumerate IDs with ``search_conversations``).
@@ -3288,7 +3364,7 @@ class LinkedInExtractor:
 
         # Fallback: LinkedIn's messaging search. Unreliable (often returns
         # "We didn't find anything" even for present threads, see #434), so it
-        # runs only when the inbox scan came up empty — e.g. a thread buried
+        # runs only when the inbox scan came up empty - e.g. a thread buried
         # below the scrolled inbox window.
         await self._navigate_to_page(
             f"https://www.linkedin.com/messaging/?searchTerm={quote_plus(display_name)}"
@@ -3732,7 +3808,7 @@ class LinkedInExtractor:
         NOTE: This is a deliberate DOM exception. The element has ``display: none``
         (screen-reader only), so the text never appears in ``innerText``. A class-based
         selector is the only reliable way to read it. Gracefully returns ``None`` if
-        LinkedIn renames the class — pagination just falls back to ``max_pages``.
+        LinkedIn renames the class - pagination just falls back to ``max_pages``.
         """
         text = await self._page.evaluate(
             """() => {
@@ -3881,7 +3957,7 @@ class LinkedInExtractor:
                     "https://www.linkedin.com/jobs/search/"
                 ):
                     logger.debug(
-                        "Unexpected page URL after extraction: %s — "
+                        "Unexpected page URL after extraction: %s - "
                         "skipping job ID extraction",
                         self._page.url,
                     )
@@ -3944,6 +4020,491 @@ class LinkedInExtractor:
             }
         if section_errors:
             result["section_errors"] = section_errors
+        return result
+
+    async def _extract_saved_jobs_page(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
+        """Extract innerText from a saved-jobs page with soft rate-limit retry."""
+        try:
+            result = await self._extract_saved_jobs_page_once(url, section_name)
+            if result.text != _RATE_LIMITED_MSG:
+                return result
+
+            logger.info(
+                "Retrying saved jobs page %s after %.0fs backoff",
+                url,
+                _RATE_LIMIT_RETRY_DELAY,
+            )
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            result = await self._extract_saved_jobs_page_once(url, section_name)
+            if result.text == _RATE_LIMITED_MSG:
+                logger.warning("Saved jobs page %s still rate-limited after retry", url)
+            return result
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract saved jobs page %s: %s", url, e)
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="extract_saved_jobs_page",
+                    target_url=url,
+                    section_name=section_name,
+                ),
+            )
+
+    async def _extract_saved_jobs_page_once(
+        self,
+        url: str,
+        section_name: str,
+    ) -> ExtractedSection:
+        """Single attempt: navigate, scroll list, and extract innerText."""
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        main_found = True
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", url)
+            main_found = False
+
+        await handle_modal_close(self._page)
+        if main_found:
+            await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=5)
+
+        raw_result = await self._extract_root_content(["main"])
+        raw = raw_result["text"]
+        if raw_result["source"] == "body":
+            logger.debug("No <main> at evaluation time on %s, using body fallback", url)
+        elif not main_found:
+            logger.debug(
+                "<main> appeared after wait timeout on %s, scroll was skipped",
+                url,
+            )
+
+        if not raw:
+            return ExtractedSection(text="", references=[])
+        truncated = _truncate_linkedin_noise(raw)
+        if not truncated and raw.strip():
+            logger.warning(
+                "Saved jobs page %s returned only LinkedIn chrome (likely rate-limited)",
+                url,
+            )
+            return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
+        cleaned = _filter_linkedin_noise_lines(truncated)
+        return ExtractedSection(
+            text=cleaned,
+            references=build_references(raw_result["references"], section_name),
+        )
+
+    async def _get_total_list_pages(self) -> int | None:
+        """Read last page number from artdeco pagination buttons.
+
+        Parses numeric page labels from ``ul.artdeco-pagination__pages`` so
+        pagination works on locale-independent my-items list pages. Returns
+        ``None`` when pagination is absent or unparseable.
+        """
+        value = await self._page.evaluate(
+            """() => {
+                const buttons = document.querySelectorAll(
+                    'ul.artdeco-pagination__pages li button'
+                );
+                if (!buttons.length) return null;
+                const nums = [...buttons]
+                    .map((b) => parseInt(b.textContent.trim(), 10))
+                    .filter((n) => !Number.isNaN(n));
+                return nums.length ? Math.max(...nums) : null;
+            }"""
+        )
+        return int(value) if value is not None else None
+
+    async def get_saved_jobs(self, max_pages: int = 3) -> dict[str, Any]:
+        """List the authenticated user's saved job postings.
+
+        Navigates to ``/my-items/saved-jobs/``, extracts innerText and job IDs
+        from each page, and paginates with ``?start=`` offsets (25 per step).
+
+        Args:
+            max_pages: Maximum pages to load (1-10, default 3)
+
+        Returns:
+            {url, sections: {saved_jobs: text}, job_ids: [str]}
+        """
+        base_url = _SAVED_JOBS_URL
+        all_job_ids: list[str] = []
+        seen_ids: set[str] = set()
+        page_texts: list[str] = []
+        page_references: list[Reference] = []
+        section_errors: dict[str, dict[str, Any]] = {}
+        total_pages: int | None = None
+        total_pages_queried = False
+
+        for page_num in range(max_pages):
+            if total_pages is not None and page_num >= total_pages:
+                logger.debug("All %d saved-jobs pages fetched, stopping", total_pages)
+                break
+
+            if page_num > 0:
+                await asyncio.sleep(_NAV_DELAY)
+
+            url = (
+                base_url
+                if page_num == 0
+                else f"{base_url}?start={page_num * _PAGE_SIZE}"
+            )
+
+            try:
+                extracted = await self._extract_saved_jobs_page(
+                    url, section_name="saved_jobs"
+                )
+
+                if not extracted.text or extracted.text == _RATE_LIMITED_MSG:
+                    if extracted.error:
+                        section_errors["saved_jobs"] = extracted.error
+                    break
+
+                if not total_pages_queried:
+                    total_pages_queried = True
+                    try:
+                        total_pages = await self._get_total_list_pages()
+                    except Exception as e:
+                        logger.debug("Could not read saved-jobs page count: %s", e)
+                    else:
+                        if total_pages is not None:
+                            logger.debug(
+                                "LinkedIn reports %d saved-jobs pages", total_pages
+                            )
+
+                if "/my-items/saved-jobs" not in self._page.url:
+                    logger.debug(
+                        "Unexpected page URL after saved-jobs extraction: %s - "
+                        "skipping job ID extraction",
+                        self._page.url,
+                    )
+                    page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
+                    break
+
+                page_ids = await self._extract_job_ids()
+                new_ids = [jid for jid in page_ids if jid not in seen_ids]
+
+                if not new_ids:
+                    page_texts.append(extracted.text)
+                    if extracted.references:
+                        page_references.extend(extracted.references)
+                    logger.debug(
+                        "No new saved job IDs on page %d, stopping", page_num + 1
+                    )
+                    break
+
+                for jid in new_ids:
+                    seen_ids.add(jid)
+                    all_job_ids.append(jid)
+
+                page_texts.append(extracted.text)
+                if extracted.references:
+                    page_references.extend(extracted.references)
+
+            except LinkedInScraperException:
+                raise
+            except Exception as e:
+                logger.warning("Error on saved jobs page %d: %s", page_num + 1, e)
+                section_errors["saved_jobs"] = build_issue_diagnostics(
+                    e,
+                    context="get_saved_jobs",
+                    target_url=url,
+                    section_name="saved_jobs",
+                )
+                break
+
+        result: dict[str, Any] = {
+            "url": base_url,
+            "sections": {"saved_jobs": "\n---\n".join(page_texts)}
+            if page_texts
+            else {},
+            "job_ids": all_job_ids,
+        }
+        if page_references:
+            result["references"] = {
+                "saved_jobs": dedupe_references(page_references, cap=15)
+            }
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    async def get_post_comments(
+        self,
+        url: str,
+        max_scrolls: int | None = None,
+    ) -> ExtractedSection:
+        """Scrape a single post permalink page including its comment thread.
+
+        ``url`` must already be canonicalized via ``normalize_post_url``.
+        Comments (and collapsed replies) are paginated up to *max_scrolls*
+        button clicks before extraction. Retries once after a backoff when
+        the page returns only LinkedIn chrome (soft rate limit), mirroring
+        ``extract_page``.
+        """
+        try:
+            result = await self._get_post_comments_once(url, max_scrolls)
+            if result.text != _RATE_LIMITED_MSG:
+                return result
+
+            logger.info("Retrying %s after %.0fs backoff", url, _RATE_LIMIT_RETRY_DELAY)
+            await asyncio.sleep(_RATE_LIMIT_RETRY_DELAY)
+            return await self._get_post_comments_once(url, max_scrolls)
+
+        except LinkedInScraperException:
+            raise
+        except Exception as e:
+            logger.warning("Failed to extract post %s: %s", url, e)
+            return ExtractedSection(
+                text="",
+                references=[],
+                error=build_issue_diagnostics(
+                    e,
+                    context="get_post_comments",
+                    target_url=url,
+                ),
+            )
+
+    async def _get_post_comments_once(
+        self,
+        url: str,
+        max_scrolls: int | None = None,
+    ) -> ExtractedSection:
+        """Single attempt: navigate, expand the comment thread, extract."""
+        await self._navigate_to_page(url)
+        await detect_rate_limit(self._page)
+
+        try:
+            await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("No <main> element found on %s", url)
+
+        await handle_modal_close(self._page)
+        await self._wait_for_main_text(minimum_length=200, log_context="Post permalink")
+
+        # The comment block (composer + thread) hydrates well after the post
+        # body - extracting immediately captures only the reaction/comment
+        # counts. The composer is the structural, locale-independent signal
+        # that the block is attached: a contenteditable role="textbox" inside
+        # main, rendered on every post where commenting is enabled (attribute
+        # presence only, no label text). Timeout is tolerated - posts with
+        # comments disabled never render it.
+        try:
+            await self._page.wait_for_selector(
+                'main [role="textbox"][contenteditable="true"]',
+                timeout=7000,
+            )
+            # Give the first batch of comments a beat to attach below it.
+            await asyncio.sleep(1.0)
+        except PlaywrightTimeoutError:
+            logger.debug("Comment composer did not appear on %s", url)
+
+        max_rounds = max_scrolls if max_scrolls is not None else 5
+        await self._expand_post_comments(max_rounds)
+
+        # _extract_loaded_section re-runs the cheap rate-limit/modal checks,
+        # then handles scrolling, extraction, noise stripping, and reference
+        # building - identical to any other full-page section.
+        return await self._extract_loaded_section(url, "post", max_scrolls)
+
+    async def _main_text_length(self) -> int:
+        """Length of main's innerText - the comment-expansion progress signal."""
+        try:
+            length = await self._page.evaluate(
+                "() => document.querySelector('main')?.innerText.length || 0"
+            )
+            return int(length)
+        except Exception:
+            return 0
+
+    async def _click_more_comments_button(self, pattern: re.Pattern[str]) -> bool:
+        """Click a comment/reply pagination button when one is rendered.
+
+        Buttons are located by visible label through the per-locale
+        ``_POST_MORE_COMMENTS_RE`` table (see its docstring for why text
+        matching is unavoidable here). Returns True iff a click landed.
+        """
+        button = self._page.locator("main button").filter(has_text=pattern)
+        try:
+            if await button.count() == 0:
+                return False
+            target = button.first
+            if not await target.is_visible():
+                return False
+            await target.scroll_into_view_if_needed(timeout=2000)
+            await target.click(timeout=2000)
+            return True
+        except PlaywrightTimeoutError:
+            logger.debug("Comment pagination click timed out")
+            return False
+        except Exception as e:
+            logger.debug("Comment pagination click failed: %s", e)
+            return False
+
+    async def _expand_post_comments(self, max_rounds: int, locale: str = "en") -> None:
+        """Expand the comment thread on a post permalink page.
+
+        LinkedIn serves two pagination mechanisms depending on the
+        rendering: a "Load more comments" button (classic layout, matched
+        via the per-locale table) and lazy batches that attach when the
+        post's own scroll container scrolls (SDUI layout - window scrolling
+        is a no-op there, so mouse wheel is used, mirroring the feed;
+        verified live 2026-07-07). Each round clicks the button when
+        present, otherwise wheel-scrolls. Progress is measured by
+        main.innerText growth - locale-independent - and the loop stops
+        after two stale rounds or when the budget is spent.
+        """
+        pattern = _POST_MORE_COMMENTS_RE.get(locale)
+        stale = 0
+        last_length = -1
+
+        viewport = self._page.viewport_size or {"width": 1280, "height": 720}
+        try:
+            await self._page.mouse.move(viewport["width"] // 2, viewport["height"] // 2)
+        except Exception:
+            logger.debug("Mouse move over post failed", exc_info=True)
+            return
+
+        for i in range(max_rounds):
+            clicked = False
+            if pattern is not None:
+                clicked = await self._click_more_comments_button(pattern)
+            if not clicked:
+                try:
+                    await self._page.mouse.wheel(0, 2000)
+                except Exception:
+                    logger.debug("Wheel scroll over post failed", exc_info=True)
+                    break
+            await asyncio.sleep(1.0)
+
+            length = await self._main_text_length()
+            if length > last_length:
+                stale = 0
+                last_length = length
+            else:
+                stale += 1
+                if stale >= 2:
+                    logger.debug(
+                        "Comment thread stopped growing after %d rounds", i + 1
+                    )
+                    break
+
+    async def get_my_analytics(
+        self,
+        requested: set[str],
+        time_range: str | None = None,
+        callbacks: ProgressCallback | None = None,
+        max_scrolls: int | None = None,
+    ) -> dict[str, Any]:
+        """Scrape the authenticated user's own analytics dashboards.
+
+        Navigates one page per requested ``ANALYTICS_SECTIONS`` entry
+        (content, audience, top_posts, profile_views, search_appearances).
+        ``time_range`` applies only to the sections in
+        ``ANALYTICS_TIME_RANGE_SECTIONS``; the other dashboards use
+        LinkedIn's fixed windows.
+
+        Returns:
+            {url, sections: {name: text}, references?, section_errors?}
+
+        Raises:
+            FilterValidationError: for an unrecognised ``time_range``.
+        """
+        normalized_range: str | None = None
+        if time_range is not None:
+            normalized_range = _ANALYTICS_TIME_RANGE_MAP.get(time_range.strip().lower())
+            if normalized_range is None:
+                raise FilterValidationError(
+                    f"Invalid time_range {time_range!r}. Valid values: "
+                    "7d, 28d, 90d, 365d (or past_7_days, past_28_days, "
+                    "past_90_days, past_365_days)."
+                )
+
+        base_url = "https://www.linkedin.com/analytics"
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+
+        requested_ordered = [
+            (name, suffix)
+            for name, suffix in ANALYTICS_SECTIONS.items()
+            if name in requested
+        ]
+        total = len(requested_ordered)
+
+        if callbacks:
+            await callbacks.on_start("analytics", base_url)
+
+        try:
+            for i, (section_name, suffix) in enumerate(requested_ordered):
+                if i > 0:
+                    await asyncio.sleep(_NAV_DELAY)
+
+                url = base_url + suffix
+                if (
+                    normalized_range is not None
+                    and section_name in ANALYTICS_TIME_RANGE_SECTIONS
+                ):
+                    url += f"?timeRange={normalized_range}"
+
+                try:
+                    extracted = await self.extract_page(
+                        url,
+                        section_name=section_name,
+                        max_scrolls=max_scrolls,
+                    )
+                    if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+                        sections[section_name] = extracted.text
+                        if extracted.references:
+                            references[section_name] = extracted.references
+                    elif extracted.error:
+                        section_errors[section_name] = extracted.error
+                except LinkedInScraperException:
+                    raise
+                except Exception as e:
+                    logger.warning(
+                        "Error scraping analytics section %s: %s", section_name, e
+                    )
+                    section_errors[section_name] = build_issue_diagnostics(
+                        e,
+                        context="get_my_analytics",
+                        target_url=url,
+                        section_name=section_name,
+                    )
+
+                if callbacks:
+                    percent = round((i + 1) / total * 95)
+                    await callbacks.on_progress(
+                        f"Scraped {section_name} ({i + 1}/{total})", percent
+                    )
+        except LinkedInScraperException as e:
+            if callbacks:
+                await callbacks.on_error(e)
+            raise
+
+        result: dict[str, Any] = {
+            "url": f"{base_url}/",
+            "sections": sections,
+        }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+
+        if callbacks:
+            await callbacks.on_complete("analytics", result)
+
         return result
 
     async def search_people(
@@ -4160,7 +4721,7 @@ class LinkedInExtractor:
         ``aria-label`` attribute carrying the participant name.
 
         LinkedIn renders the sidebar with no ``<a href>`` tags, no
-        ``data-thread-id`` attributes, and no embedded URNs — clicking each
+        ``data-thread-id`` attributes, and no embedded URNs - clicking each
         row and reading the SPA URL is the only reliable extraction path.
         Pass ``limit=None`` to capture every visible row.
 
@@ -4179,7 +4740,7 @@ class LinkedInExtractor:
         #
         # Selector is structural (`main li label[aria-label]`) rather than
         # text-prefix-based (`aria-label^="Select conversation"`) so it
-        # survives any LinkedIn locale — the verb in the aria-label is
+        # survives any LinkedIn locale - the verb in the aria-label is
         # locale-dependent, the attribute's presence inside a list-item label
         # is not.
         #
@@ -4202,7 +4763,7 @@ class LinkedInExtractor:
         # The Ember click handler lives on an inner div; the <li> and <label>
         # don't trigger SPA navigation.  No role/aria attributes exist on the
         # clickable element, so class-name selectors are unavoidable here.
-        # The aria-label value flows through unmodified — Python strips any
+        # The aria-label value flows through unmodified - Python strips any
         # known locale prefix to derive a clean participant name for refs.
         conversations: list[dict[str, str]] = await self._page.evaluate(
             """async ({ limit, nameFilter }) => {
@@ -4215,7 +4776,7 @@ class LinkedInExtractor:
                 // Normalize the optional participant filter the same way the
                 // Python prefix-strip does (en-US "Select conversation with"
                 // verb, collapsed whitespace) so the JS-side comparison
-                // matches. Only the matching row is clicked — clicking marks a
+                // matches. Only the matching row is clicked - clicking marks a
                 // row read, so unrelated threads must not be clicked.
                 const wanted = (nameFilter || '')
                     .replace(/\\s+/g, ' ').trim().toLowerCase();
@@ -4288,7 +4849,7 @@ class LinkedInExtractor:
         """Read a specific messaging conversation by thread ID or username.
 
         ``index`` (0-based) selects which thread to open when a participant has
-        multiple conversation threads — e.g. an organic 1-on-1 plus a separate
+        multiple conversation threads - e.g. an organic 1-on-1 plus a separate
         InMail. Ignored when ``thread_id`` is provided. Use
         ``search_conversations`` to enumerate thread IDs first if disambiguation
         by index is impractical.
@@ -4350,7 +4911,7 @@ class LinkedInExtractor:
         """Search messages by keyword.
 
         Uses LinkedIn's ``?searchTerm=`` URL parameter to drive the search
-        rather than typing into the searchbox — the URL form is reliable
+        rather than typing into the searchbox - the URL form is reliable
         regardless of how soon the messaging SPA mounts its searchbox role,
         and (critically) preserves the search filter across click-to-capture
         navigations so per-thread refs can be enumerated.
@@ -4465,7 +5026,7 @@ class LinkedInExtractor:
         When ``thread_id`` is provided, replies inline to that existing thread
         instead of opening a profile compose overlay (#483). Profile-based
         sending may create a separate DM rather than replying to an InMail
-        thread — pass ``thread_id`` from ``get_conversation`` or
+        thread - pass ``thread_id`` from ``get_conversation`` or
         ``search_conversations`` to reply safely.
         """
         if thread_id:

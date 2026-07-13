@@ -25,7 +25,7 @@ An MCP server that lets AI assistants like Claude read LinkedIn data through you
 | Tool | Description | Status |
 |------|-------------|--------|
 | `linkedin_health` | Server version, Patchright profile paths, browser/session readiness | working |
-| `linkedin_ping` | Capability discovery — lists all registered tools (legacy + `linkedin_*` aliases) | working |
+| `linkedin_ping` | Capability discovery - lists all registered tools (legacy + `linkedin_*` aliases) | working |
 | `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) | working |
 | `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) | working |
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note | working |
@@ -38,15 +38,18 @@ An MCP server that lets AI assistants like Claude read LinkedIn data through you
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_companies` | Search for companies on LinkedIn by keywords | working |
 | `get_company_employees` | List employees at a company from the /people/ page, with optional keyword filter | working |
-| `search_jobs` | Search jobs with keywords, location, and filters (date posted, job type, experience, remote/hybrid/on-site, easy apply, sort). Returns structured `job_listings` plus `job_ids` for `get_job_details`; paginates up to 10 pages (default 3) | working |
+| `search_jobs` | Search jobs with keywords, location, and filters (date posted, job type, experience, remote/hybrid/on-site, easy apply, sort). Returns structured `job_listings` plus `job_ids` for `get_job_details`; paginates up to 10 pages (default 3). Optional `output_mode`/`output_path` saves under `~/.linkedin-mcp/exports` | working |
+| `get_saved_jobs` | List job postings saved by the authenticated user; optional `output_mode`/`output_path` saves under `~/.linkedin-mcp/exports` | working |
 | `search_people` | Search for people by keywords, location (free text or geo URN facet), connection degree (1st/2nd/3rd), current company, and multi-page pagination | working |
-| `get_job_details` | Get detailed information about a specific job posting | working |
+| `get_job_details` | Get detailed job posting information; optional `output_mode`/`output_path` saves under `~/.linkedin-mcp/exports` | working |
+| `get_post_comments` | Read a single post with its full comment thread (permalink or activity URN) | working |
+| `get_my_analytics` | Scrape the authenticated user's private analytics dashboards (content, audience, top posts, profile views, search appearances) | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 Each scraper tool is also registered under a `linkedin_*` alias (for example `linkedin_get_person_profile`) so agent clients can use a consistent prefix without breaking existing integrations.
 
-**`search_jobs` response:** besides raw text in `sections.search_results`, each call returns `job_ids` (numeric strings for `get_job_details`) and `job_listings` — structured card metadata per result: `job_id`, `title`, `company`, `location`, `work_type`, `pay`, `benefits`, `easy_apply`, `status`. Card metadata heuristics are English-only today; `job_id` and `title` are locale-independent.
+**`search_jobs` response:** besides raw text in `sections.search_results`, each call returns `job_ids` (numeric strings for `get_job_details`) and `job_listings` - structured card metadata per result: `job_id`, `title`, `company`, `location`, `work_type`, `pay`, `benefits`, `easy_apply`, `status`. Card metadata heuristics are English-only today; `job_id` and `title` are locale-independent.
 
 **`send_message` threading:** profile-based sends open a compose overlay and may create a separate DM. To reply to an existing InMail or recruiter thread, pass `thread_id` from `get_conversation` or `search_conversations`.
 
@@ -64,11 +67,11 @@ Patchright (Playwright-compatible) persists LinkedIn auth on disk under `~/.link
 
 **Lifecycle**
 
-1. **First auth** — run `uvx mcp-server-linkedin@latest --login` (or let the first scraper tool open a login window). This writes the source profile plus `cookies.json` and `source-state.json`.
-2. **Normal use** — MCP tools reuse the in-process browser session. Concurrent tool calls queue on a scraper lock.
-3. **Close session** — `close_session` / `linkedin_close_session` closes the live browser but keeps on-disk auth.
-4. **Reset auth** — `--logout` clears source and derived profiles.
-5. **Docker** — mount `~/.linkedin-mcp` into the container; each startup derives a fresh Linux profile from exported cookies (see Docker setup below).
+1. **First auth** - run `uvx mcp-server-linkedin@latest --login` (or let the first scraper tool open a login window). This writes the source profile plus `cookies.json` and `source-state.json`.
+2. **Normal use** - MCP tools reuse the in-process browser session. Concurrent tool calls queue on a scraper lock.
+3. **Close session** - `close_session` / `linkedin_close_session` closes the live browser but keeps on-disk auth.
+4. **Reset auth** - `--logout` clears source and derived profiles.
+5. **Docker** - mount `~/.linkedin-mcp` into the container; each startup derives a fresh Linux profile from exported cookies (see Docker setup below).
 
 Use `linkedin_health` to inspect readiness and paths without scraping. Override the profile location with `--user-data-dir` / `USER_DATA_DIR`.
 
@@ -95,7 +98,7 @@ Use `linkedin_health` to inspect readiness and paths without scraping. Override 
 }
 ```
 
-The `@latest` tag ensures you always run the newest version — `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
+The `@latest` tag ensures you always run the newest version - `uvx` checks PyPI on each client launch and updates automatically. The server starts quickly, prepares the shared Patchright Chromium browser cache in the background under `~/.linkedin-mcp/patchright-browsers`, and opens a LinkedIn login browser window on the first tool call that needs authentication.
 
 <details>
 <summary><b>📌 For AI agents configuring this server</b></summary>
@@ -209,8 +212,8 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 
 **Timeout issues:**
 
-- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
+- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout - `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout - `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
 - Users on slow connections may need higher values for either.
 
@@ -255,8 +258,8 @@ On startup, the MCP Bundle starts preparing the shared Patchright Chromium brows
 
 **Timeout issues:**
 
-- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
+- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout - `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout - `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
 - Users on slow connections may need higher values for either.
 
@@ -299,7 +302,7 @@ This opens a browser window where you log in manually (5 minute timeout for 2FA,
 ```
 
 > [!NOTE]
-> Docker creates a fresh session on each startup. Sessions may expire over time — run `uvx mcp-server-linkedin@latest --login` again if you encounter authentication issues.
+> Docker creates a fresh session on each startup. Sessions may expire over time - run `uvx mcp-server-linkedin@latest --login` again if you encounter authentication issues.
 
 > [!NOTE]
 > **Why can't I run `--login` in Docker?** Docker containers don't have a display server. Create a profile on your host using the [uvx setup](#-uvx-setup-recommended---universal) and mount it into Docker.
@@ -375,8 +378,8 @@ Runtime server logs are emitted by FastMCP/Uvicorn.
 
 **Timeout issues:**
 
-- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
+- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout - `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout - `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
 - Users on slow connections may need higher values for either.
 
@@ -497,8 +500,8 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 **Timeout issues:**
 
-- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout — `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
-- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout — `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
+- *Page operations failing* (elements not found, navigation hangs): increase the browser page-op timeout - `--timeout 10000` or `TIMEOUT=10000` (milliseconds, default 5000).
+- *Entire tool calls timing out* (e.g. multi-section profiles, cold-start Chromium, slow containers): increase the per-tool execution timeout - `--tool-timeout 300` or `TOOL_TIMEOUT=300` (seconds, default 180).
 - *First tool call with no session*: if a locally logged-in browser has a live LinkedIn session, the server auto-imports it (see `AUTO_IMPORT_FROM_BROWSER` / `--auto-import`) instead of forcing a manual login. On macOS the keychain may prompt once for Safe Storage access. If no importable browser session exists, it falls back to opening a login window and waits up to `LOGIN_INLINE_WAIT` seconds (default 25, max 45; `--login-inline-wait`) so a quick sign-in resolves in one call. If the wait elapses, the tool returns a pending signal and the model retries in about 30 seconds. Neither the auto-import nor the inline wait applies under Docker or when the server is bound to a non-loopback HTTP host; create the session on the host with `--login`.
 - Users on slow connections may need higher values for either.
 

@@ -95,6 +95,11 @@ _REFERENCE_CAPS = {
     "honors": 12,
     "languages": 12,
     "posts": 12,
+    "comments": 12,
+    # A post permalink page carries one anchor per commenter plus the post
+    # author and attachments; headroom above the default keeps long comment
+    # threads' participants addressable.
+    "post": 30,
     "jobs": 8,
     "search_results": 15,
     "job_posting": 8,
@@ -122,7 +127,7 @@ _MESSAGING_THREAD_PATH_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
 _MAX_REDIRECT_UNWRAP_DEPTH = 5
 
 # Accept both quoted-string and bare-integer JSON list elements, e.g.
-# ``["1115","2573558"]`` (the form LinkedIn currently emits — verified live)
+# ``["1115","2573558"]`` (the form LinkedIn currently emits - verified live)
 # and ``[1115,2573558]`` (also valid JSON). Optional surrounding quote keeps
 # the matcher resilient if LinkedIn ever drops the string-typing.
 _FIRST_URN_RE = re.compile(r'\[\s*"?(\d+)"?')
@@ -197,9 +202,9 @@ def normalize_reference(
     }
     if kind == "company_urn":
         # ``classify_link`` already extracted the urn while building the
-        # canonical url. Re-parsing here keeps that classifier internal —
+        # canonical url. Re-parsing here keeps that classifier internal -
         # callers of ``normalize_reference`` shouldn't have to know the
-        # url shape — and is cheap (the canonical url has a fixed
+        # url shape - and is cheap (the canonical url has a fixed
         # single-id form, so ``parse_qs`` is O(1) here).
         urn_id = _first_company_urn_from_query(urlparse(normalized_url).query)
         if urn_id:
@@ -324,7 +329,7 @@ def choose_reference_text(
 def clean_label(value: str, kind: ReferenceKind) -> str | None:
     """Normalize and compact a candidate label.
 
-    A label must contain at least one letter or digit in any script —
+    A label must contain at least one letter or digit in any script -
     ``[^\\W_]`` matches a Unicode word character that is not an
     underscore, so Cyrillic (and other non-Latin) profile names survive
     while punctuation-only strings are rejected.
@@ -389,6 +394,26 @@ def derive_context(
             return "post author"
         if kind == "feed_post":
             return "company post"
+        return "post attachment"
+
+    if section_name == "comments":
+        # Comments activity page: feed_post anchors are the posts the person
+        # commented on; person anchors are the authors of those posts (and
+        # the commenter themselves).
+        if kind == "feed_post":
+            return "commented post"
+        if kind == "person":
+            return "post author"
+        return "post attachment"
+
+    if section_name == "post":
+        # Post permalink page: person anchors mix the post author and
+        # commenters; the surrounding innerText carries the roles, so no
+        # context guess is made for them.
+        if kind == "person":
+            return None
+        if kind == "feed_post":
+            return "post"
         return "post attachment"
 
     if section_name in {"main_profile", "about"}:

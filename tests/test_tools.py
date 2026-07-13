@@ -27,6 +27,9 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.scrape_company = AsyncMock(return_value=scrape_result)
     mock.scrape_job = AsyncMock(return_value=scrape_result)
     mock.search_jobs = AsyncMock(return_value=scrape_result)
+    mock.get_saved_jobs = AsyncMock(return_value=scrape_result)
+    mock.get_post_comments = AsyncMock(return_value=scrape_result)
+    mock.get_my_analytics = AsyncMock(return_value=scrape_result)
     mock.search_people = AsyncMock(return_value=scrape_result)
     mock.get_sidebar_profiles = AsyncMock(return_value=scrape_result)
     mock.get_inbox = AsyncMock(return_value=scrape_result)
@@ -731,6 +734,91 @@ class TestJobTools:
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
 
+    async def test_file_capable_job_tools_have_conservative_annotations(self):
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        for tool_name in ("get_job_details", "search_jobs"):
+            tool = await mcp.get_tool(tool_name)
+            assert tool is not None
+            assert tool.annotations is not None
+            assert tool.annotations.readOnlyHint is False
+            assert tool.annotations.destructiveHint is True
+            assert tool.annotations.idempotentHint is False
+            assert tool.annotations.openWorldHint is True
+
+    async def test_get_job_details_writes_file(
+        self, mock_context, tmp_path, monkeypatch
+    ):
+        """output_mode='file' persists the result and returns a confirmation."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "sections": {"job_posting": "Software Engineer"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        target = tmp_path / ".linkedin-mcp" / "exports" / "job.json"
+        tool_fn = await get_tool_fn(mcp, "get_job_details")
+        result = await tool_fn(
+            "12345",
+            mock_context,
+            output_path="job.json",
+            output_mode="file",
+            extractor=mock_extractor,
+        )
+
+        assert result["saved_path"] == str(target)
+        # Confirmation lists section names without changing the `sections` type.
+        assert result["section_names"] == ["job_posting"]
+        assert "sections" not in result
+        assert target.exists()
+
+    async def test_search_jobs_default_mode_returns_content(self, mock_context):
+        """The default output_mode keeps the existing display behaviour."""
+        expected = {
+            "url": "https://www.linkedin.com/jobs/search/?keywords=python",
+            "sections": {"search_results": "Job 1\nJob 2"},
+            "job_ids": ["1", "2"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+        result = await tool_fn("python", mock_context, extractor=mock_extractor)
+        assert "search_results" in result["sections"]
+        assert "saved_path" not in result
+
+    async def test_get_saved_jobs(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/my-items/saved-jobs/",
+            "sections": {"saved_jobs": "Saved Job 1\nSaved Job 2"},
+            "job_ids": ["111", "222"],
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "get_saved_jobs")
+        result = await tool_fn(mock_context, max_pages=2, extractor=mock_extractor)
+        assert "saved_jobs" in result["sections"]
+        assert result["job_ids"] == ["111", "222"]
+        mock_extractor.get_saved_jobs.assert_awaited_once_with(max_pages=2)
+
 
 class TestGetSidebarProfilesTool:
     async def test_get_sidebar_profiles_success(self, mock_context):
@@ -1297,11 +1385,14 @@ class TestToolTimeouts:
             "get_company_employees",
             "get_job_details",
             "search_jobs",
+            "get_saved_jobs",
             "get_inbox",
             "get_conversation",
             "search_conversations",
             "send_message",
             "get_feed",
+            "get_post_comments",
+            "get_my_analytics",
             "close_session",
         )
 
@@ -1337,11 +1428,14 @@ class TestToolTimeouts:
             "get_company_employees",
             "get_job_details",
             "search_jobs",
+            "get_saved_jobs",
             "get_inbox",
             "get_conversation",
             "search_conversations",
             "send_message",
             "get_feed",
+            "get_post_comments",
+            "get_my_analytics",
             "close_session",
         )
 
@@ -1356,3 +1450,69 @@ class TestToolTimeouts:
         assert ping_tool is not None
         assert health_tool.timeout == META_HEALTH_TIMEOUT_SECONDS
         assert ping_tool.timeout == META_PING_TIMEOUT_SECONDS
+
+
+class TestNormalizePostUrl:
+    def test_bare_urn(self):
+        from linkedin_mcp_server.scraping.extractor import normalize_post_url
+
+        assert (
+            normalize_post_url("urn:li:activity:7203847123456789012")
+            == "https://www.linkedin.com/feed/update/urn:li:activity:7203847123456789012/"
+        )
+
+    def test_relative_path(self):
+        from linkedin_mcp_server.scraping.extractor import normalize_post_url
+
+        assert (
+            normalize_post_url("/posts/someone-activity-7203847123456789012/")
+            == "https://www.linkedin.com/posts/someone-activity-7203847123456789012/"
+        )
+
+    def test_rejects_profile(self):
+        from linkedin_mcp_server.scraping.extractor import normalize_post_url
+
+        assert normalize_post_url("https://www.linkedin.com/in/someone/") is None
+
+
+class TestGetPostCommentsTool:
+    async def test_get_post_comments(self, mock_context):
+        from linkedin_mcp_server.scraping.extractor import ExtractedSection
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        expected_text = "Post body\nComment one"
+        mock_extractor = _make_mock_extractor({})
+        mock_extractor.get_post_comments = AsyncMock(
+            return_value=ExtractedSection(text=expected_text, references=[])
+        )
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        result = await tool_fn(
+            "urn:li:activity:7203847123456789012",
+            mock_context,
+            extractor=mock_extractor,
+        )
+        assert result["sections"]["post"] == expected_text
+        assert "feed/update" in result["url"]
+
+
+class TestGetMyAnalyticsTool:
+    async def test_get_my_analytics(self, mock_context):
+        from linkedin_mcp_server.tools.analytics import register_analytics_tools
+
+        expected = {
+            "url": "https://www.linkedin.com/analytics",
+            "sections": {"content": "impressions 100"},
+        }
+        mock_extractor = _make_mock_extractor(expected)
+        mock_extractor.get_my_analytics = AsyncMock(return_value=expected)
+
+        mcp = FastMCP("test")
+        register_analytics_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_my_analytics")
+        result = await tool_fn(
+            mock_context, sections="content", extractor=mock_extractor
+        )
+        assert "content" in result["sections"]

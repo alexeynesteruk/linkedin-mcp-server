@@ -12,10 +12,14 @@ A Model Context Protocol (MCP) server that connects AI assistants to LinkedIn. A
 - **Company Profiles**: Extract comprehensive company data, including the LinkedIn company URN id (used by LinkedIn's people-search `currentCompany` URL facet)
 - **Company Employees**: List employees at a company with optional keyword filtering
 - **Company Search**: Search for companies by keyword
-- **Job Details**: Retrieve job posting information
-- **Job Search**: Search for jobs with keywords and location filters
+- **Job Details**: Retrieve job posting information, optionally saved under `~/.linkedin-mcp/exports` via `output_mode`/`output_path`
+- **Job Search**: Search for jobs with keywords and location filters, optionally saved under `~/.linkedin-mcp/exports` via `output_mode`/`output_path`
+- **Saved Jobs**: List job postings saved by the authenticated user
 - **People Search**: Search for people by keywords and location
 - **Person Posts**: Get recent activity/posts from a person's profile
+- **Person Comments**: Get a person's comment activity (comments they wrote on other posts)
+- **Post Comments**: Read the full comment thread on a specific post permalink
+- **My Analytics**: Scrape the authenticated user's private LinkedIn analytics dashboards
 - **Company Posts**: Get recent posts from a company's LinkedIn feed
 - **Home Feed**: Get recent posts from the authenticated user's LinkedIn home feed
 - **Compact References**: Return typed per-section links alongside readable text without shipping full-page markdown

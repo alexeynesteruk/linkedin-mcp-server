@@ -5,11 +5,12 @@ Uses innerText extraction for resilient job data capture.
 """
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
 
+from linkedin_mcp_server.common_utils import apply_output_mode
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
@@ -26,13 +27,20 @@ def register_job_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Job Details",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
         tags={"job", "scraping"},
         exclude_args=["extractor"],
     )
     async def get_job_details(
         job_id: str,
         ctx: Context,
+        output_path: str | None = None,
+        output_mode: Literal["display", "file", "both"] = "display",
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -41,6 +49,13 @@ def register_job_tools(
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
             ctx: FastMCP context for progress reporting
+            output_path: Export path for file/both mode. Relative paths resolve
+                under ~/.linkedin-mcp/exports; absolute paths must remain inside
+                that directory. Extension drives format: .json dumps the full
+                dict; anything else writes a readable text rendering.
+            output_mode: 'display' (default) returns content and writes nothing;
+                'file' writes to output_path and returns a compact confirmation;
+                'both' writes and returns the full content plus saved_path.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -60,7 +75,7 @@ def register_job_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return apply_output_mode(result, output_path, output_mode)
 
         except AuthenticationError as e:
             try:
@@ -73,7 +88,12 @@ def register_job_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Search Jobs",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        annotations={
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        },
         tags={"job", "search"},
         exclude_args=["extractor"],
     )
@@ -88,6 +108,8 @@ def register_job_tools(
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        output_path: str | None = None,
+        output_mode: Literal["display", "file", "both"] = "display",
         extractor: Any | None = None,
     ) -> dict[str, Any]:
         """
@@ -106,6 +128,13 @@ def register_job_tools(
             work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs (default false)
             sort_by: Sort results (date, relevance)
+            output_path: Export path for file/both mode. Relative paths resolve
+                under ~/.linkedin-mcp/exports; absolute paths must remain inside
+                that directory. Extension drives format: .json dumps the full
+                dict; anything else writes a readable text rendering.
+            output_mode: 'display' (default) returns content and writes nothing;
+                'file' writes and returns a compact confirmation (url + job_ids
+                + section names); 'both' returns full content plus saved_path.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
@@ -142,7 +171,7 @@ def register_job_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return apply_output_mode(result, output_path, output_mode)
 
         except AuthenticationError as e:
             try:
@@ -151,3 +180,62 @@ def register_job_tools(
                 raise_tool_error(relogin_exc, "search_jobs")
         except Exception as e:
             raise_tool_error(e, "search_jobs")  # NoReturn
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Saved Jobs",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"job", "scraping"},
+        exclude_args=["extractor"],
+    )
+    async def get_saved_jobs(
+        ctx: Context,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        output_path: str | None = None,
+        output_mode: Literal["display", "file", "both"] = "display",
+        extractor: Any | None = None,
+    ) -> dict[str, Any]:
+        """
+        List job postings saved by the authenticated LinkedIn user.
+
+        Returns job_ids that can be passed to get_job_details for full info.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            max_pages: Maximum number of saved-jobs pages to load (1-10, default 3)
+            output_path: Export path for file/both mode. Relative paths resolve
+                under ~/.linkedin-mcp/exports; absolute paths must remain inside
+                that directory. Extension drives format: .json dumps the full
+                dict; anything else writes a readable text rendering.
+            output_mode: 'display' (default) returns content and writes nothing;
+                'file' writes and returns a compact confirmation; 'both' returns
+                full content plus saved_path.
+
+        Returns:
+            Dict with url, sections (name -> raw text), job_ids (list of
+            numeric job ID strings usable with get_job_details), and optional
+            references.
+        """
+        try:
+            extractor = extractor or await get_ready_extractor(
+                ctx, tool_name="get_saved_jobs"
+            )
+            logger.info("Fetching saved jobs (max_pages=%d)", max_pages)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading saved jobs"
+            )
+
+            result = await extractor.get_saved_jobs(max_pages=max_pages)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+
+            return apply_output_mode(result, output_path, output_mode)
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_saved_jobs")
+        except Exception as e:
+            raise_tool_error(e, "get_saved_jobs")  # NoReturn

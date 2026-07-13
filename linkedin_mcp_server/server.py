@@ -25,6 +25,7 @@ from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
 from linkedin_mcp_server.update_check import UpdateNoticeMiddleware
+from linkedin_mcp_server.tools.analytics import register_analytics_tools
 from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
@@ -37,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 @lifespan
 async def browser_lifespan(app: FastMCP) -> AsyncIterator[dict[str, Any]]:
-    """Manage browser lifecycle — cleanup on shutdown.
+    """Manage browser lifecycle - cleanup on shutdown.
 
     Derived runtime durability must not depend on this hook. Docker runtime
     sessions are checkpoint-committed when they are created.
@@ -68,6 +69,7 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
     register_job_tools(mcp, tool_timeout=tool_timeout)
     register_messaging_tools(mcp, tool_timeout=tool_timeout)
     register_feed_tools(mcp, tool_timeout=tool_timeout)
+    register_analytics_tools(mcp, tool_timeout=tool_timeout)
     register_meta_tools(mcp, tool_timeout=tool_timeout)
 
     # Register session management tool

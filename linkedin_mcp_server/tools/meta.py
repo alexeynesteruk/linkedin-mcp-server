@@ -43,11 +43,14 @@ LEGACY_TOOL_NAMES: tuple[str, ...] = (
     "get_company_employees",
     "get_job_details",
     "search_jobs",
+    "get_saved_jobs",
     "get_inbox",
     "get_conversation",
     "search_conversations",
     "send_message",
     "get_feed",
+    "get_post_comments",
+    "get_my_analytics",
     "close_session",
 )
 

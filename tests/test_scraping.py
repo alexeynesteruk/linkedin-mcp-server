@@ -901,7 +901,7 @@ class TestDetectConnectionState:
 
     def test_pending_via_labeled_anchor(self):
         # Pending is rendered as <a aria-label="Pending, click to ..."> in
-        # the action root — distinct from Follow's <button aria-label=...>.
+        # the action root - distinct from Follow's <button aria-label=...>.
         assert (
             detect_connection_state(
                 self._signals(compose_in_root=True, labeled_anchor=True)
@@ -991,7 +991,7 @@ class TestConnectWithPerson:
         """Return a mock for scrape_person.
 
         When ``follow_up_text`` is given, the second call returns that text
-        — used to simulate verification re-reads after an action.
+        - used to simulate verification re-reads after an action.
         """
         first = {
             "url": "https://www.linkedin.com/in/testuser/",
@@ -1331,7 +1331,7 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 # 1st: follow_only (compose+labeled, no invite).
                 # 2nd: post-More reread reveals invite anchor.
-                # 3rd: post-deeplink verification — invite anchor gone.
+                # 3rd: post-deeplink verification - invite anchor gone.
                 side_effect=[
                     self._signals(compose=True, labeled_action=True),
                     self._signals(invite=True, compose=True, labeled_action=True),
@@ -1372,7 +1372,7 @@ class TestConnectWithPerson:
 
     async def test_follow_only_after_more_does_not_send(self, mock_page):
         """Pending or genuinely follow-only profile: invite anchor never
-        appears even after More-menu open. Critical write-gate guardrail —
+        appears even after More-menu open. Critical write-gate guardrail -
         no deeplink fires, no connection request goes out."""
         extractor = LinkedInExtractor(mock_page)
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
@@ -1568,7 +1568,7 @@ class TestConnectWithPerson:
         mock_submit.assert_not_awaited()
 
     async def test_incoming_request_send_failed_when_click_fails(self, mock_page):
-        """Structural accept click did not land; no locale-text guessing —
+        """Structural accept click did not land; no locale-text guessing -
         report send_failed without navigating or clicking by text."""
         extractor = LinkedInExtractor(mock_page)
         pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
@@ -1788,7 +1788,7 @@ class TestConnectWithPerson:
         textarea_locator.first = textarea_locator
         textarea_locator.fill = AsyncMock()
 
-        # Route page.locator() calls by selector — buttons vs textarea —
+        # Route page.locator() calls by selector - buttons vs textarea -
         # so the gating dialog's button collection is distinguishable
         # from the textarea probe.
         def locator_router(selector: str):
@@ -3127,6 +3127,113 @@ class TestSearchJobs:
         assert result["sections"]["search_results"] == "Jane Doe"
 
 
+class TestGetSavedJobs:
+    """Tests for get_saved_jobs with job ID extraction and pagination."""
+
+    @pytest.fixture(autouse=True)
+    def _set_saved_jobs_url(self, mock_page):
+        mock_page.url = "https://www.linkedin.com/my-items/saved-jobs/"
+
+    async def test_returns_job_ids(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(
+                extractor,
+                "_extract_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=extracted("Saved Job 1\nSaved Job 2"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                return_value=["111", "222"],
+            ),
+            patch.object(
+                extractor,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_saved_jobs(max_pages=1)
+
+        assert result["job_ids"] == ["111", "222"]
+        assert "saved_jobs" in result["sections"]
+        assert result["url"] == "https://www.linkedin.com/my-items/saved-jobs/"
+
+    async def test_pagination_uses_start_offset(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        id_pages = iter([["100", "200"], ["300"]])
+        urls_visited: list[str] = []
+
+        async def mock_extract(url, *args, **kwargs):
+            urls_visited.append(url)
+            return extracted("page text")
+
+        with (
+            patch.object(
+                extractor, "_extract_saved_jobs_page", side_effect=mock_extract
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_saved_jobs(max_pages=2)
+
+        assert result["job_ids"] == ["100", "200", "300"]
+        assert len(urls_visited) == 2
+        assert urls_visited[1].endswith("?start=25")
+
+    async def test_early_stop_no_new_ids(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        id_pages = iter([["100"], ["100"]])
+        with (
+            patch.object(
+                extractor,
+                "_extract_saved_jobs_page",
+                new_callable=AsyncMock,
+                return_value=extracted("text"),
+            ),
+            patch.object(
+                extractor,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=lambda: next(id_pages),
+            ),
+            patch.object(
+                extractor,
+                "_get_total_list_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.get_saved_jobs(max_pages=5)
+
+        assert result["job_ids"] == ["100"]
+
+
 class TestStripLinkedInNoise:
     def test_strips_footer(self):
         text = "Bill Gates\nChair, Gates Foundation\n\nAbout\nAccessibility\nTalent Solutions\nCareers"
@@ -3523,7 +3630,7 @@ class TestActivityFeedExtraction:
         mock_page.wait_for_function = AsyncMock()
 
         show_more = MagicMock()
-        # count() returns 1, 1, 0 across iterations — button disappears on 3rd check
+        # count() returns 1, 1, 0 across iterations - button disappears on 3rd check
         show_more.count = AsyncMock(side_effect=[1, 1, 0])
         show_more.is_visible = AsyncMock(return_value=True)
         show_more.scroll_into_view_if_needed = AsyncMock()
@@ -6122,7 +6229,7 @@ class TestBuildFeedReferences:
 
     def test_non_feed_post_dom_anchors_are_filtered(self):
         # Sidebar profile / company / external anchors must not crowd
-        # out SDUI permalinks — references["feed"] is feed_post-only.
+        # out SDUI permalinks - references["feed"] is feed_post-only.
         raw_anchors = [
             {
                 "href": "https://www.linkedin.com/in/sidebar-user/",
