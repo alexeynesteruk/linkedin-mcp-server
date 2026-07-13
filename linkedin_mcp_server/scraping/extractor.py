@@ -2214,7 +2214,6 @@ class LinkedInExtractor:
             has_incoming_action_row=bool(data.get("hasIncomingActionRow")),
         )
 
-
     async def _invite_submit_succeeded_on_profile(self) -> bool:
         """True when post-submit profile signals show the invite was accepted.
 
