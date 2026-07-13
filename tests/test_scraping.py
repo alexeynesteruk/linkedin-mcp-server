@@ -2452,7 +2452,9 @@ class TestSearchJobs:
             result = await extractor.search_jobs("python", max_pages=1)
 
         assert result["job_ids"] == ["42"]
-        assert result["job_listings"] == []
+        assert len(result["job_listings"]) == 1
+        assert result["job_listings"][0]["job_id"] == "42"
+        assert result["job_listings"][0]["title"] == ""
 
     async def test_returns_references(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
@@ -5851,6 +5853,10 @@ class TestThreadIdNormalization:
             "2-abc#frag",
             "2-abc/extra",
             "../messaging",
+            "2-abc%2F..%2Fevil",
+            "2-abc%3Ffoo",
+            "2-abc%23frag",
+            "2-abc%2fevil",
         ):
             assert LinkedInExtractor._normalize_thread_id(bad) is None
 

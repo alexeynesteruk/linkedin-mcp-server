@@ -2214,6 +2214,30 @@ class LinkedInExtractor:
             has_incoming_action_row=bool(data.get("hasIncomingActionRow")),
         )
 
+
+    async def _invite_submit_succeeded_on_profile(self) -> bool:
+        """True when post-submit profile signals show the invite was accepted.
+
+        Locale-independent: pending uses the absence of the custom-invite
+        anchor and/or presence of the pending connection URL pattern. Used
+        only as a success fallback when the invite dialog shell stays open.
+        """
+        try:
+            from linkedin_mcp_server.scraping.connection import detect_connection_state
+
+            match = re.search(r"/in/([^/?#]+)/?", self._page.url)
+            username = match.group(1) if match else ""
+            if not username:
+                return False
+            signals = await self._read_action_signals(username)
+            state = detect_connection_state(signals)
+            return state in {"pending", "already_connected"}
+        except Exception:
+            logger.debug(
+                "Could not re-read profile state after invite submit", exc_info=True
+            )
+            return False
+
     async def _submit_invite_dialog(
         self, note: str | None
     ) -> tuple[bool, bool, str | None, str | None]:
@@ -2301,11 +2325,18 @@ class LinkedInExtractor:
             )
         except PlaywrightTimeoutError:
             # LinkedIn sometimes keeps the dialog shell open after a successful
-            # send while the primary CTA becomes disabled. Treat that as success
-            # rather than false-failing a delivered invite (PR review).
+            # send. Prefer structural success signals over "dialog still open":
+            # 1) primary CTA disabled, 2) invite anchor gone / pending URL state.
             if await self._invite_primary_button_disabled():
                 logger.debug(
                     "Invite dialog stayed open but primary is disabled; "
+                    "treating submit as success"
+                )
+                await self._dismiss_dialog()
+                return True, note_filled, None, None
+            if await self._invite_submit_succeeded_on_profile():
+                logger.debug(
+                    "Invite dialog stayed open but profile signals pending; "
                     "treating submit as success"
                 )
                 await self._dismiss_dialog()
@@ -3286,14 +3317,21 @@ class LinkedInExtractor:
 
     # Thread IDs appear in /messaging/thread/<id>/ URLs. Restrict to a safe
     # path segment so caller-controlled values cannot rewrite destination
-    # path/query/fragment before a confirmed send (PR review).
+    # path/query/fragment before a confirmed send (PR review). Percent-encoded
+    # reserved separators (%2F / %3F / %23) are rejected too: browsers may
+    # decode them and leave the intended thread route.
     _THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_.+=%-]+$")
+    _THREAD_ID_ENCODED_SEPARATOR_RE = re.compile(r"%(?:2[fF]|3[fF]|23)")
 
     @classmethod
     def _normalize_thread_id(cls, thread_id: str) -> str | None:
         """Return a validated thread id path segment, or None if unsafe."""
         candidate = (thread_id or "").strip()
-        if not candidate or not cls._THREAD_ID_RE.fullmatch(candidate):
+        if (
+            not candidate
+            or not cls._THREAD_ID_RE.fullmatch(candidate)
+            or cls._THREAD_ID_ENCODED_SEPARATOR_RE.search(candidate)
+        ):
             return None
         return candidate
 
@@ -3969,8 +4007,28 @@ class LinkedInExtractor:
                 try:
                     page_listings = await self._extract_job_listings()
                 except Exception as e:
-                    logger.warning("Failed to extract job listings: %s", e)
-                    page_listings = []
+                    # Keep job_ids and job_listings aligned: if structured
+                    # extraction fails, synthesize id-only listings rather
+                    # than returning orphaned IDs with an empty listings list.
+                    logger.warning(
+                        "Failed to extract job listings (%s); "
+                        "falling back to id-only listings",
+                        e,
+                    )
+                    page_listings = [
+                        {
+                            "job_id": jid,
+                            "title": "",
+                            "company": "",
+                            "location": "",
+                            "work_type": "",
+                            "pay": "",
+                            "benefits": "",
+                            "easy_apply": "",
+                            "status": "",
+                        }
+                        for jid in page_ids
+                    ]
                 new_ids = [jid for jid in page_ids if jid not in seen_ids]
 
                 if not new_ids:
