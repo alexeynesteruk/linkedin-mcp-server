@@ -3005,9 +3005,7 @@ class LinkedInExtractor:
             )
             return int(count or 0)
         except Exception:
-            logger.debug(
-                "Could not count message text occurrences", exc_info=True
-            )
+            logger.debug("Could not count message text occurrences", exc_info=True)
             return 0
 
     async def _message_text_visible_outside_composer(
@@ -3036,9 +3034,7 @@ class LinkedInExtractor:
     async def _count_message_text_occurrences(self, message: str) -> int:
         return await self._message_text_occurrences_outside_composer(message)
 
-    async def _message_text_visible(
-        self, message: str, *, min_count: int = 1
-    ) -> bool:
+    async def _message_text_visible(self, message: str, *, min_count: int = 1) -> bool:
         """Compatibility wrapper: require at least min_count occurrences."""
         # after_count is exclusive lower bound in the shared JS (count > afterCount).
         return await self._message_text_visible_outside_composer(
@@ -3138,9 +3134,7 @@ class LinkedInExtractor:
                 "Could not focus compose box via JavaScript.",
                 recipient_selected=recipient_selected,
             )
-        pre_send_count = await self._message_text_occurrences_outside_composer(
-            message
-        )
+        pre_send_count = await self._message_text_occurrences_outside_composer(message)
         await asyncio.sleep(0.1)
         await self._type_message_in_compose(message)
         await asyncio.sleep(0.3)
@@ -3184,7 +3178,6 @@ class LinkedInExtractor:
             recipient_selected=recipient_selected,
             sent=True,
         )
-
 
     async def _dismiss_message_ui(self) -> None:
         """Best-effort dismissal for the profile messaging UI."""

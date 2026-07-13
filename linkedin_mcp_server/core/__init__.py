@@ -3,6 +3,7 @@
 from .auth import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
+    has_auth_cookie,
     is_logged_in,
     resolve_remember_me_prompt,
     wait_for_manual_login,
@@ -32,6 +33,7 @@ __all__ = [
     "ScrapingError",
     "detect_rate_limit",
     "handle_modal_close",
+    "has_auth_cookie",
     "is_logged_in",
     "resolve_remember_me_prompt",
     "scroll_to_bottom",

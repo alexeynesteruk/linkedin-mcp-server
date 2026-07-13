@@ -5890,7 +5890,9 @@ class TestMessageSendConfirmation:
 
         assert await extractor._click_message_send_button() is True
 
-        js = mock_page.evaluate.await_args.args[0]
+        evaluate_call = mock_page.evaluate.await_args
+        assert evaluate_call is not None
+        js = evaluate_call.args[0]
         assert 'button[type="submit"]' in js
         assert 'button[data-control-name="send"]' in js
         assert 'aria-label*="Send"' not in js

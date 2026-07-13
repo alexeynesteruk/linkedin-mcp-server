@@ -90,6 +90,7 @@ class SequentialToolExecutionMiddleware(Middleware):
                     try:
                         # Lazy import avoids a circular dependency at module load time.
                         from linkedin_mcp_server.drivers.browser import close_browser
+
                         await close_browser()
                     except Exception:
                         logger.debug(
