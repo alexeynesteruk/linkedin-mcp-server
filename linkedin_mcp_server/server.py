@@ -21,6 +21,7 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import close_browser
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.exceptions import LinkedInMCPError
+from linkedin_mcp_server.client_compat_middleware import StripClientShimArgsMiddleware
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -60,6 +61,9 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
         lifespan=browser_lifespan,
         mask_error_details=True,
     )
+    # Run before other middleware so Claude Code's dummy "_" arg never reaches
+    # FastMCP's additionalProperties=false validation.
+    mcp.add_middleware(StripClientShimArgsMiddleware())
     mcp.add_middleware(SequentialToolExecutionMiddleware())
     mcp.add_middleware(UpdateNoticeMiddleware())
 
