@@ -1313,12 +1313,13 @@ class TestConnectWithPerson:
         assert result["status"] == "connect_unavailable"
         assert "own profile" in result["message"]
 
-    async def test_connect_via_more_menu(self, mock_page):
-        """Follow-primary profile with Connect under More: detection sees
-        no invite anchor initially, _open_more_menu surfaces it, deeplink
-        fires."""
+    async def test_connect_via_deeplink_on_follow_only_profile(self, mock_page):
+        """Issue #454 regression: follow-primary / creator-mode profile
+        classifies as follow_only (Connect sits in the More menu as a button,
+        no top-card invite anchor), yet the custom-invite deeplink still opens
+        the invite dialog and the request sends. Verification then shows the
+        pending-shape top card, so the result is 'connected'."""
         extractor = LinkedInExtractor(mock_page)
-        # Pre-More: Follow primary, Connect hidden under the More dropdown.
         pre = "Christian\n\n· 2nd\n\nFounder\n\nFollow\nMessage\nMore\n"
         post = "Christian\n\n· 2nd\n\nFounder\n\nMessage\nPending\nMore\n"
 
@@ -1332,21 +1333,13 @@ class TestConnectWithPerson:
                 extractor,
                 "_read_action_signals",
                 new_callable=AsyncMock,
-                # 1st: follow_only (compose+labeled, no invite).
-                # 2nd: post-More reread reveals invite anchor.
-                # 3rd: post-deeplink verification - invite anchor gone.
+                # 1st: follow_only (compose + labeled button, no invite anchor).
+                # 2nd: post-send verification - Pending <a>, invite anchor gone.
                 side_effect=[
                     self._signals(compose=True, labeled_action=True),
-                    self._signals(invite=True, compose=True, labeled_action=True),
-                    self._signals(),
+                    self._signals(compose=True, labeled_anchor=True),
                 ],
             ),
-            patch.object(
-                extractor,
-                "_open_more_menu",
-                new_callable=AsyncMock,
-                return_value=True,
-            ) as mock_open_more,
             patch.object(
                 extractor, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
@@ -1366,108 +1359,19 @@ class TestConnectWithPerson:
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "connected"
-        mock_open_more.assert_awaited_once()
-        # Deeplink fired exactly once.
+        # Deeplink fired exactly once, straight to the custom-invite URL.
         assert mock_nav.await_count == 1
         await_args = mock_nav.await_args
         assert await_args is not None
         assert "preload/custom-invite" in await_args.args[0]
 
-    async def test_follow_only_after_more_does_not_send(self, mock_page):
-        """Pending or genuinely follow-only profile: invite anchor never
-        appears even after More-menu open. Critical write-gate guardrail -
-        no deeplink fires, no connection request goes out."""
+    async def test_follow_only_no_dialog_returns_connect_unavailable(self, mock_page):
+        """Genuinely follow-only profile: the deeplink opens no invite dialog,
+        so _submit_invite_dialog's write-gate returns without sending and the
+        result is connect_unavailable. The deeplink navigation happens (the
+        pre-gate is gone), but nothing is submitted."""
         extractor = LinkedInExtractor(mock_page)
         text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
-
-        with (
-            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
-            patch.object(
-                extractor,
-                "_read_action_signals",
-                new_callable=AsyncMock,
-                # Both reads (initial + post-More) show no invite anchor.
-                side_effect=[
-                    self._signals(compose=True, labeled_action=True),
-                    self._signals(compose=True, labeled_action=True),
-                ],
-            ),
-            patch.object(
-                extractor,
-                "_open_more_menu",
-                new_callable=AsyncMock,
-                return_value=True,
-            ) as mock_open_more,
-            patch.object(
-                extractor, "_navigate_to_page", new_callable=AsyncMock
-            ) as mock_nav,
-            patch.object(
-                extractor, "_submit_invite_dialog", new_callable=AsyncMock
-            ) as mock_submit,
-        ):
-            result = await extractor.connect_with_person("testuser")
-
-        assert result["status"] == "connect_unavailable"
-        assert result.get("note_sent") is False or "note_sent" not in result
-        mock_open_more.assert_awaited_once()
-        # Critical: deeplink must NOT fire and dialog must NOT be submitted.
-        mock_nav.assert_not_awaited()
-        mock_submit.assert_not_awaited()
-
-    async def test_follow_only_with_note_reports_note_limit_from_deeplink_probe(
-        self, mock_page
-    ):
-        """A requested note may reveal Premium quota without submitting."""
-        extractor = LinkedInExtractor(mock_page)
-        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
-
-        with (
-            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
-            patch.object(
-                extractor,
-                "_read_action_signals",
-                new_callable=AsyncMock,
-                side_effect=[
-                    self._signals(compose=True, labeled_action=True),
-                    self._signals(compose=True, labeled_action=True),
-                ],
-            ),
-            patch.object(
-                extractor,
-                "_open_more_menu",
-                new_callable=AsyncMock,
-                return_value=True,
-            ),
-            patch.object(
-                extractor, "_navigate_to_page", new_callable=AsyncMock
-            ) as mock_nav,
-            patch.object(
-                extractor,
-                "_probe_invite_note_limit",
-                new_callable=AsyncMock,
-                return_value="Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
-            ) as mock_probe,
-            patch.object(
-                extractor, "_submit_invite_dialog", new_callable=AsyncMock
-            ) as mock_submit,
-        ):
-            result = await extractor.connect_with_person("testuser", note="Hello")
-
-        assert result["status"] == "custom_note_limit_reached"
-        assert (
-            result["message"]
-            == "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
-        )
-        assert result["note_sent"] is False
-        mock_nav.assert_awaited_once()
-        mock_probe.assert_awaited_once()
-        mock_submit.assert_not_awaited()
-
-    async def test_more_menu_unavailable_does_not_send(self, mock_page):
-        """Action root present but no More button (unusual but possible):
-        _open_more_menu returns False, no retry, no deeplink fires."""
-        extractor = LinkedInExtractor(mock_page)
-        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\n"
 
         with (
             patch.object(extractor, "scrape_person", self._mock_scrape(text)),
@@ -1478,23 +1382,65 @@ class TestConnectWithPerson:
                 return_value=self._signals(compose=True, labeled_action=True),
             ),
             patch.object(
+                extractor, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
                 extractor,
-                "_open_more_menu",
+                "_invite_dialog_is_open",
                 new_callable=AsyncMock,
                 return_value=False,
+            ),
+            patch.object(
+                extractor, "_click_dialog_primary_button", new_callable=AsyncMock
+            ) as mock_click,
+            patch.object(extractor, "_dismiss_dialog", new_callable=AsyncMock),
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "connect_unavailable"
+        assert result.get("note_sent") is False or "note_sent" not in result
+        # The deeplink is attempted now, but no request is submitted.
+        mock_nav.assert_awaited_once()
+        mock_click.assert_not_awaited()
+
+    async def test_follow_only_with_note_reports_note_limit(self, mock_page):
+        """Follow-only profile with a requested note: the deeplink opens the
+        invite dialog, but LinkedIn's Premium note-quota upsell blocks it.
+        _submit_invite_dialog surfaces that as (False, False, <upsell>, None),
+        so the result is custom_note_limit_reached with note_sent False."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Public Figure\n\n· 3rd+\n\nCEO\n\nFollow\nMessage\nMore\n"
+        upsell = (
+            "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium"
+        )
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(compose=True, labeled_action=True),
             ),
             patch.object(
                 extractor, "_navigate_to_page", new_callable=AsyncMock
             ) as mock_nav,
             patch.object(
-                extractor, "_submit_invite_dialog", new_callable=AsyncMock
+                extractor,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(False, False, upsell, None),
             ) as mock_submit,
         ):
-            result = await extractor.connect_with_person("testuser")
+            result = await extractor.connect_with_person("testuser", note="Hello")
 
-        assert result["status"] == "connect_unavailable"
-        mock_nav.assert_not_awaited()
-        mock_submit.assert_not_awaited()
+        assert result["status"] == "custom_note_limit_reached"
+        assert result["message"] == upsell
+        assert result["note_sent"] is False
+        mock_nav.assert_awaited_once()
+        mock_submit.assert_awaited_once()
+        assert mock_submit.await_args is not None
+        assert mock_submit.await_args.args[0] == "Hello"
 
     async def test_returns_pending(self, mock_page):
         """Profile with a pending invitation: detected via labeled <a> in
@@ -3132,6 +3078,138 @@ class TestSearchJobs:
         assert result["sections"]["search_results"] == "Jane Doe"
 
 
+class TestBuildContentSearchUrl:
+    """Tests for _build_content_search_url URL construction."""
+
+    def test_basic_keywords(self):
+        url = LinkedInExtractor._build_content_search_url("Buscamos Unity")
+        assert url == (
+            "https://www.linkedin.com/search/results/content/"
+            "?keywords=Buscamos+Unity&origin=FACETED_SEARCH"
+        )
+
+    def test_date_posted_past_week(self):
+        url = LinkedInExtractor._build_content_search_url(
+            "Buscamos Unity", date_posted="past-week"
+        )
+        assert "datePosted=%5B%22past-week%22%5D" in url
+
+    def test_date_posted_alias_normalized(self):
+        url = LinkedInExtractor._build_content_search_url(
+            "python", date_posted="past_24_hours"
+        )
+        assert "datePosted=%5B%22past-24h%22%5D" in url
+
+    def test_no_date_posted_omits_facet(self):
+        url = LinkedInExtractor._build_content_search_url("python")
+        assert "datePosted" not in url
+
+    def test_whitespace_date_posted_omits_facet(self):
+        # Whitespace-only date_posted must be ignored, not appended as an
+        # invalid facet token (regression guard).
+        url = LinkedInExtractor._build_content_search_url("python", date_posted="   ")
+        assert "datePosted" not in url
+
+
+@pytest.mark.asyncio
+class TestSearchPosts:
+    async def test_returns_results_and_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("We're hiring a Unity dev"),
+        ) as mock_extract:
+            result = await extractor.search_posts("Buscamos Unity")
+
+        assert "/search/results/content/" in result["url"]
+        assert "origin=FACETED_SEARCH" in result["url"]
+        assert result["sections"]["search_results"] == "We're hiring a Unity dev"
+        # max_pages default (3) -> 15 scrolls
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=15
+        )
+
+    async def test_date_posted_in_url(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ):
+            result = await extractor.search_posts(
+                "Buscamos Unity", date_posted="past-week"
+            )
+
+        assert "datePosted=%5B%22past-week%22%5D" in result["url"]
+
+    async def test_max_pages_controls_scroll_depth(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ) as mock_extract:
+            await extractor.search_posts("python", max_pages=2)
+
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=10
+        )
+
+    async def test_invalid_date_posted_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="Invalid date_posted"):
+            await extractor.search_posts("python", date_posted="last-year")
+
+    async def test_empty_results_omit_optional_keys(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(""),
+        ):
+            result = await extractor.search_posts("nothing matches this query")
+
+        assert result["sections"] == {}
+        assert "references" not in result
+        assert "section_errors" not in result
+
+    async def test_rate_limited_surfaces_section_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(_RATE_LIMITED_MSG),
+        ):
+            result = await extractor.search_posts("python")
+
+        assert result["sections"] == {}
+        assert result["section_errors"]["search_results"]["error_type"] == "rate_limit"
+
+    async def test_navigation_error_surfaces_section_error(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted(
+                "", error={"error_type": "navigation_error", "error_message": "timeout"}
+            ),
+        ):
+            result = await extractor.search_posts("python")
+
+        assert result["sections"] == {}
+        assert result["section_errors"]["search_results"] == {
+            "error_type": "navigation_error",
+            "error_message": "timeout",
+        }
+
+
 class TestGetSavedJobs:
     """Tests for get_saved_jobs with job ID extraction and pagination."""
 
@@ -3880,6 +3958,81 @@ class TestActivityFeedExtraction:
             )
 
         show_more.click.assert_not_awaited()
+
+    async def test_skills_page_bypasses_show_more_and_wheel_scrolls(self, mock_page):
+        """Skills page skips the Show-more loop and wheel-scrolls to load the list."""
+        skills_text = (
+            "Skills\nAll\n\nIPTV\n99+ endorsements\n\nDVB\n8 endorsements\n\nDRM"
+        )
+        aria = ["Edit IPTV skill", "Edit DVB skill", "Edit DRM skill", "Dismiss"]
+
+        def evaluate_side_effect(js, *args, **kwargs):
+            if "innerText.length" in js:
+                return 500  # constant -> wheel loop goes stale and stops
+            if "querySelectorAll('[aria-label]')" in js:
+                return aria
+            return {"source": "root", "text": skills_text, "references": []}
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate_side_effect)
+        mock_page.wait_for_function = AsyncMock()
+        mock_page.viewport_size = {"width": 1280, "height": 720}
+        mock_page.mouse = MagicMock()
+        mock_page.mouse.move = AsyncMock()
+        mock_page.mouse.wheel = AsyncMock()
+
+        show_more = MagicMock()
+        show_more.count = AsyncMock(return_value=1)
+        show_more.is_visible = AsyncMock(return_value=True)
+        show_more.click = AsyncMock()
+        show_more.first = show_more
+        show_more.filter = MagicMock(return_value=show_more)
+
+        def locator_side_effect(selector):
+            if selector == "main button":
+                return show_more
+            return MagicMock(count=AsyncMock(return_value=0))
+
+        mock_page.locator = MagicMock(side_effect=locator_side_effect)
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.extractor.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_window_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor._extract_page_once(
+                "https://www.linkedin.com/in/billgates/details/skills/",
+                section_name="skills",
+            )
+
+        # never clicks the (per-skill "Show all N details") button, never uses
+        # the window-scroll helper, and does wheel-scroll instead
+        show_more.click.assert_not_awaited()
+        mock_window_scroll.assert_not_awaited()
+        assert mock_page.mouse.wheel.await_count > 0
+
+        # structured skills parsed and keyed on aria names
+        assert result.structured is not None
+        by_name = {s["name"]: s for s in result.structured}
+        assert set(by_name) == {"IPTV", "DVB", "DRM"}
+        assert by_name["IPTV"]["endorsements"] == 99
+        assert by_name["IPTV"]["endorsements_display"] == "99+"
+        assert by_name["DVB"]["endorsements"] == 8
+        assert by_name["DRM"]["endorsements"] == 0
 
     async def test_activity_page_timeout_proceeds_gracefully(self, mock_page):
         """When activity feed content never loads, extraction proceeds with available text."""

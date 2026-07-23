@@ -50,6 +50,7 @@ LEGACY_TOOL_NAMES: tuple[str, ...] = (
     "send_message",
     "get_feed",
     "get_post_comments",
+    "search_posts",
     "get_my_analytics",
     "close_session",
 )

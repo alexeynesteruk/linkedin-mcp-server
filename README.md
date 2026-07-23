@@ -26,7 +26,7 @@ An MCP server that lets AI assistants like Claude read LinkedIn data through you
 |------|-------------|--------|
 | `linkedin_health` | Server version, Patchright profile paths, browser/session readiness | working |
 | `linkedin_ping` | Capability discovery - lists all registered tools (legacy + `linkedin_*` aliases) | working |
-| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts) | working |
+| `get_person_profile` | Get profile info with explicit section selection (experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts). The `skills` section returns the full list (not just the top ~10) and adds `structured.skills` with parsed `{name, endorsements, endorsements_display, endorsers}` records | working |
 | `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) | working |
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note | working |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
@@ -45,6 +45,7 @@ An MCP server that lets AI assistants like Claude read LinkedIn data through you
 | `get_post_comments` | Read a single post with its full comment thread (permalink or activity URN) | working |
 | `get_my_analytics` | Scrape the authenticated user's private analytics dashboards (content, audience, top posts, profile views, search appearances) | working |
 | `get_feed` | Get recent posts from the authenticated user's home feed | working |
+| `search_posts` | Search LinkedIn posts/content globally by keyword (Posts tab), with optional recency filter | working |
 | `close_session` | Close browser session and clean up resources | working |
 
 Each scraper tool is also registered under a `linkedin_*` alias (for example `linkedin_get_person_profile`) so agent clients can use a consistent prefix without breaking existing integrations.

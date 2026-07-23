@@ -9,6 +9,7 @@ from .fields import (
     parse_company_sections,
     parse_person_sections,
 )
+from .skills_parser import parse_skills, skill_names_from_aria_labels
 
 __all__ = [
     "ANALYTICS_SECTIONS",
@@ -18,4 +19,6 @@ __all__ = [
     "parse_analytics_sections",
     "parse_company_sections",
     "parse_person_sections",
+    "parse_skills",
+    "skill_names_from_aria_labels",
 ]

@@ -47,6 +47,7 @@ from .fields import (
     COMPANY_SECTIONS,
     PERSON_SECTIONS,
 )
+from .skills_parser import parse_skills, skill_names_from_aria_labels
 
 if TYPE_CHECKING:
     from linkedin_mcp_server.callbacks import ProgressCallback
@@ -96,6 +97,25 @@ _JOB_TYPE_MAP = {
 _WORK_TYPE_MAP = {"on_site": "1", "remote": "2", "hybrid": "3"}
 
 _SORT_BY_MAP = {"date": "DD", "relevance": "R"}
+
+# Content (post) search uses literal ``datePosted`` tokens inside a JSON-list
+# facet, e.g. ``datePosted=["past-week"]`` - unlike job search, which uses
+# ``f_TPR=r<seconds>`` codes. Human-friendly underscore aliases map onto
+# LinkedIn's exact tokens; the tokens themselves also pass through unchanged.
+_CONTENT_DATE_POSTED_MAP = {
+    "past-24h": "past-24h",
+    "past_24_hours": "past-24h",
+    "past-24-hours": "past-24h",
+    "past-week": "past-week",
+    "past_week": "past-week",
+    "past-month": "past-month",
+    "past_month": "past-month",
+}
+
+# Content search is an infinite scroll (no ``&start=`` pagination), so
+# ``search_posts`` expresses depth as result "pages" of roughly this many
+# scrolls each.
+_CONTENT_SCROLLS_PER_PAGE = 5
 
 # Valid tokens for the people-search ``network`` facet.
 # LinkedIn accepts "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
@@ -279,8 +299,8 @@ _MESSAGE_TEXT_OCCURRENCES_OUTSIDE_COMPOSER_JS = r"""({ expected, afterCount }) =
 # action-root predicate (>=2 interactive children, >=1 button). This is
 # the top-card action row regardless of LinkedIn's class names.
 #
-# Inlined into both _ACTION_SIGNALS_JS and _OPEN_MORE_BUTTON_JS so a
-# single change to the heuristic propagates to both call sites.
+# Inlined into _ACTION_SIGNALS_JS so a single change to the heuristic
+# propagates to every call site.
 _FIND_ACTION_ROOT_FN_JS = r"""
 function findActionRoot(main) {
   const composeAnchors = main.querySelectorAll('a[href*="/messaging/compose/"]');
@@ -449,30 +469,6 @@ _ACTION_SIGNALS_JS = (
 """
 )
 
-# Open the profile's More button, located inside the action root via the
-# aria-expanded attribute. The aria-expanded attribute uniquely identifies
-# the menu opener without text labels (the More button has no aria-label,
-# while Follow/Connect/Pending buttons do - the inverse pattern). Returns
-# true iff the click landed; the caller waits for [role='menu'] visibility
-# before re-scanning signals.
-_OPEN_MORE_BUTTON_JS = (
-    r"""
-(() => {
-"""
-    + _FIND_ACTION_ROOT_FN_JS
-    + r"""
-  const main = document.querySelector('main');
-  if (!main) return false;
-  const actionRoot = findActionRoot(main);
-  if (!actionRoot) return false;
-  const moreBtn = actionRoot.querySelector('button[aria-expanded]');
-  if (!moreBtn) return false;
-  moreBtn.click();
-  return true;
-})
-"""
-)
-
 # Click Accept on an incoming-request profile. Accept is the FIRST labeled
 # button in the fingerprinted row - primary actions render first in
 # top-card action rows (Connect/Message lead on other profile states; the
@@ -566,6 +562,9 @@ class ExtractedSection:
     text: str
     references: list[Reference]
     error: dict[str, Any] | None = None
+    # Structured records for sections that support it (currently only skills).
+    # None means "not applicable to this section"; [] means "parsed, none found".
+    structured: list[dict[str, Any]] | None = None
 
 
 _FEED_RSC_MARKER = "sduiid=com.linkedin.sdui.pagers.feed.mainFeed"
@@ -1493,35 +1492,6 @@ class LinkedInExtractor:
             pass
         return "LinkedIn Premium upsell modal detected."
 
-    async def _open_more_menu(self) -> bool:
-        """Open the profile's More (three-dot) menu in a locale-independent way.
-
-        Locates the More button structurally as ``actionRoot
-        button[aria-expanded]`` - the action-root walk discriminates the
-        profile More button from any other More-labelled buttons elsewhere
-        on the page (notably the video-player More on profiles with
-        background videos), and ``aria-expanded`` distinguishes the menu
-        opener from primary action buttons (which carry ``aria-label``
-        instead). Returns True iff the click landed and a ``[role='menu']``
-        became visible. The caller is expected to follow up with
-        ``_read_action_signals`` to scan the now-rendered menu items for
-        the vanityName invite anchor; this helper does not classify menu
-        contents itself.
-        """
-        try:
-            clicked = await self._page.evaluate(_OPEN_MORE_BUTTON_JS)
-        except Exception:
-            logger.debug("More button click via JS failed", exc_info=True)
-            return False
-        if not clicked:
-            return False
-        try:
-            await self._page.wait_for_selector("[role='menu']", timeout=3000)
-            return True
-        except PlaywrightTimeoutError:
-            logger.debug("More menu did not appear after click")
-            return False
-
     async def _click_incoming_accept(self) -> bool:
         """Click Accept on an incoming-request profile, locale-independently.
 
@@ -1990,6 +1960,14 @@ class LinkedInExtractor:
         # panel loads asynchronously. Wait until the panel replaces the sidebar.
         # The sidebar placeholder starts with "Load more" or "More profiles for you".
         is_details = "/details/" in url
+        # The skills detail page is a special case: it has NO list-level "Show
+        # more" pager and does not paginate on window scroll. Instead it is an
+        # SDUI list that appends more skills only when the viewport-centre mouse
+        # wheel fires (like the home feed). It also renders a per-skill "Show all
+        # N details" button that matches the generic Show-more regex - clicking
+        # it would navigate away - so skills must bypass the Show-more loop and
+        # use the dedicated wheel-scroll path below.
+        is_skills = url.rstrip("/").endswith("/details/skills")
         is_job = "/jobs/view/" in url
         if is_details:
             try:
@@ -2009,7 +1987,8 @@ class LinkedInExtractor:
 
         # Detail pages paginate with a "Show more" button inside <main>, not scroll.
         # Click it until it disappears or the budget runs out.
-        if is_details:
+        # Skills bypass this: the matching buttons are per-skill expanders.
+        if is_details and not is_skills:
             max_clicks = max_scrolls if max_scrolls is not None else 5
             for i in range(max_clicks):
                 button = self._page.locator("main button").filter(
@@ -2051,12 +2030,23 @@ class LinkedInExtractor:
                 logger.debug("Job description 'See more' click failed: %s", e)
 
         # Scroll to trigger lazy loading
-        if is_activity:
+        if is_skills:
+            # LinkedIn caps the initial skills render at ~10; the rest append via
+            # SDUI pagination that only fires on a viewport-centre wheel scroll.
+            scrolls = max_scrolls if max_scrolls is not None else 25
+            await self._wheel_scroll_until_stable(max_scrolls=scrolls)
+        elif is_activity:
             scrolls = max_scrolls if max_scrolls is not None else 10
             await scroll_to_bottom(self._page, pause_time=1.0, max_scrolls=scrolls)
         else:
             scrolls = max_scrolls if max_scrolls is not None else 5
             await scroll_to_bottom(self._page, pause_time=0.5, max_scrolls=scrolls)
+
+        # Authoritative skill names come from per-skill aria-labels; read them
+        # before extraction so the structured parser can key on them.
+        skill_names: list[str] = []
+        if is_skills:
+            skill_names = await self._collect_skill_names()
 
         # Extract text from main content area
         raw_result = await self._extract_root_content(["main"])
@@ -2071,10 +2061,81 @@ class LinkedInExtractor:
             )
             return ExtractedSection(text=_RATE_LIMITED_MSG, references=[])
         cleaned = _filter_linkedin_noise_lines(truncated)
+        structured = parse_skills(cleaned, skill_names) if is_skills else None
         return ExtractedSection(
             text=cleaned,
             references=build_references(raw_result["references"], section_name),
+            structured=structured,
         )
+
+    async def _wheel_scroll_until_stable(
+        self,
+        max_scrolls: int,
+        *,
+        stale_limit: int = 3,
+        pause_time: float = 1.3,
+    ) -> None:
+        """Wheel-scroll the viewport centre until <main> innerText stops growing.
+
+        LinkedIn's SDUI lists (skills, and the feed) ignore ``window.scrollTo``;
+        only a mouse wheel over the viewport centre triggers the pagination that
+        appends more items. innerText length is a locale-independent progress
+        signal - when it stays flat for ``stale_limit`` consecutive checks the
+        list is fully loaded.
+        """
+        viewport = self._page.viewport_size or {"width": 1280, "height": 720}
+        cx, cy = viewport["width"] // 2, viewport["height"] // 2
+        await self._page.mouse.move(cx, cy)
+
+        async def _length() -> int:
+            try:
+                return await self._page.evaluate(
+                    "() => { const m = document.querySelector('main');"
+                    " return m ? m.innerText.length : 0; }"
+                )
+            except Exception:
+                return 0
+
+        prev = -1
+        stale = 0
+        for _ in range(max_scrolls):
+            current = await _length()
+            if current == prev:
+                stale += 1
+                if stale >= stale_limit:
+                    break
+            else:
+                stale = 0
+            prev = current
+            await self._page.mouse.wheel(0, 2500)
+            await asyncio.sleep(pause_time)
+
+    async def _collect_skill_names(self) -> list[str]:
+        """Read authoritative skill names from per-skill aria-labels in <main>.
+
+        Own profile exposes ``Edit <name> skill``; other profiles expose
+        ``Endorse <name>`` / ``Endorsed <name>``. Returns [] when neither is
+        present (the parser then falls back to heuristic segmentation).
+
+        LOCALE NOTE: aria verbs are English-only. Documented limitation per
+        CLAUDE.md; non-English UIs fall back to heuristic segmentation.
+        """
+        try:
+            labels = await self._page.evaluate(
+                """() => {
+                    const main = document.querySelector('main');
+                    if (!main) return [];
+                    return [...main.querySelectorAll('[aria-label]')]
+                        .map(e => e.getAttribute('aria-label'))
+                        .filter(Boolean);
+                }"""
+            )
+        except Exception:
+            logger.debug("Failed to read skill aria-labels", exc_info=True)
+            return []
+        if not isinstance(labels, list):
+            return []
+        return skill_names_from_aria_labels([str(x) for x in labels if x])
 
     async def _extract_overlay(
         self,
@@ -2181,6 +2242,7 @@ class LinkedInExtractor:
         base_url = f"https://www.linkedin.com/in/{username}"
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
+        structured: dict[str, list[dict[str, Any]]] = {}
         section_errors: dict[str, dict[str, Any]] = {}
         profile_urn: str | None = None
 
@@ -2238,6 +2300,8 @@ class LinkedInExtractor:
                         sections[section_name] = extracted.text
                         if extracted.references:
                             references[section_name] = extracted.references
+                        if extracted.structured is not None:
+                            structured[section_name] = extracted.structured
                     elif extracted.error:
                         section_errors[section_name] = extracted.error
 
@@ -2274,6 +2338,8 @@ class LinkedInExtractor:
             result["profile_urn"] = profile_urn
         if references:
             result["references"] = references
+        if structured:
+            result["structured"] = structured
         if section_errors:
             result["section_errors"] = section_errors
 
@@ -2513,57 +2579,6 @@ class LinkedInExtractor:
 
         return True, note_filled, None, None
 
-    async def _probe_invite_note_limit(self) -> str | None:
-        """Open the note editor only to read a Premium note-quota message.
-
-        This is used when the profile did not expose the normal invite anchor.
-        Navigating to the custom-invite deeplink and opening the note editor is
-        non-destructive, but submitting would weaken the write gate for
-        follow-only/unavailable profiles. Therefore this helper never clicks
-        the primary Send button: it returns the raw LinkedIn Premium dialog
-        text if LinkedIn shows it while opening the note editor, then
-        dismisses the dialog.
-        """
-        if not await self._invite_dialog_is_open(timeout=5000):
-            return None
-        note_limit_message = await self._get_premium_upsell_message(timeout=500)
-        if note_limit_message is not None:
-            await self._dismiss_dialog()
-            return note_limit_message
-
-        try:
-            textarea_count = await self._page.locator(
-                _INVITE_DIALOG_TEXTAREA_SELECTOR
-            ).count()
-        except Exception:
-            textarea_count = 0
-        if textarea_count > 0:
-            await self._dismiss_dialog()
-            return None
-
-        buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
-        try:
-            btn_count = await buttons.count()
-        except Exception:
-            btn_count = 0
-        if btn_count >= 3:
-            try:
-                await buttons.nth(btn_count - 2).click()
-            except Exception:
-                logger.debug("Could not open invite note editor", exc_info=True)
-            try:
-                await self._page.wait_for_selector(
-                    _INVITE_DIALOG_TEXTAREA_SELECTOR,
-                    state="visible",
-                    timeout=3000,
-                )
-            except PlaywrightTimeoutError:
-                logger.debug("Note textarea did not appear during quota probe")
-
-        note_limit_message = await self._get_premium_upsell_message()
-        await self._dismiss_dialog()
-        return note_limit_message
-
     async def connect_with_person(
         self,
         username: str,
@@ -2574,16 +2589,17 @@ class LinkedInExtractor:
 
         Detection is locale-independent: classification uses URL patterns
         (vanityName invite anchor, edit-intro anchor) and ARIA-attribute
-        presence on top-card buttons (`aria-label` for primary actions,
-        `aria-expanded` for the More-menu opener). The deeplink-submit
-        path is gated strictly on `has_invite_anchor=True` *after* the
-        optional More-menu retry, so Pending and follow-only profiles
-        cannot trigger a write. If a note was requested but no invite
-        anchor is visible, the custom-invite deeplink may still be opened
-        only as a non-submitting note-quota probe. Sending itself uses the
-        ``/preload/custom-invite/?vanityName=`` deeplink, which works
-        whether the user-visible Connect button is in the action bar
-        or buried under the More menu.
+        presence on top-card buttons (`aria-label` for primary actions).
+        Self, already-connected, pending and incoming-request states are
+        resolved from those signals and return before any write. Every
+        other state (connectable, follow-only, unavailable) routes through
+        the ``/preload/custom-invite/?vanityName=`` deeplink, which opens
+        the invite dialog whether the user-visible Connect control is a
+        top-card anchor or a button buried under the More menu.
+        ``_submit_invite_dialog`` is the sole write-gate: it only sends
+        when LinkedIn opens a real invite dialog (via
+        ``_invite_dialog_is_open``), so follow-only and mis-classified
+        profiles cannot trigger a stray request (#454 / #514).
         """
         from linkedin_mcp_server.scraping.connection import detect_connection_state
 
@@ -2671,58 +2687,17 @@ class LinkedInExtractor:
                 profile=verified_text,
             )
 
-        # Follow-only profiles may have Connect hidden under the More menu
-        # (high-follower / creator-mode profiles). Try opening it and
-        # re-reading signals; if the vanityName invite anchor surfaces in
-        # the menu, we can proceed with the deeplink. (The
-        # has_invite_anchor=False guard is implicit: detect_connection_state
-        # only returns "follow_only" after the has_invite_anchor branch
-        # has already failed, so reaching this branch already implies it.)
-        if state == "follow_only":
-            opened = await self._open_more_menu()
-            if opened:
-                signals = await self._read_action_signals(username)
-                # Close the menu before any subsequent navigation so it
-                # doesn't intercept the upcoming page transition.
-                try:
-                    await self._page.keyboard.press("Escape")
-                except Exception:
-                    logger.debug("Escape after More-menu reread failed", exc_info=True)
-                logger.info("Post-More signals for %s: signals=%s", username, signals)
-
+        # Connectable, follow-only, and unavailable all route through the
+        # custom-invite deeplink. Follow-only profiles (high-follower /
+        # creator-mode) commonly keep Connect inside the More menu as a
+        # button rather than a top-card invite anchor, so has_invite_anchor
+        # stays False; the deeplink opens the invite dialog regardless of
+        # button placement (#454 / #514). _submit_invite_dialog is the
+        # write-gate: it returns without sending when no invite dialog opens.
         invite_url = (
             "https://www.linkedin.com/preload/custom-invite/"
             f"?vanityName={quote_plus(username)}"
         )
-
-        # Write-gate: submit when LinkedIn exposed the vanityName invite
-        # anchor, or when detection was inconclusive but the deeplink may
-        # still open an invite dialog (#454).
-        can_use_deeplink = signals.has_invite_anchor or state == "unavailable"
-
-        if not can_use_deeplink:
-            if note:
-                logger.info(
-                    "No visible invite anchor for %s; probing custom-invite deeplink "
-                    "because a personalized note was requested",
-                    username,
-                )
-                await self._navigate_to_page(invite_url)
-                note_limit_message = await self._probe_invite_note_limit()
-                if note_limit_message is not None:
-                    return _connection_result(
-                        url,
-                        "custom_note_limit_reached",
-                        note_limit_message,
-                        note_sent=False,
-                        profile=page_text,
-                    )
-            return _connection_result(
-                url,
-                "connect_unavailable",
-                "LinkedIn did not expose a usable Connect action for this profile.",
-                profile=page_text,
-            )
 
         await self._navigate_to_page(invite_url)
 
@@ -4892,6 +4867,98 @@ class LinkedInExtractor:
             "url": url,
             "sections": sections,
         }
+        if references:
+            result["references"] = references
+        if section_errors:
+            result["section_errors"] = section_errors
+        return result
+
+    @staticmethod
+    def _build_content_search_url(
+        keywords: str,
+        date_posted: str | None = None,
+    ) -> str:
+        """Build a LinkedIn content (post) search URL.
+
+        Reproduces the ``FACETED_SEARCH`` URL LinkedIn produces from the
+        Posts results tab, e.g. for "Buscamos Unity" in the past week:
+        ``/search/results/content/?keywords=Buscamos+Unity&origin=FACETED_SEARCH&datePosted=%5B%22past-week%22%5D``
+
+        The ``datePosted`` facet is a one-element JSON list carrying a literal
+        token (``past-24h`` / ``past-week`` / ``past-month``), URL-encoded -
+        unlike job search, which uses ``f_TPR=r<seconds>``. Aliases are
+        normalized via ``_CONTENT_DATE_POSTED_MAP``; unknown values pass
+        through unchanged (callers validate first).
+        """
+        params = f"keywords={quote_plus(keywords)}&origin=FACETED_SEARCH"
+        if date_posted and date_posted.strip():
+            token = _CONTENT_DATE_POSTED_MAP.get(
+                date_posted.strip(), date_posted.strip()
+            )
+            params += f"&datePosted={_encode_list_facet([token])}"
+        return f"https://www.linkedin.com/search/results/content/?{params}"
+
+    async def search_posts(
+        self,
+        keywords: str,
+        date_posted: str | None = None,
+        max_pages: int = 3,
+    ) -> dict[str, Any]:
+        """Search LinkedIn posts/content and extract the results page.
+
+        Reproduces the LinkedIn "Posts" content-search tab - the surface for
+        catching informal "we're hiring" / "Buscamos ..." posts before a
+        formal job listing exists.
+
+        Args:
+            keywords: Free-text query (e.g. "Buscamos Unity", "estamos contratando").
+            date_posted: Optional recency filter. One of ``"past-24h"``,
+                ``"past-week"``, ``"past-month"`` (underscore aliases also
+                accepted). Invalid values raise ``FilterValidationError``
+                (a ``ValueError`` subclass).
+            max_pages: Scroll depth, expressed in result "pages" of roughly
+                ``_CONTENT_SCROLLS_PER_PAGE`` scrolls each (default 3). Content
+                search is an infinite scroll with no per-page URL, so this caps
+                how far the page is scrolled rather than fetching discrete
+                ``&start=`` pages.
+
+        Returns:
+            {url, sections: {search_results: text}} plus optional ``references``
+            and ``section_errors``. The LLM should parse the raw text to extract
+            each post's author, headline, body, date, and reaction counts.
+        """
+        if (
+            date_posted is not None
+            and date_posted.strip()
+            and date_posted.strip() not in _CONTENT_DATE_POSTED_MAP
+        ):
+            raise FilterValidationError(
+                f"Invalid date_posted {date_posted!r}; expected one of "
+                "'past-24h', 'past-week', 'past-month'."
+            )
+
+        url = self._build_content_search_url(keywords, date_posted=date_posted)
+        max_scrolls = max(1, max_pages) * _CONTENT_SCROLLS_PER_PAGE
+        extracted = await self.extract_page(
+            url, section_name="search_results", max_scrolls=max_scrolls
+        )
+
+        sections: dict[str, str] = {}
+        references: dict[str, list[Reference]] = {}
+        section_errors: dict[str, dict[str, Any]] = {}
+        if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            sections["search_results"] = extracted.text
+            if extracted.references:
+                references["search_results"] = extracted.references
+        elif extracted.text == _RATE_LIMITED_MSG:
+            section_errors["search_results"] = {
+                "error_type": "rate_limit",
+                "error_message": extracted.text,
+            }
+        elif extracted.error:
+            section_errors["search_results"] = extracted.error
+
+        result: dict[str, Any] = {"url": url, "sections": sections}
         if references:
             result["references"] = references
         if section_errors:

@@ -116,6 +116,10 @@
       "description": "Read a LinkedIn post with its full comment thread by permalink or activity URN"
     },
     {
+      "name": "search_posts",
+      "description": "Search LinkedIn posts/content globally by keyword (Posts tab), with optional recency filter"
+    },
+    {
       "name": "get_my_analytics",
       "description": "Scrape the authenticated user's private LinkedIn analytics dashboards"
     },
@@ -158,6 +162,10 @@
     {
       "name": "linkedin_get_feed",
       "description": "Alias for get_feed. Get recent posts from the authenticated user's LinkedIn home feed"
+    },
+    {
+      "name": "linkedin_search_posts",
+      "description": "Alias for search_posts. Search LinkedIn posts/content globally by keyword (Posts tab), with optional recency filter"
     },
     {
       "name": "linkedin_get_inbox",
