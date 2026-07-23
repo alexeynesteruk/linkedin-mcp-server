@@ -5,9 +5,10 @@ Provides inbox listing, conversation reading, message search, and sending.
 """
 
 import logging
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -18,8 +19,25 @@ from linkedin_mcp_server.core.exceptions import (
 from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
+from linkedin_mcp_server.scraping.usernames import normalize_linkedin_username
 
 logger = logging.getLogger(__name__)
+
+
+def _optional_username(value: str | None) -> str | None:
+    """Normalize an optional LinkedIn vanity; raise ToolError if non-empty but bad."""
+    if value is None:
+        return None
+    if not str(value).strip():
+        return None
+    username = normalize_linkedin_username(value)
+    if username is None:
+        raise ToolError(
+            f"Invalid linkedin_username {value!r}. "
+            "Pass a bare vanity (e.g. 'williamhgates') or a full "
+            "https://www.linkedin.com/in/... profile URL."
+        )
+    return username
 
 
 def register_messaging_tools(
@@ -36,6 +54,9 @@ def register_messaging_tools(
     async def get_inbox(
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=50)] = 20,
+        inbox_filter: Literal[
+            "none", "unread", "jobs", "connections", "inmail", "starred"
+        ] = "none",
         extractor: Any = extractor_depends("get_inbox"),
     ) -> dict[str, Any]:
         """
@@ -44,18 +65,27 @@ def register_messaging_tools(
         Args:
             ctx: FastMCP context for progress reporting
             limit: Maximum number of conversations to load (1-50, default 20)
+            inbox_filter: Filter conversations by category. Options: "none" (all
+                conversations), "unread", "jobs", "connections", "inmail",
+                "starred". Default "none". Filter buttons are matched against
+                LinkedIn's English UI text; non-English sessions (e.g. German,
+                where "Unread" is "Ungelesen") will not match, and the failure
+                is surfaced as a `filter_failed` entry in `section_errors`
+                rather than silently returning unfiltered results.
 
         Returns:
             Dict with url, sections (inbox -> raw text), and optional references.
         """
         try:
-            logger.info("Fetching inbox (limit=%d)", limit)
+            logger.info(
+                "Fetching inbox (limit=%d, inbox_filter=%s)", limit, inbox_filter
+            )
 
             await ctx.report_progress(
                 progress=0, total=100, message="Loading messaging inbox"
             )
 
-            result = await extractor.get_inbox(limit=limit)
+            result = await extractor.get_inbox(limit=limit, inbox_filter=inbox_filter)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -110,18 +140,19 @@ def register_messaging_tools(
         Returns:
             Dict with url, sections (conversation -> raw text), and optional references.
         """
-        if not linkedin_username and not thread_id:
-            raise_tool_error(
-                LinkedInScraperException(
-                    "Provide at least one of linkedin_username or thread_id"
-                ),
-                "get_conversation",
-            )
-
         try:
+            username = _optional_username(linkedin_username)
+            if not username and not thread_id:
+                raise_tool_error(
+                    LinkedInScraperException(
+                        "Provide at least one of linkedin_username or thread_id"
+                    ),
+                    "get_conversation",
+                )
+
             logger.info(
                 "Fetching conversation: username=%s, thread_id=%s, index=%d",
-                linkedin_username,
+                username,
                 thread_id,
                 index,
             )
@@ -131,7 +162,7 @@ def register_messaging_tools(
             )
 
             result = await extractor.get_conversation(
-                linkedin_username=linkedin_username,
+                linkedin_username=username,
                 thread_id=thread_id,
                 index=index,
             )
@@ -144,6 +175,8 @@ def register_messaging_tools(
                 required_sections=("conversation",),
             )
 
+        except ToolError:
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
@@ -249,9 +282,18 @@ def register_messaging_tools(
             Dict with url, status, message, recipient_selected, and sent.
         """
         try:
+            # Normalize vanity when present. Required unless replying by thread_id.
+            username = _optional_username(linkedin_username)
+            if not thread_id and username is None:
+                raise ToolError(
+                    f"Invalid linkedin_username {linkedin_username!r}. "
+                    "Pass a bare vanity (e.g. 'williamhgates') or a full "
+                    "https://www.linkedin.com/in/... profile URL."
+                )
+
             logger.info(
                 "Sending message to %s (confirm_send=%s, thread_id=%s)",
-                linkedin_username,
+                username or linkedin_username,
                 confirm_send,
                 thread_id,
             )
@@ -259,7 +301,7 @@ def register_messaging_tools(
             await ctx.report_progress(progress=0, total=100, message="Sending message")
 
             result = await extractor.send_message(
-                linkedin_username,
+                username or "",
                 message,
                 confirm_send=confirm_send,
                 profile_urn=profile_urn,
@@ -270,6 +312,8 @@ def register_messaging_tools(
 
             return result
 
+        except ToolError:
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)

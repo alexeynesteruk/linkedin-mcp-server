@@ -48,6 +48,7 @@ LEGACY_TOOL_NAMES: tuple[str, ...] = (
     "get_conversation",
     "search_conversations",
     "send_message",
+    "get_pending_invitations",
     "get_feed",
     "get_post_comments",
     "search_posts",

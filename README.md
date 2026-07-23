@@ -30,10 +30,11 @@ An MCP server that lets AI assistants like Claude read LinkedIn data through you
 | `get_my_profile` | Get the authenticated user's own LinkedIn profile (same sections as get_person_profile) | working |
 | `connect_with_person` | Send a connection request or accept an incoming one, with optional note | working |
 | `get_sidebar_profiles` | Extract profile URLs from sidebar recommendation sections ("More profiles for you", "Explore premium profiles", "People you may know") on a profile page | working |
-| `get_inbox` | List recent conversations from the LinkedIn messaging inbox | working |
+| `get_inbox` | List recent conversations from the LinkedIn messaging inbox. Optional `inbox_filter` (`none`/`unread`/`jobs`/`connections`/`inmail`/`starred`; English UI labels) | working |
 | `get_conversation` | Read a specific messaging conversation by username or thread ID | working |
 | `search_conversations` | Search messages by keyword | working |
 | `send_message` | Send a message or reply to an existing thread via `thread_id` (requires confirmation). Profile-based sends compose a new DM; use `thread_id` to reply in InMail/recruiter threads | working |
+| `get_pending_invitations` | List pending network invitations (received or sent) from `/mynetwork/invitation-manager/` | working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet | working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_companies` | Search for companies on LinkedIn by keywords | working |

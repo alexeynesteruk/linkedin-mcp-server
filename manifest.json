@@ -93,7 +93,7 @@
     },
     {
       "name": "get_inbox",
-      "description": "List recent conversations from the LinkedIn messaging inbox"
+      "description": "List recent conversations from the LinkedIn messaging inbox, with optional English UI category filter (unread/jobs/connections/inmail/starred)"
     },
     {
       "name": "get_conversation",
@@ -106,6 +106,10 @@
     {
       "name": "send_message",
       "description": "Send a message to a LinkedIn user with explicit confirmation and optional profile URN support"
+    },
+    {
+      "name": "get_pending_invitations",
+      "description": "List pending LinkedIn network invitations (received or sent) from /mynetwork/invitation-manager/"
     },
     {
       "name": "get_feed",
@@ -170,6 +174,10 @@
     {
       "name": "linkedin_get_inbox",
       "description": "Alias for get_inbox. List recent conversations from the LinkedIn messaging inbox"
+    },
+    {
+      "name": "linkedin_get_pending_invitations",
+      "description": "Alias for get_pending_invitations. List pending LinkedIn network invitations (received or sent) from /mynetwork/invitation-manager/"
     },
     {
       "name": "linkedin_get_job_details",

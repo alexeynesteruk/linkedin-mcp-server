@@ -32,6 +32,7 @@ from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
 from linkedin_mcp_server.tools.meta import register_meta_tools, register_tool_aliases
+from linkedin_mcp_server.tools.network import register_network_tools
 from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
 
@@ -73,6 +74,7 @@ def create_mcp_server(*, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS) -> 
     register_company_tools(mcp, tool_timeout=tool_timeout)
     register_job_tools(mcp, tool_timeout=tool_timeout)
     register_messaging_tools(mcp, tool_timeout=tool_timeout)
+    register_network_tools(mcp, tool_timeout=tool_timeout)
     register_feed_tools(mcp, tool_timeout=tool_timeout)
     register_post_tools(mcp, tool_timeout=tool_timeout)
     register_analytics_tools(mcp, tool_timeout=tool_timeout)

@@ -21,8 +21,21 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
 from linkedin_mcp_server.scraping import parse_person_sections
 from linkedin_mcp_server.scraping.extractor import FilterValidationError
+from linkedin_mcp_server.scraping.usernames import normalize_linkedin_username
 
 logger = logging.getLogger(__name__)
+
+
+def _require_username(value: str | None, *, tool_name: str) -> str:
+    """Normalize a LinkedIn vanity or raise ToolError for bad agent input."""
+    username = normalize_linkedin_username(value)
+    if username is None:
+        raise ToolError(
+            f"Invalid linkedin_username {value!r}. "
+            "Pass a bare vanity (e.g. 'williamhgates') or a full "
+            "https://www.linkedin.com/in/... profile URL."
+        )
+    return username
 
 
 def _coerce_str_list(value: list[str] | str | None) -> list[str] | None:
@@ -97,17 +110,20 @@ def register_person_tools(
             The LLM should parse the raw text in each section.
         """
         try:
+            username = _require_username(
+                linkedin_username, tool_name="get_person_profile"
+            )
             requested, unknown = parse_person_sections(sections)
 
             logger.info(
                 "Scraping profile: %s (sections=%s)",
-                linkedin_username,
+                username,
                 sections,
             )
 
             cb = MCPContextProgressCallback(ctx)
             result = await extractor.scrape_person(
-                linkedin_username,
+                username,
                 requested,
                 callbacks=cb,
                 max_scrolls=max_scrolls,
@@ -118,6 +134,8 @@ def register_person_tools(
 
             return annotate_empty_scrape_result(result, tool_name="get_person_profile")
 
+        except ToolError:
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
@@ -260,20 +278,24 @@ def register_person_tools(
 
         Returns:
             Dict with url, status, message, and note_sent.
-            Statuses: pending, already_connected, follow_only,
-            connect_unavailable, note_required, unavailable, send_failed,
-            note_not_supported, custom_note_limit_reached,
-            connected, or accepted.
+            Statuses: pending, already_connected, connect_unavailable,
+            note_required, unavailable, send_failed, note_not_supported,
+            custom_note_limit_reached, connected, or accepted.
 
-            When status is ``custom_note_limit_reached`` LinkedIn rejected
-            personalized invite notes because the free note quota for the
-            account is exhausted. The ``message`` is the raw Premium dialog
-            text read from LinkedIn.
+            Follow-primary / creator-mode profiles are attempted via the
+            custom-invite deeplink (they no longer stop at a ``follow_only``
+            status). When status is ``custom_note_limit_reached`` LinkedIn
+            rejected personalized invite notes because the free note quota
+            for the account is exhausted. The ``message`` is the raw Premium
+            dialog text read from LinkedIn.
         """
         try:
+            username = _require_username(
+                linkedin_username, tool_name="connect_with_person"
+            )
             logger.info(
                 "Connecting with person: %s (note=%s)",
-                linkedin_username,
+                username,
                 note is not None,
             )
 
@@ -284,7 +306,7 @@ def register_person_tools(
             )
 
             result = await extractor.connect_with_person(
-                linkedin_username,
+                username,
                 note=note,
             )
 
@@ -292,6 +314,8 @@ def register_person_tools(
 
             return result
 
+        except ToolError:
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
@@ -329,13 +353,16 @@ def register_person_tools(
             /in/username/ paths. Only sections present on the page are included.
         """
         try:
-            logger.info("Getting sidebar profiles for: %s", linkedin_username)
+            username = _require_username(
+                linkedin_username, tool_name="get_sidebar_profiles"
+            )
+            logger.info("Getting sidebar profiles for: %s", username)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Extracting sidebar profiles"
             )
 
-            result = await extractor.get_sidebar_profiles(linkedin_username)
+            result = await extractor.get_sidebar_profiles(username)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -343,6 +370,8 @@ def register_person_tools(
                 result, tool_name="get_sidebar_profiles"
             )
 
+        except ToolError:
+            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)

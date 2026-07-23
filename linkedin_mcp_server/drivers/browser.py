@@ -494,6 +494,10 @@ async def get_or_create_browser(
     async with _browser_create_lock:
         if _browser is not None:
             return _browser
+        # Advisory only: another MCP/Chrome on this profile causes empty scrapes
+        # and "browser context closed" mid-tool. Warn before we open Chromium so
+        # operators see it in startup logs, not only after failures.
+        warn_if_profile_lock_held(get_profile_dir())
         return await _create_browser()
 
 

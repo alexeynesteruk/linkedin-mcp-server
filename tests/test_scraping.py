@@ -1,5 +1,6 @@
 """Tests for the LinkedInExtractor scraping engine."""
 
+from contextlib import ExitStack
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -3164,6 +3165,26 @@ class TestSearchPosts:
         with pytest.raises(ValueError, match="Invalid date_posted"):
             await extractor.search_posts("python", date_posted="last-year")
 
+    async def test_empty_keywords_raises(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with pytest.raises(ValueError, match="keywords"):
+            await extractor.search_posts("   ")
+
+    async def test_max_pages_clamped_for_direct_callers(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        with patch.object(
+            extractor,
+            "extract_page",
+            new_callable=AsyncMock,
+            return_value=extracted("post"),
+        ) as mock_extract:
+            await extractor.search_posts("python", max_pages=99)
+
+        # clamped to 10 pages * 5 scrolls
+        mock_extract.assert_awaited_once_with(
+            ANY, section_name="search_results", max_scrolls=50
+        )
+
     async def test_empty_results_omit_optional_keys(self, mock_page):
         extractor = LinkedInExtractor(mock_page)
         with patch.object(
@@ -4906,6 +4927,106 @@ class TestGetInbox:
         assert refs[0]["kind"] == "conversation"
         assert refs[0]["url"] == "/messaging/thread/2-abc123/"
         assert refs[0]["text"] == "Tony Chan"
+
+    async def test_inbox_filter_clicks_english_label(self, mock_page):
+        """inbox_filter activates the matching English filter pill."""
+        filter_btn = AsyncMock()
+        filter_btn.click = AsyncMock()
+        filter_btn.and_ = MagicMock(return_value=AsyncMock())
+        mock_page.get_by_role = MagicMock(return_value=filter_btn)
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "Unread only", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="Unread only",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            result = await extractor.get_inbox(limit=5, inbox_filter="unread")
+
+        mock_page.get_by_role.assert_called_once_with(
+            "button", name="Unread", exact=True
+        )
+        filter_btn.click.assert_awaited_once_with(timeout=5000)
+        assert result["sections"]["inbox"] == "Unread only"
+        assert "section_errors" not in result
+
+    async def test_inbox_filter_failed_surfaces_section_error(self, mock_page):
+        """Missing/unclickable filter pill yields filter_failed, not silent miss."""
+        filter_btn = AsyncMock()
+        filter_btn.click = AsyncMock(side_effect=TimeoutError("no Unread button"))
+        mock_page.get_by_role = MagicMock(return_value=filter_btn)
+
+        extractor = LinkedInExtractor(mock_page)
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+            ),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={"text": "All conversations", "references": []},
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.strip_linkedin_noise",
+                return_value="All conversations",
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.build_references",
+                return_value=[],
+            ),
+            patch.object(
+                extractor,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            result = await extractor.get_inbox(limit=5, inbox_filter="starred")
+
+        assert result["sections"]["inbox"] == "All conversations"
+        assert result["section_errors"]["inbox"]["error_type"] == "filter_failed"
+        assert "starred" in result["section_errors"]["inbox"]["error_message"]
 
 
 class TestGetConversation:
@@ -6677,3 +6798,200 @@ class TestBuildFeedReferences:
             "/posts/alice_x-ugcPost-1-xx",
         ]
         assert kinds == {"feed_post"}
+
+
+class TestGetPendingInvitations:
+    """Extractor-level tests for get_pending_invitations.
+
+    These lock the two non-obvious guarantees that earlier review feedback
+    introduced: the per-call ``limit`` trims the returned references, and the
+    note-expansion selector never touches an already-expanded toggle.
+    """
+
+    def _patch_invitation_helpers(
+        self,
+        extractor,
+        raw_references,
+        raw_text="Pending invitations text",
+    ):
+        """Context managers that stub the navigation/scroll/extract helpers so
+        the test exercises only the limit/cap/reference logic. Mirrors the
+        ``patch.object`` style used elsewhere in this module."""
+        return (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor, "_expand_invitation_note_toggles", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_received_invitation_count_is_zero",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value={
+                    "source": "main",
+                    "text": raw_text,
+                    "references": raw_references,
+                },
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        )
+
+    async def test_references_trimmed_to_limit(self, mock_page):
+        """References must not exceed the requested limit even when the page
+        renders more invitation cards than asked for."""
+        # 30 distinct inviter profile anchors - all classify as person refs.
+        raw_references = [
+            {"href": f"https://www.linkedin.com/in/user-{i}/", "text": f"User {i}"}
+            for i in range(30)
+        ]
+        extractor = LinkedInExtractor(mock_page)
+
+        with ExitStack() as stack:
+            for ctx in self._patch_invitation_helpers(extractor, raw_references):
+                stack.enter_context(ctx)
+            result = await extractor.get_pending_invitations(limit=5)
+
+        invitations = result["references"]["invitations"]
+        assert len(invitations) == 5
+        assert all(ref["kind"] == "person" for ref in invitations)
+        assert result["url"].endswith("/invitation-manager/received/")
+
+    async def test_text_trimmed_to_limit_reference_boundary(self, mock_page):
+        """Returned section text should stop before the first omitted card so
+        text and references describe the same invitation count."""
+        raw_references = [
+            {"href": f"https://www.linkedin.com/in/user-{i}/", "text": f"User {i}"}
+            for i in range(3)
+        ]
+        raw_text = (
+            "User 0\nInvited you to connect\n\n"
+            "User 1\nInvited you to connect\n\n"
+            "User 2\nInvited you to connect"
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        with ExitStack() as stack:
+            for ctx in self._patch_invitation_helpers(
+                extractor,
+                raw_references,
+                raw_text=raw_text,
+            ):
+                stack.enter_context(ctx)
+            result = await extractor.get_pending_invitations(limit=1)
+
+        assert result["sections"]["invitations"] == "User 0\nInvited you to connect"
+        assert len(result["references"]["invitations"]) == 1
+
+    async def test_text_trimmed_to_limit_when_next_card_has_no_reference(
+        self, mock_page
+    ):
+        """The text limit must still hold when later visible cards do not
+        produce distinct usable profile references."""
+        raw_references = [
+            {"href": "https://www.linkedin.com/in/user-0/", "text": "User 0"}
+        ]
+        raw_text = (
+            "User 0\nInvited you to connect\n\n"
+            "Someone without a usable profile link\nInvited you to connect"
+        )
+        extractor = LinkedInExtractor(mock_page)
+
+        with ExitStack() as stack:
+            for ctx in self._patch_invitation_helpers(
+                extractor,
+                raw_references,
+                raw_text=raw_text,
+            ):
+                stack.enter_context(ctx)
+            result = await extractor.get_pending_invitations(limit=1)
+
+        assert result["sections"]["invitations"] == "User 0\nInvited you to connect"
+        assert len(result["references"]["invitations"]) == 1
+
+    async def test_sent_kind_navigates_to_sent_page(self, mock_page):
+        """kind='sent' targets the sent invitation-manager surface."""
+        extractor = LinkedInExtractor(mock_page)
+
+        with ExitStack() as stack:
+            for ctx in self._patch_invitation_helpers(extractor, []):
+                stack.enter_context(ctx)
+            result = await extractor.get_pending_invitations(limit=3, kind="sent")
+
+        assert result["url"].endswith("/invitation-manager/sent/")
+
+    async def test_received_zero_count_omits_recommendations(self, mock_page):
+        """When the selected received-count tab is zero, do not return
+        unrelated "people you may know" recommendations as invitations."""
+        extractor = LinkedInExtractor(mock_page)
+
+        with (
+            patch.object(extractor, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(extractor, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                extractor, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor, "_expand_invitation_note_toggles", new_callable=AsyncMock
+            ),
+            patch.object(
+                extractor,
+                "_received_invitation_count_is_zero",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_extract_root_content", new_callable=AsyncMock
+            ) as extract_root,
+            patch(
+                "linkedin_mcp_server.scraping.extractor.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.get_pending_invitations(limit=1)
+
+        assert result == {
+            "url": "https://www.linkedin.com/mynetwork/invitation-manager/received/",
+            "sections": {},
+        }
+        extract_root.assert_not_awaited()
+
+    async def test_expand_selector_skips_expanded_and_clicked(self, mock_page):
+        """The expand-toggle selector must be locale-independent (testid-based)
+        and skip both already-expanded and already-clicked toggles, so a pass
+        can never re-collapse a note it previously revealed."""
+        mock_page.evaluate = AsyncMock(return_value=0)
+        extractor = LinkedInExtractor(mock_page)
+
+        await extractor._expand_invitation_note_toggles()
+
+        assert mock_page.evaluate.await_count >= 1
+        js = mock_page.evaluate.await_args_list[0].args[0]
+        # locale-independent structural selector, not a visible verb
+        assert '[data-testid="expandable-text-button"]' in js
+        # the two regression guards from review feedback
+        assert ':not([aria-expanded="true"])' in js
+        assert ":not([data-mcp-clicked])" in js
+        # mark only after dispatch succeeds so a failed click can be retried
+        assert js.index("btn.dispatchEvent") < js.index("btn.dataset.mcpClicked")

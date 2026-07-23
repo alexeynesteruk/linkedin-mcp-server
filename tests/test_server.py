@@ -11,6 +11,7 @@ from fastmcp.server.middleware import MiddlewareContext
 from linkedin_mcp_server import __version__
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
+    _is_browser_context_closed,
 )
 from linkedin_mcp_server.server import create_mcp_server
 from linkedin_mcp_server.tools.meta import (
@@ -226,6 +227,51 @@ class TestSequentialToolExecutionMiddleware:
                 ),
             ]
         )
+
+
+class TestBrowserContextClosedDetection:
+    def test_matches_classic_phrase(self):
+        assert _is_browser_context_closed(
+            RuntimeError("Target page, context or browser has been closed")
+        )
+
+    def test_matches_wrapped_cause(self):
+        root = RuntimeError("Target closed")
+        wrapped = RuntimeError("tool failed")
+        wrapped.__cause__ = root
+        assert _is_browser_context_closed(wrapped)
+
+    def test_ignores_unrelated(self):
+        assert not _is_browser_context_closed(RuntimeError("rate limited"))
+
+
+class TestSequentialBrowserCrashRecovery:
+    async def test_resets_browser_and_raises_tool_error(self, monkeypatch):
+        from fastmcp.exceptions import ToolError
+
+        close_calls: list[str] = []
+
+        async def fake_close():
+            close_calls.append("closed")
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.drivers.browser.close_browser",
+            fake_close,
+        )
+
+        middleware = SequentialToolExecutionMiddleware()
+        call_next = AsyncMock(
+            side_effect=RuntimeError("Target page, context or browser has been closed")
+        )
+        context = MiddlewareContext(
+            message=mt.CallToolRequestParams(name="get_feed", arguments={}),
+            method="tools/call",
+        )
+
+        with pytest.raises(ToolError, match="browser context crashed"):
+            await middleware.on_call_tool(context, call_next)
+
+        assert close_calls == ["closed"]
 
 
 class TestServerVersion:

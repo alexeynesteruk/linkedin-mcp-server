@@ -16,14 +16,44 @@ from linkedin_mcp_server.tools.meta import META_TOOL_NAMES
 
 logger = logging.getLogger(__name__)
 
-# Patchright/Playwright error message emitted when the browser context dies.
-# Matched as a substring so it works across Playwright versions and transports.
-_BROWSER_CONTEXT_CLOSED = "Target page, context or browser has been closed"
+# Patchright/Playwright phrases emitted when the browser/page/context dies.
+# Matched as case-insensitive substrings so recovery works across Playwright
+# versions, transports, and exception wrapping (ToolError, ExceptionGroup).
+_BROWSER_CLOSED_MARKERS: tuple[str, ...] = (
+    "target page, context or browser has been closed",
+    "target closed",
+    "browser has been closed",
+    "context has been closed",
+    "page has been closed",
+    "connection closed while reading from the driver",
+    "browser.new_context: target page, context or browser has been closed",
+)
 
 
-def _is_browser_context_closed(exc: Exception) -> bool:
+def _exception_text_chain(exc: BaseException, *, depth: int = 0) -> str:
+    """Flatten exception message + cause/context/group members for matching."""
+    if depth > 6:
+        return ""
+    parts = [str(exc)]
+    cause = exc.__cause__
+    if isinstance(cause, BaseException):
+        parts.append(_exception_text_chain(cause, depth=depth + 1))
+    ctx = exc.__context__
+    if isinstance(ctx, BaseException) and ctx is not cause:
+        parts.append(_exception_text_chain(ctx, depth=depth + 1))
+    # Python 3.11+ ExceptionGroup
+    exceptions = getattr(exc, "exceptions", None)
+    if isinstance(exceptions, tuple):
+        for nested in exceptions:
+            if isinstance(nested, BaseException):
+                parts.append(_exception_text_chain(nested, depth=depth + 1))
+    return "\n".join(parts)
+
+
+def _is_browser_context_closed(exc: BaseException) -> bool:
     """Return True if *exc* indicates the Patchright browser context has died."""
-    return _BROWSER_CONTEXT_CLOSED in str(exc)
+    text = _exception_text_chain(exc).lower()
+    return any(marker in text for marker in _BROWSER_CLOSED_MARKERS)
 
 
 class SequentialToolExecutionMiddleware(Middleware):

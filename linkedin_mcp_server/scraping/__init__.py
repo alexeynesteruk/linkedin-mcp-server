@@ -10,12 +10,14 @@ from .fields import (
     parse_person_sections,
 )
 from .skills_parser import parse_skills, skill_names_from_aria_labels
+from .usernames import normalize_linkedin_username
 
 __all__ = [
     "ANALYTICS_SECTIONS",
     "COMPANY_SECTIONS",
     "LinkedInExtractor",
     "PERSON_SECTIONS",
+    "normalize_linkedin_username",
     "parse_analytics_sections",
     "parse_company_sections",
     "parse_person_sections",
