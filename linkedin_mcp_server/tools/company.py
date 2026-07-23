@@ -13,8 +13,9 @@ from fastmcp import Context, FastMCP
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
+from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
 from linkedin_mcp_server.scraping import parse_company_sections
 from linkedin_mcp_server.scraping.constants import RATE_LIMITED_MSG as _RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.link_metadata import Reference
@@ -32,13 +33,12 @@ def register_company_tools(
         title="Get Company Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_company_profile(
         company_name: str,
         ctx: Context,
         sections: str | None = None,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_company_profile"),
     ) -> dict[str, Any]:
         """
         Get a specific company's LinkedIn profile.
@@ -66,9 +66,6 @@ def register_company_tools(
             that facet.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_profile"
-            )
             requested, unknown = parse_company_sections(sections)
 
             logger.info(
@@ -85,7 +82,7 @@ def register_company_tools(
             if unknown:
                 result["unknown_sections"] = unknown
 
-            return result
+            return annotate_empty_scrape_result(result, tool_name="get_company_profile")
 
         except AuthenticationError as e:
             try:
@@ -100,12 +97,11 @@ def register_company_tools(
         title="Get Company Posts",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_company_posts(
         company_name: str,
         ctx: Context,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_company_posts"),
     ) -> dict[str, Any]:
         """
         Get recent posts from a company's LinkedIn feed.
@@ -119,9 +115,6 @@ def register_company_tools(
             The LLM should parse the raw text to extract individual posts.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_posts"
-            )
             logger.info("Scraping company posts: %s", company_name)
 
             await ctx.report_progress(
@@ -151,7 +144,11 @@ def register_company_tools(
                 result["references"] = references
             if section_errors:
                 result["section_errors"] = section_errors
-            return result
+            return annotate_empty_scrape_result(
+                result,
+                tool_name="get_company_posts",
+                required_sections=("posts",),
+            )
 
         except AuthenticationError as e:
             try:
@@ -166,12 +163,11 @@ def register_company_tools(
         title="Search Companies",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "search"},
-        exclude_args=["extractor"],
     )
     async def search_companies(
         keywords: str,
         ctx: Context,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("search_companies"),
     ) -> dict[str, Any]:
         """
         Search for companies on LinkedIn.
@@ -185,9 +181,6 @@ def register_company_tools(
             The LLM should parse the raw text to extract individual companies and their pages.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_companies"
-            )
             logger.info("Searching companies: keywords='%s'", keywords)
 
             await ctx.report_progress(
@@ -198,7 +191,11 @@ def register_company_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return annotate_empty_scrape_result(
+                result,
+                tool_name="search_companies",
+                required_sections=("search_results",),
+            )
 
         except AuthenticationError as e:
             try:
@@ -213,13 +210,12 @@ def register_company_tools(
         title="Get Company Employees",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"company", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_company_employees(
         company_name: str,
         ctx: Context,
         keywords: str | None = None,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_company_employees"),
     ) -> dict[str, Any]:
         """
         List employees at a company from the LinkedIn /people/ page, including
@@ -250,9 +246,6 @@ def register_company_tools(
             References include /in/ profile paths for listed employees.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_company_employees"
-            )
             logger.info(
                 "Scraping company employees: %s (keywords=%s)", company_name, keywords
             )
@@ -267,7 +260,11 @@ def register_company_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return annotate_empty_scrape_result(
+                result,
+                tool_name="get_company_employees",
+                required_sections=("employees",),
+            )
 
         except AuthenticationError as e:
             try:

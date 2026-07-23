@@ -86,7 +86,11 @@ class TestGetReadyExtractor:
             mock_ensure_auth.assert_awaited_once()
 
     async def test_auth_error_triggers_relogin(self):
-        """AuthenticationError from ensure_authenticated triggers relogin."""
+        """AuthenticationError from ensure_authenticated triggers relogin.
+
+        Relogin signals are converted to ToolError so FastMCP Depends
+        resolution preserves the user-facing message.
+        """
         with (
             patch(
                 "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
@@ -107,7 +111,7 @@ class TestGetReadyExtractor:
                 side_effect=AuthenticationStartedError("login opened"),
             ) as mock_handle,
         ):
-            with pytest.raises(AuthenticationStartedError):
+            with pytest.raises(ToolError, match="login opened"):
                 await get_ready_extractor(ctx=None, tool_name="test_tool")
 
             mock_handle.assert_awaited_once()

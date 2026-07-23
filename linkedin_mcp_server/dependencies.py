@@ -1,9 +1,13 @@
 """Helpers used by MCP tools after bootstrap gating."""
 
+from __future__ import annotations
+
 import logging
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from fastmcp import Context
+from fastmcp.dependencies import Depends
+from fastmcp.server.dependencies import get_context
 
 from linkedin_mcp_server.bootstrap import (
     RuntimePolicy,
@@ -86,7 +90,12 @@ async def get_ready_extractor(
         await ensure_authenticated()
         return LinkedInExtractor(browser.page)
     except AuthenticationError as e:
-        await handle_auth_error(e, ctx)  # always raises
+        try:
+            await handle_auth_error(e, ctx)  # always raises
+        except Exception as relogin_exc:
+            # Convert to ToolError here so FastMCP Depends resolution does not
+            # wrap auth/relogin signals as "Failed to resolve dependency".
+            raise_tool_error(relogin_exc, tool_name)
     except Exception as e:
         if isinstance(e, NetworkError) and _is_browser_binary_missing_error(e):
             invalidate_browser_setup()
@@ -104,3 +113,21 @@ async def get_ready_extractor(
                 tool_name,
             )
         raise_tool_error(e, tool_name)  # NoReturn
+
+
+def extractor_depends(tool_name: str) -> Any:
+    """FastMCP ``Depends()`` default that injects a ready extractor.
+
+    Prefer this over the deprecated ``exclude_args=["extractor"]`` pattern.
+    Unit tests may still call ``tool.fn(..., extractor=mock)`` to override.
+    Errors are raised as ``ToolError`` so Depends resolution preserves them.
+    """
+
+    async def _resolve() -> LinkedInExtractor:
+        try:
+            ctx: Context | None = get_context()
+        except Exception:
+            ctx = None
+        return await get_ready_extractor(ctx, tool_name=tool_name)
+
+    return Depends(_resolve)

@@ -651,6 +651,58 @@ def profile_exists(profile_dir: Path | None = None) -> bool:
     return session_profile_exists(profile_dir or get_profile_dir())
 
 
+def profile_singleton_lock_held(profile_dir: Path | None = None) -> bool:
+    """Return True when Chromium's SingletonLock appears held for *profile_dir*.
+
+    Chromium writes ``SingletonLock`` (usually a symlink to ``hostname-pid``)
+    while a process owns the user-data directory. A second MCP server against
+    the same profile races cookies, tabs, and scrapes. Detection is best-effort
+    and advisory only - stale locks from crashed browsers can also match.
+    """
+    target = (profile_dir or get_profile_dir()).expanduser()
+    lock_path = target / "SingletonLock"
+    if not lock_path.exists() and not lock_path.is_symlink():
+        return False
+    # Symlink target is typically "hostname-pid". If we can parse a live PID on
+    # this host, treat a dead PID as stale (not held).
+    try:
+        if lock_path.is_symlink():
+            link = os.readlink(lock_path)
+            if "-" in link:
+                _host, _, pid_s = link.rpartition("-")
+                if pid_s.isdigit():
+                    pid = int(pid_s)
+                    try:
+                        os.kill(pid, 0)
+                        return True
+                    except ProcessLookupError:
+                        return False
+                    except PermissionError:
+                        # Process exists but we cannot signal it.
+                        return True
+    except OSError:
+        pass
+    return lock_path.exists() or lock_path.is_symlink()
+
+
+def warn_if_profile_lock_held(profile_dir: Path | None = None) -> bool:
+    """Log a warning when another Chromium appears to own the profile.
+
+    Returns True when a held lock was detected.
+    """
+    target = profile_dir or get_profile_dir()
+    if not profile_singleton_lock_held(target):
+        return False
+    logger.warning(
+        "Chromium SingletonLock is held for profile %s. Another mcp-server-linkedin "
+        "(or Chrome) process is likely using this profile. Concurrent access causes "
+        "empty scrapes, flaky auth, and 'browser context closed' errors. "
+        "Keep one LinkedIn MCP process per machine, or run: pkill -f mcp-server-linkedin",
+        target,
+    )
+    return True
+
+
 def set_headless(headless: bool) -> None:
     """Set headless mode for future browser creation."""
     global _headless

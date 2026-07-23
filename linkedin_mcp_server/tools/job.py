@@ -13,8 +13,9 @@ from pydantic import Field
 from linkedin_mcp_server.common_utils import apply_output_mode
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
+from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
 
 logger = logging.getLogger(__name__)
 
@@ -34,14 +35,13 @@ def register_job_tools(
             "openWorldHint": True,
         },
         tags={"job", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_job_details(
         job_id: str,
         ctx: Context,
         output_path: str | None = None,
         output_mode: Literal["display", "file", "both"] = "display",
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_job_details"),
     ) -> dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn.
@@ -62,9 +62,6 @@ def register_job_tools(
             The LLM should parse the raw text to extract job details.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_job_details"
-            )
             logger.info("Scraping job: %s", job_id)
 
             await ctx.report_progress(
@@ -72,6 +69,7 @@ def register_job_tools(
             )
 
             result = await extractor.scrape_job(job_id)
+            annotate_empty_scrape_result(result, tool_name="get_job_details")
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -95,7 +93,6 @@ def register_job_tools(
             "openWorldHint": True,
         },
         tags={"job", "search"},
-        exclude_args=["extractor"],
     )
     async def search_jobs(
         keywords: str,
@@ -110,7 +107,7 @@ def register_job_tools(
         sort_by: str | None = None,
         output_path: str | None = None,
         output_mode: Literal["display", "file", "both"] = "display",
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("search_jobs"),
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -143,9 +140,6 @@ def register_job_tools(
             references.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_jobs"
-            )
             logger.info(
                 "Searching jobs: keywords='%s', location='%s', max_pages=%d",
                 keywords,
@@ -168,6 +162,7 @@ def register_job_tools(
                 easy_apply=easy_apply,
                 sort_by=sort_by,
             )
+            annotate_empty_scrape_result(result, tool_name="search_jobs")
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -191,14 +186,13 @@ def register_job_tools(
             "openWorldHint": True,
         },
         tags={"job", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_saved_jobs(
         ctx: Context,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
         output_path: str | None = None,
         output_mode: Literal["display", "file", "both"] = "display",
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_saved_jobs"),
     ) -> dict[str, Any]:
         """
         List job postings saved by the authenticated LinkedIn user.
@@ -222,9 +216,6 @@ def register_job_tools(
             references.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_saved_jobs"
-            )
             logger.info("Fetching saved jobs (max_pages=%d)", max_pages)
 
             await ctx.report_progress(
@@ -232,6 +223,7 @@ def register_job_tools(
             )
 
             result = await extractor.get_saved_jobs(max_pages=max_pages)
+            annotate_empty_scrape_result(result, tool_name="get_saved_jobs")
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

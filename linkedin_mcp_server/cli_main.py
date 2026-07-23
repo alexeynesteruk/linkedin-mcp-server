@@ -21,8 +21,12 @@ from linkedin_mcp_server.drivers.browser import (
     get_profile_dir,
     profile_exists,
     set_headless,
+    warn_if_profile_lock_held,
 )
-from linkedin_mcp_server.debug_trace import should_keep_traces
+from linkedin_mcp_server.debug_trace import (
+    garbage_collect_trace_runs,
+    should_keep_traces,
+)
 from linkedin_mcp_server.logging_config import configure_logging, teardown_trace_logging
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
@@ -337,6 +341,16 @@ def main() -> None:
 
         # Set headless mode from config
         set_headless(config.browser.headless)
+
+        # Best-effort housekeeping and multi-process profile warnings.
+        try:
+            garbage_collect_trace_runs()
+        except Exception:
+            logger.debug("Trace-run GC skipped", exc_info=True)
+        try:
+            warn_if_profile_lock_held(get_profile_dir())
+        except Exception:
+            logger.debug("Profile lock check skipped", exc_info=True)
 
         # Handle --logout flag
         if config.server.logout:

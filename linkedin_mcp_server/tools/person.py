@@ -16,8 +16,9 @@ from pydantic import Field
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
+from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
 from linkedin_mcp_server.scraping import parse_person_sections
 from linkedin_mcp_server.scraping.extractor import FilterValidationError
 
@@ -56,14 +57,13 @@ def register_person_tools(
         title="Get Person Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_person_profile(
         linkedin_username: str,
         ctx: Context,
         sections: str | None = None,
         max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_person_profile"),
     ) -> dict[str, Any]:
         """
         Get a specific person's LinkedIn profile.
@@ -92,9 +92,6 @@ def register_person_tools(
             The LLM should parse the raw text in each section.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_person_profile"
-            )
             requested, unknown = parse_person_sections(sections)
 
             logger.info(
@@ -114,7 +111,7 @@ def register_person_tools(
             if unknown:
                 result["unknown_sections"] = unknown
 
-            return result
+            return annotate_empty_scrape_result(result, tool_name="get_person_profile")
 
         except AuthenticationError as e:
             try:
@@ -129,7 +126,6 @@ def register_person_tools(
         title="Search People",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "search"},
-        exclude_args=["extractor"],
     )
     async def search_people(
         keywords: str,
@@ -139,7 +135,7 @@ def register_person_tools(
         geo_urn: list[str] | str | None = None,
         current_company: str | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 1,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("search_people"),
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
@@ -182,9 +178,6 @@ def register_person_tools(
             The LLM should parse the raw text to extract individual people and their profiles.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_people"
-            )
             network = _coerce_str_list(network)
             geo_urn = _coerce_str_list(geo_urn)
             logger.info(
@@ -219,7 +212,11 @@ def register_person_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return annotate_empty_scrape_result(
+                result,
+                tool_name="search_people",
+                required_sections=("search_results",),
+            )
 
         except ToolError:
             # Already a properly formatted client-facing error; do not
@@ -238,13 +235,12 @@ def register_person_tools(
         title="Connect With Person",
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"person", "actions"},
-        exclude_args=["extractor"],
     )
     async def connect_with_person(
         linkedin_username: str,
         ctx: Context,
         note: str | None = None,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("connect_with_person"),
     ) -> dict[str, Any]:
         """
         Send a LinkedIn connection request or accept an incoming one.
@@ -270,9 +266,6 @@ def register_person_tools(
             text read from LinkedIn.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="connect_with_person"
-            )
             logger.info(
                 "Connecting with person: %s (note=%s)",
                 linkedin_username,
@@ -307,12 +300,11 @@ def register_person_tools(
         title="Get Sidebar Profiles",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_sidebar_profiles(
         linkedin_username: str,
         ctx: Context,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_sidebar_profiles"),
     ) -> dict[str, Any]:
         """
         Get profile links from sidebar recommendation sections on a LinkedIn profile page.
@@ -332,9 +324,6 @@ def register_person_tools(
             /in/username/ paths. Only sections present on the page are included.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_sidebar_profiles"
-            )
             logger.info("Getting sidebar profiles for: %s", linkedin_username)
 
             await ctx.report_progress(
@@ -345,7 +334,9 @@ def register_person_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return annotate_empty_scrape_result(
+                result, tool_name="get_sidebar_profiles"
+            )
 
         except AuthenticationError as e:
             try:
@@ -360,13 +351,12 @@ def register_person_tools(
         title="Get My Profile",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"person", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_my_profile(
         ctx: Context,
         sections: str | None = None,
         max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_my_profile"),
     ) -> dict[str, Any]:
         """
         Get the authenticated user's own LinkedIn profile.
@@ -389,9 +379,6 @@ def register_person_tools(
             The url field reflects the resolved profile URL, revealing the real username.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_my_profile"
-            )
             requested, unknown = parse_person_sections(sections)
 
             logger.info("Scraping own profile (sections=%s)", sections)
@@ -406,7 +393,7 @@ def register_person_tools(
             if unknown:
                 result["unknown_sections"] = unknown
 
-            return result
+            return annotate_empty_scrape_result(result, tool_name="get_my_profile")
 
         except AuthenticationError as e:
             try:

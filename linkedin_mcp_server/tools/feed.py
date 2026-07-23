@@ -17,8 +17,9 @@ from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
+from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
 from linkedin_mcp_server.scraping.constants import RATE_LIMITED_MSG as _RATE_LIMITED_MSG
 from linkedin_mcp_server.scraping.extractor import normalize_post_url
 from linkedin_mcp_server.scraping.link_metadata import Reference
@@ -36,12 +37,11 @@ def register_feed_tools(
         title="Get Feed",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"feed", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_feed(
         ctx: Context,
         num_posts: Annotated[int, Field(ge=1, le=50)] = 10,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_feed"),
     ) -> dict[str, Any]:
         """
         Get posts from the authenticated user's LinkedIn feed.
@@ -67,9 +67,6 @@ def register_feed_tools(
             should parse sections["feed"] for post bodies.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_feed"
-            )
             logger.info("Scraping feed (num_posts=%d)", num_posts)
 
             await ctx.report_progress(
@@ -101,7 +98,11 @@ def register_feed_tools(
                 result["references"] = references
             if section_errors:
                 result["section_errors"] = section_errors
-            return result
+            return annotate_empty_scrape_result(
+                result,
+                tool_name="get_feed",
+                required_sections=("feed",),
+            )
 
         except AuthenticationError as e:
             try:
@@ -116,13 +117,12 @@ def register_feed_tools(
         title="Get Post Comments",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"feed", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_post_comments(
         post_url: str,
         ctx: Context,
         max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_post_comments"),
     ) -> dict[str, Any]:
         """
         Get a single LinkedIn post with its full comment thread.
@@ -157,9 +157,6 @@ def register_feed_tools(
                     "URL) or a bare urn:li:activity:<id>."
                 )
 
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_post_comments"
-            )
             logger.info("Scraping post comments: %s", url)
 
             await ctx.report_progress(
@@ -190,7 +187,11 @@ def register_feed_tools(
                 result["references"] = references
             if section_errors:
                 result["section_errors"] = section_errors
-            return result
+            return annotate_empty_scrape_result(
+                result,
+                tool_name="get_post_comments",
+                required_sections=("post",),
+            )
 
         except ToolError:
             raise

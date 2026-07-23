@@ -17,8 +17,9 @@ from pydantic import Field
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
+from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
 from linkedin_mcp_server.scraping import parse_analytics_sections
 from linkedin_mcp_server.scraping.extractor import FilterValidationError
 
@@ -35,14 +36,13 @@ def register_analytics_tools(
         title="Get My Analytics",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"analytics", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_my_analytics(
         ctx: Context,
         sections: str | None = None,
         time_range: str | None = None,
         max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_my_analytics"),
     ) -> dict[str, Any]:
         """
         Get the authenticated user's own LinkedIn analytics dashboards.
@@ -80,9 +80,6 @@ def register_analytics_tools(
             axis-description text with min/max values.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_my_analytics"
-            )
             requested, unknown = parse_analytics_sections(sections)
 
             logger.info(
@@ -108,7 +105,7 @@ def register_analytics_tools(
             if unknown:
                 result["unknown_sections"] = unknown
 
-            return result
+            return annotate_empty_scrape_result(result, tool_name="get_my_analytics")
 
         except ToolError:
             raise

@@ -204,6 +204,8 @@ parallel. Use `--log-level DEBUG` to see scraper lock wait/acquire/release logs.
 - Browser profile is stored at `~/.linkedin-mcp/profile/`
 - Managed browser downloads are cached at `~/.linkedin-mcp/patchright-browsers/`
 - Make sure you have only one active LinkedIn session at a time
+- Prefer a single `mcp-server-linkedin` process; the server warns on startup if Chromium's profile `SingletonLock` is already held
+- Debug logs and traces: see **Debugging / logs** under the full Troubleshooting section near the end of this README (`LOG_LEVEL`, `LINKEDIN_TRACE_MODE`, `~/.linkedin-mcp/trace-runs/`)
 
 **Login issues:**
 
@@ -486,11 +488,35 @@ uv run -m linkedin_mcp_server --transport streamable-http --host 127.0.0.1 --por
 
 - Use `--no-headless` to see browser actions and debug scraping problems
 - Add `--log-level DEBUG` to see more detailed logging
+- Soft failures (HTTP-style success with empty content) set `empty_scrape: true` and `section_errors` on the tool result, and keep a trace run for inspection
 
 **Session issues:**
 
 - Browser profile is stored at `~/.linkedin-mcp/profile/`
 - Use `--logout` to clear the profile and start fresh
+- Only one `mcp-server-linkedin` process should own the profile at a time. Multiple clients (Claude + Grok + leftover processes) share Chromium's `SingletonLock` and cause empty scrapes / flaky auth. On startup the server warns if the lock is already held. Clean up with `pkill -f mcp-server-linkedin` then restart the host you care about.
+
+**Debugging / logs:**
+
+- **Default log level is WARNING.** Stdio hosts capture stderr (e.g. Grok: `~/.grok/logs/mcp/linkedin.stderr.log`). For tool-level detail run with `--log-level DEBUG` or `LOG_LEVEL=DEBUG`.
+- **Trace runs** live under `~/.linkedin-mcp/trace-runs/run-*/` (`server.log`, `trace.jsonl`, `screens/`, issue `*.md`). Controlled by:
+  - `LINKEDIN_TRACE_MODE=on_error|always|off` (default `on_error` - keep only when a failure marks the run)
+  - `LINKEDIN_DEBUG_TRACE_DIR=/path` to pin a persistent directory
+  - `LINKEDIN_TRACE_MAX_AGE_DAYS` (default 7) and `LINKEDIN_TRACE_MAX_RUNS` (default 200) for GC of empty/old runs
+- **One-shot deep debug:**
+  ```bash
+  LOG_LEVEL=DEBUG LINKEDIN_TRACE_MODE=always \
+    uv run -m linkedin_mcp_server --log-level DEBUG --no-headless
+  ```
+- **Claude / MCP client config example** (more verbose logs without headed browser):
+  ```json
+  {
+    "command": "/path/to/.venv/bin/mcp-server-linkedin",
+    "args": ["--log-level", "DEBUG"],
+    "env": { "LOG_LEVEL": "DEBUG", "LINKEDIN_TRACE_MODE": "on_error" }
+  }
+  ```
+- Call `linkedin_health` / `linkedin_ping` first when diagnosing session issues (no scrape).
 
 **Python/Patchright issues:**
 

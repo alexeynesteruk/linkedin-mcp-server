@@ -7,6 +7,7 @@ import pytest
 from linkedin_mcp_server.debug_trace import (
     _safe_source_profile_dir,
     cleanup_trace_dir,
+    garbage_collect_trace_runs,
     get_trace_dir,
     mark_trace_for_retention,
     record_page_trace,
@@ -112,3 +113,120 @@ def test_safe_source_profile_dir_ignores_generic_env_fallback(monkeypatch):
     )
 
     assert _safe_source_profile_dir() == Path("~/.linkedin-mcp/profile").expanduser()
+
+
+def test_garbage_collect_deletes_old_empty_runs(monkeypatch, tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setenv("USER_DATA_DIR", str(profile))
+    reset_trace_state_for_testing()
+
+    root = tmp_path / "trace-runs"
+    root.mkdir()
+    monkeypatch.setattr(
+        "linkedin_mcp_server.debug_trace._trace_root",
+        lambda: root,
+    )
+
+    old_empty = root / "run-old-empty"
+    old_empty.mkdir()
+    (old_empty / "server.log").write_text("")
+    # Age the directory
+    old_ts = 1_000_000.0
+    import os
+
+    os.utime(old_empty, (old_ts, old_ts))
+    os.utime(old_empty / "server.log", (old_ts, old_ts))
+
+    fresh_empty = root / "run-fresh-empty"
+    fresh_empty.mkdir()
+    (fresh_empty / "server.log").write_text("")
+
+    kept = root / "run-with-content"
+    kept.mkdir()
+    (kept / "server.log").write_text("x" * 200)
+    os.utime(kept, (old_ts, old_ts))
+
+    stats = garbage_collect_trace_runs(
+        max_age_days=1.0,
+        max_runs=200,
+        now=old_ts + 10 * 86400,
+    )
+
+    assert stats["deleted_empty"] == 1
+    assert not old_empty.exists()
+    assert fresh_empty.exists()
+    assert kept.exists()
+
+
+def test_garbage_collect_respects_max_runs_preferring_empty(monkeypatch, tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setenv("USER_DATA_DIR", str(profile))
+    reset_trace_state_for_testing()
+
+    root = tmp_path / "trace-runs"
+    root.mkdir()
+    monkeypatch.setattr(
+        "linkedin_mcp_server.debug_trace._trace_root",
+        lambda: root,
+    )
+
+    import os
+    import time
+
+    now = time.time()
+    for i in range(5):
+        d = root / f"run-e{i}"
+        d.mkdir()
+        (d / "server.log").write_text("")
+        os.utime(d, (now - (10 - i), now - (10 - i)))
+
+    content = root / "run-content"
+    content.mkdir()
+    (content / "server.log").write_text("payload" * 20)
+
+    stats = garbage_collect_trace_runs(max_age_days=0, max_runs=3, now=now)
+
+    assert stats["deleted_over_cap"] >= 2
+    assert content.exists()
+    remaining = list(root.iterdir())
+    assert len(remaining) <= 3
+
+
+def test_garbage_collect_skips_active_trace_dir(monkeypatch, tmp_path):
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    monkeypatch.setenv("USER_DATA_DIR", str(profile))
+    reset_trace_state_for_testing()
+
+    root = tmp_path / "trace-runs"
+    root.mkdir()
+    monkeypatch.setattr(
+        "linkedin_mcp_server.debug_trace._trace_root",
+        lambda: root,
+    )
+
+    active = get_trace_dir()
+    assert active is not None
+    # Force active under our root for the test
+    import linkedin_mcp_server.debug_trace as dt
+
+    protected = root / "run-active"
+    protected.mkdir()
+    (protected / "server.log").write_text("")
+    dt._TRACE_DIR = protected
+
+    old = root / "run-old"
+    old.mkdir()
+    (old / "server.log").write_text("")
+    import os
+
+    os.utime(old, (1_000_000.0, 1_000_000.0))
+
+    garbage_collect_trace_runs(
+        max_age_days=1.0, max_runs=200, now=1_000_000.0 + 20 * 86400
+    )
+
+    assert protected.exists()
+    assert not old.exists()

@@ -15,8 +15,9 @@ from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
     LinkedInScraperException,
 )
-from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
+from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +32,11 @@ def register_messaging_tools(
         title="Get Inbox",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"messaging", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_inbox(
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=50)] = 20,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_inbox"),
     ) -> dict[str, Any]:
         """
         List recent conversations from the LinkedIn messaging inbox.
@@ -49,9 +49,6 @@ def register_messaging_tools(
             Dict with url, sections (inbox -> raw text), and optional references.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_inbox"
-            )
             logger.info("Fetching inbox (limit=%d)", limit)
 
             await ctx.report_progress(
@@ -62,7 +59,11 @@ def register_messaging_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return annotate_empty_scrape_result(
+                result,
+                tool_name="get_inbox",
+                required_sections=("inbox",),
+            )
 
         except AuthenticationError as e:
             try:
@@ -77,14 +78,13 @@ def register_messaging_tools(
         title="Get Conversation",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"messaging", "scraping"},
-        exclude_args=["extractor"],
     )
     async def get_conversation(
         ctx: Context,
         linkedin_username: str | None = None,
         thread_id: str | None = None,
         index: Annotated[int, Field(ge=0)] = 0,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("get_conversation"),
     ) -> dict[str, Any]:
         """
         Read a specific messaging conversation.
@@ -119,9 +119,6 @@ def register_messaging_tools(
             )
 
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="get_conversation"
-            )
             logger.info(
                 "Fetching conversation: username=%s, thread_id=%s, index=%d",
                 linkedin_username,
@@ -141,7 +138,11 @@ def register_messaging_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return annotate_empty_scrape_result(
+                result,
+                tool_name="get_conversation",
+                required_sections=("conversation",),
+            )
 
         except AuthenticationError as e:
             try:
@@ -156,13 +157,12 @@ def register_messaging_tools(
         title="Search Conversations",
         annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"messaging", "search"},
-        exclude_args=["extractor"],
     )
     async def search_conversations(
         keywords: str,
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=50)] = 20,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("search_conversations"),
     ) -> dict[str, Any]:
         """
         Search messages by keyword.
@@ -179,9 +179,6 @@ def register_messaging_tools(
             Dict with url, sections (search_results -> raw text), and optional references.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="search_conversations"
-            )
             logger.info(
                 "Searching conversations: keywords='%s', limit=%d", keywords, limit
             )
@@ -194,7 +191,11 @@ def register_messaging_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return annotate_empty_scrape_result(
+                result,
+                tool_name="search_conversations",
+                required_sections=("search_results",),
+            )
 
         except AuthenticationError as e:
             try:
@@ -209,7 +210,6 @@ def register_messaging_tools(
         title="Send Message",
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"messaging", "actions"},
-        exclude_args=["extractor"],
     )
     async def send_message(
         linkedin_username: str,
@@ -218,7 +218,7 @@ def register_messaging_tools(
         ctx: Context,
         profile_urn: str | None = None,
         thread_id: str | None = None,
-        extractor: Any | None = None,
+        extractor: Any = extractor_depends("send_message"),
     ) -> dict[str, Any]:
         """
         Send a message to a LinkedIn user or reply to an existing thread.
@@ -249,9 +249,6 @@ def register_messaging_tools(
             Dict with url, status, message, recipient_selected, and sent.
         """
         try:
-            extractor = extractor or await get_ready_extractor(
-                ctx, tool_name="send_message"
-            )
             logger.info(
                 "Sending message to %s (confirm_send=%s, thread_id=%s)",
                 linkedin_username,
