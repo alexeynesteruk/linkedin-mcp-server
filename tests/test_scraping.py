@@ -960,6 +960,27 @@ class TestDetectConnectionState:
             == "self_profile"
         )
 
+    def test_incoming_request_signals_are_ambiguous_with_creator_mode(self):
+        # A creator-mode/high-follower profile's top card - [Follow][Save in
+        # Sales Navigator][More], no Message button - produces the exact
+        # SAME flat signals as a genuine incoming request: no compose
+        # anchor (no Message button means findActionRoot never locates an
+        # action root at all, so has_compose_anchor_in_action_root and
+        # has_labeled_action_button both stay False regardless), no invite
+        # anchor (Connect is lazily mounted into the DOM only once the
+        # More menu is opened, so has_invite_anchor is False at
+        # classification time), and the incoming-row fingerprint matches
+        # either way (#629). ActionSignals alone cannot disambiguate these
+        # two profile shapes - disambiguation happens one level up, via a
+        # live "open More and recheck" probe in
+        # ``LinkedInExtractor.connect_with_person`` before it ever trusts
+        # this state enough to click Accept. See
+        # ``TestConnectWithPerson.test_incoming_request_disproven_by_open_more_menu``.
+        assert (
+            detect_connection_state(self._signals(incoming_row=True))
+            == "incoming_request"
+        )
+
     def test_unavailable_when_no_signals(self):
         assert detect_connection_state(self._signals()) == "unavailable"
 
@@ -1475,6 +1496,7 @@ class TestConnectWithPerson:
     async def test_returns_incoming_request_accepted(self, mock_page):
         """Structural detection + structural accept click, German locale."""
         extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard.press = AsyncMock()
         pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
         post = "Eric\n\n· 1.\n\nAachen\n\nNachricht\nMehr\nInfo\n"
 
@@ -1490,9 +1512,16 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 side_effect=[
                     self._signals(incoming_row=True),
+                    self._signals(incoming_row=True),
                     self._signals(compose=True),
                 ],
             ),
+            patch.object(
+                extractor,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_open_more,
             patch.object(
                 extractor,
                 "_click_incoming_accept",
@@ -1513,6 +1542,7 @@ class TestConnectWithPerson:
             result = await extractor.connect_with_person("testuser")
 
         assert result["status"] == "accepted"
+        mock_open_more.assert_awaited_once()
         mock_accept.assert_awaited_once()
         mock_nav.assert_not_awaited()
         mock_submit.assert_not_awaited()
@@ -1521,6 +1551,7 @@ class TestConnectWithPerson:
         """Structural accept click did not land; no locale-text guessing -
         report send_failed without navigating or clicking by text."""
         extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard.press = AsyncMock()
         pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
 
         with (
@@ -1534,6 +1565,12 @@ class TestConnectWithPerson:
                 "_read_action_signals",
                 new_callable=AsyncMock,
                 return_value=self._signals(incoming_row=True),
+            ),
+            patch.object(
+                extractor,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
@@ -1563,6 +1600,7 @@ class TestConnectWithPerson:
     async def test_incoming_request_send_failed_when_no_first_degree(self, mock_page):
         """Accept clicked but profile never transitions to 1st-degree."""
         extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard.press = AsyncMock()
         pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
 
         with (
@@ -1584,6 +1622,12 @@ class TestConnectWithPerson:
             ),
             patch.object(
                 extractor,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
                 "_click_incoming_accept",
                 new_callable=AsyncMock,
                 return_value=True,
@@ -1601,6 +1645,7 @@ class TestConnectWithPerson:
         """The first post-click read still renders the old top card;
         the settle retry sees the 1st-degree state and reports accepted."""
         extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard.press = AsyncMock()
         pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
         post = "Eric\n\n· 1.\n\nAachen\n\nNachricht\nMehr\nInfo\n"
         page = {
@@ -1625,8 +1670,15 @@ class TestConnectWithPerson:
                 side_effect=[
                     self._signals(incoming_row=True),
                     self._signals(incoming_row=True),
+                    self._signals(incoming_row=True),
                     self._signals(compose=True),
                 ],
+            ),
+            patch.object(
+                extractor,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
@@ -1648,6 +1700,133 @@ class TestConnectWithPerson:
 
         assert result["status"] == "accepted"
         mock_sleep.assert_awaited_once_with(3.0)
+
+    async def test_incoming_request_disproven_falls_through_to_deeplink(
+        self, mock_page
+    ):
+        """Opening the row's More menu reveals a reachable Connect option -
+        not a genuine incoming request but a creator-mode/high-follower
+        profile with Connect demoted into More (#629). Falls through to
+        the same write-gated deeplink flow, never touching Accept."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard.press = AsyncMock()
+        text = "Creator\n\n· 3rd\n\nFollow\nSave in Sales Navigator\nMore\n"
+        deeplink_result = {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "status": "connected",
+            "message": "Connection request sent.",
+            "note_sent": True,
+        }
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[
+                    self._signals(incoming_row=True),
+                    self._signals(incoming_row=True, invite=True),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_open_more,
+            patch.object(
+                extractor, "_click_incoming_accept", new_callable=AsyncMock
+            ) as mock_accept,
+            patch.object(
+                extractor,
+                "_send_invite_via_deeplink",
+                new_callable=AsyncMock,
+                return_value=deeplink_result,
+            ) as mock_deeplink,
+        ):
+            result = await extractor.connect_with_person("testuser", note="hi")
+
+        assert result is deeplink_result
+        mock_open_more.assert_awaited_once()
+        mock_deeplink.assert_awaited_once_with(
+            "testuser", "hi", "https://www.linkedin.com/in/testuser/", text
+        )
+        mock_accept.assert_not_awaited()
+
+    async def test_incoming_request_send_failed_when_more_menu_will_not_open(
+        self, mock_page
+    ):
+        """Cannot verify the row is genuinely incoming (More menu never
+        opened) - fail closed rather than guess at Accept."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(incoming_row=True),
+            ),
+            patch.object(
+                extractor,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_click_incoming_accept", new_callable=AsyncMock
+            ) as mock_accept,
+            patch.object(
+                extractor, "_send_invite_via_deeplink", new_callable=AsyncMock
+            ) as mock_deeplink,
+        ):
+            result = await extractor.connect_with_person("testuser")
+
+        assert result["status"] == "send_failed"
+        mock_accept.assert_not_awaited()
+        mock_deeplink.assert_not_awaited()
+
+    async def test_incoming_request_ambiguous_when_note_given_and_undisproven(
+        self, mock_page
+    ):
+        """Disprove finds no reachable Connect option, but a note was
+        given - Accept never takes one, and "nothing found under More" is
+        not proof of a genuine incoming request (some creator-mode
+        profiles hide Connect entirely, even under More). Refuse rather
+        than guess."""
+        extractor = LinkedInExtractor(mock_page)
+        mock_page.keyboard.press = AsyncMock()
+        text = "Creator\n\n· 3rd\n\nFollow\nSave in Sales Navigator\nMore\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(incoming_row=True),
+            ),
+            patch.object(
+                extractor,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor, "_click_incoming_accept", new_callable=AsyncMock
+            ) as mock_accept,
+            patch.object(
+                extractor, "_send_invite_via_deeplink", new_callable=AsyncMock
+            ) as mock_deeplink,
+        ):
+            result = await extractor.connect_with_person("testuser", note="hi")
+
+        assert result["status"] == "incoming_request_ambiguous"
+        mock_accept.assert_not_awaited()
+        mock_deeplink.assert_not_awaited()
 
     async def test_returns_unavailable_when_no_signals_and_text(self, mock_page):
         """No structural signals, no actionable text → connect_unavailable."""
@@ -1969,6 +2148,388 @@ class TestConnectWithPerson:
 
         assert "main_profile" not in result["sections"]
         assert result["sections"]["posts"] == "Post text"
+
+
+class TestWithdrawInvitation:
+    def _mock_scrape(
+        self, profile_text: str, *, follow_up_text: str | None = None
+    ) -> AsyncMock:
+        first = {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "sections": {"main_profile": profile_text},
+        }
+        if follow_up_text is None:
+            return AsyncMock(return_value=first)
+        second = {
+            "url": "https://www.linkedin.com/in/testuser/",
+            "sections": {"main_profile": follow_up_text},
+        }
+        return AsyncMock(side_effect=[first, second])
+
+    @staticmethod
+    def _signals(
+        invite: bool = False,
+        compose: bool = False,
+        edit: bool = False,
+        labeled_action: bool = False,
+        labeled_anchor: bool = False,
+        incoming_row: bool = False,
+    ) -> ActionSignals:
+        return ActionSignals(
+            has_invite_anchor=invite,
+            has_compose_anchor_in_action_root=compose,
+            has_edit_intro_anchor=edit,
+            has_labeled_action_button=labeled_action,
+            has_labeled_action_anchor=labeled_anchor,
+            has_incoming_action_row=incoming_row,
+        )
+
+    async def test_not_pending_returns_without_click(self, mock_page):
+        """A non-pending target is reported back without any click firing."""
+        extractor = LinkedInExtractor(mock_page)
+        text = "Jane\n\n· 1st\n\nEngineer\n\nMessage\nMore\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(compose=True),
+            ),
+            patch.object(
+                extractor, "_click_withdraw_anchor", new_callable=AsyncMock
+            ) as mock_click,
+        ):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "not_pending"
+        mock_click.assert_not_awaited()
+
+    async def test_self_profile_returns_without_click(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        text = "Me\n\nEdit intro\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(text)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(edit=True),
+            ),
+            patch.object(
+                extractor, "_click_withdraw_anchor", new_callable=AsyncMock
+            ) as mock_click,
+        ):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "self_profile"
+        mock_click.assert_not_awaited()
+
+    async def test_withdraws_successfully(self, mock_page):
+        """Pending -> click anchor -> confirm dialog -> verified connectable."""
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Frank\n\n· 3rd\n\nFounder\n\nMessage\nPending\nMore\n"
+        post = "Frank\n\n· 3rd\n\nFounder\n\nConnect\nMore\n"
+
+        with (
+            patch.object(
+                extractor, "scrape_person", self._mock_scrape(pre, follow_up_text=post)
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[
+                    self._signals(compose=True, labeled_anchor=True),
+                    self._signals(invite=True),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_click_withdraw_anchor",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_click,
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_dialog_buttons",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_last_dialog_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_confirm,
+        ):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdrawn"
+        mock_click.assert_awaited_once()
+        mock_confirm.assert_awaited_once()
+
+    async def test_withdraw_unavailable_when_anchor_click_fails(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Frank\n\n· 3rd\n\nFounder\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(pre)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(compose=True, labeled_anchor=True),
+            ),
+            patch.object(
+                extractor,
+                "_click_withdraw_anchor",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_dialog_is_open", new_callable=AsyncMock
+            ) as mock_dialog_open,
+        ):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdraw_unavailable"
+        mock_dialog_open.assert_not_awaited()
+
+    async def test_withdraw_unavailable_when_no_dialog_and_still_pending(
+        self, mock_page
+    ):
+        """Click landed, but no dialog opened and state is still pending."""
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Frank\n\n· 3rd\n\nFounder\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(pre)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(compose=True, labeled_anchor=True),
+            ),
+            patch.object(
+                extractor,
+                "_click_withdraw_anchor",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_click_last_dialog_button", new_callable=AsyncMock
+            ) as mock_confirm,
+        ):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdraw_unavailable"
+        mock_confirm.assert_not_awaited()
+
+    async def test_withdrawn_without_confirmation_dialog(self, mock_page):
+        """No dialog opened, but the profile is no longer pending - some
+        locales/flows may withdraw without a confirmation step."""
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Frank\n\n· 3rd\n\nFounder\n\nMessage\nPending\nMore\n"
+        post = "Frank\n\n· 3rd\n\nFounder\n\nConnect\nMore\n"
+
+        with (
+            patch.object(
+                extractor, "scrape_person", self._mock_scrape(pre, follow_up_text=post)
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[
+                    self._signals(compose=True, labeled_anchor=True),
+                    self._signals(invite=True),
+                ],
+            ),
+            patch.object(
+                extractor,
+                "_click_withdraw_anchor",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdrawn"
+
+    async def test_withdraw_failed_when_confirm_click_fails(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Frank\n\n· 3rd\n\nFounder\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(pre)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(compose=True, labeled_anchor=True),
+            ),
+            patch.object(
+                extractor,
+                "_click_withdraw_anchor",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_dialog_buttons",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_last_dialog_button",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_dismiss_dialog", new_callable=AsyncMock
+            ) as mock_dismiss,
+        ):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdraw_failed"
+        mock_dismiss.assert_awaited_once()
+
+    async def test_withdraw_failed_when_dialog_buttons_never_settle(self, mock_page):
+        """Dialog opens but stays on its loading spinner (only Dismiss) -
+        never trust "last button" without a settled button count."""
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Frank\n\n· 3rd\n\nFounder\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(extractor, "scrape_person", self._mock_scrape(pre)),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(compose=True, labeled_anchor=True),
+            ),
+            patch.object(
+                extractor,
+                "_click_withdraw_anchor",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_dialog_buttons",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor, "_click_last_dialog_button", new_callable=AsyncMock
+            ) as mock_confirm,
+            patch.object(
+                extractor, "_dismiss_dialog", new_callable=AsyncMock
+            ) as mock_dismiss,
+        ):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdraw_failed"
+        mock_confirm.assert_not_awaited()
+        mock_dismiss.assert_awaited_once()
+
+    async def test_withdraw_failed_when_still_pending_after_confirm(self, mock_page):
+        """Dialog confirmed and closed, but the profile still shows pending
+        even after the settle retry."""
+        extractor = LinkedInExtractor(mock_page)
+        pre = "Frank\n\n· 3rd\n\nFounder\n\nMessage\nPending\nMore\n"
+
+        with (
+            patch.object(
+                extractor,
+                "scrape_person",
+                AsyncMock(
+                    return_value={
+                        "url": "https://www.linkedin.com/in/testuser/",
+                        "sections": {"main_profile": pre},
+                    }
+                ),
+            ),
+            patch.object(
+                extractor,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=self._signals(compose=True, labeled_anchor=True),
+            ),
+            patch.object(
+                extractor,
+                "_click_withdraw_anchor",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_dialog_is_open",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_wait_for_dialog_buttons",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_click_last_dialog_button",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.extractor.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdraw_failed"
+
+    async def test_unavailable_when_no_profile_text(self, mock_page):
+        extractor = LinkedInExtractor(mock_page)
+
+        with patch.object(extractor, "scrape_person", self._mock_scrape("")):
+            result = await extractor.withdraw_invitation("testuser")
+
+        assert result["status"] == "unavailable"
 
 
 class TestScrapeCompany:

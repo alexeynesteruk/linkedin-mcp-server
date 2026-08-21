@@ -37,6 +37,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
     mock.get_pending_invitations = AsyncMock(return_value=scrape_result)
+    mock.withdraw_invitation = AsyncMock(return_value=scrape_result)
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
@@ -1531,6 +1532,108 @@ class TestNetworkTools:
 
         with pytest.raises(ValidationError, match="limit"):
             await mcp.call_tool("get_pending_invitations", {"limit": 101})
+
+    async def test_withdraw_invitation_success(self, mock_context):
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "status": "withdrawn",
+            "message": "Invitation withdrawn. State after withdrawal: connectable.",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.network import register_network_tools
+
+        mcp = FastMCP("test")
+        register_network_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "withdraw_invitation")
+        result = await tool_fn("test-user", mock_context, extractor=mock_extractor)
+
+        assert result["status"] == "withdrawn"
+        mock_extractor.withdraw_invitation.assert_awaited_once_with("test-user")
+
+    async def test_withdraw_invitation_not_pending(self, mock_context):
+        """A non-pending target is reported back without any click having fired."""
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "status": "not_pending",
+            "message": "No pending sent invitation to withdraw (current state: already_connected).",
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.network import register_network_tools
+
+        mcp = FastMCP("test")
+        register_network_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "withdraw_invitation")
+        result = await tool_fn("test-user", mock_context, extractor=mock_extractor)
+
+        assert result["status"] == "not_pending"
+        mock_extractor.withdraw_invitation.assert_awaited_once_with("test-user")
+
+    async def test_withdraw_invitation_rejects_invalid_username(self, mock_context):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.network import register_network_tools
+
+        mock_extractor = _make_mock_extractor({})
+        mcp = FastMCP("test")
+        register_network_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "withdraw_invitation")
+        with pytest.raises(ToolError, match="Invalid linkedin_username"):
+            await tool_fn("not a username!!", mock_context, extractor=mock_extractor)
+        mock_extractor.withdraw_invitation.assert_not_awaited()
+
+    async def test_withdraw_invitation_auth_error(self, monkeypatch):
+        """Auth failures in the DI layer trigger auto-relogin and report the login browser."""
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.core.exceptions import AuthenticationError
+        from linkedin_mcp_server.exceptions import AuthenticationStartedError
+
+        mock_browser = MagicMock()
+        mock_browser.page = MagicMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_or_create_browser",
+            AsyncMock(return_value=mock_browser),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.ensure_authenticated",
+            AsyncMock(side_effect=AuthenticationError("Session expired or invalid.")),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.get_runtime_policy",
+            lambda: "managed",
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.close_browser",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+            AsyncMock(
+                side_effect=AuthenticationStartedError(
+                    "Session expired. A login browser window has been opened."
+                )
+            ),
+        )
+
+        from linkedin_mcp_server.tools.network import register_network_tools
+
+        mcp = FastMCP("test")
+        register_network_tools(mcp)
+
+        with pytest.raises(ToolError, match="Session expired"):
+            await mcp.call_tool(
+                "withdraw_invitation",
+                {"linkedin_username": "test"},
+            )
 
 
 class TestToolTimeouts:

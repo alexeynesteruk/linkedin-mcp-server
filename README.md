@@ -35,6 +35,7 @@ An MCP server that lets AI assistants like Claude read LinkedIn data through you
 | `search_conversations` | Search messages by keyword | working |
 | `send_message` | Send a message or reply to an existing thread via `thread_id` (requires confirmation). Profile-based sends compose a new DM; use `thread_id` to reply in InMail/recruiter threads | working |
 | `get_pending_invitations` | List pending network invitations (received or sent) from `/mynetwork/invitation-manager/` | working |
+| `withdraw_invitation` | Withdraw a previously sent connection request from the invitee's profile; only acts when a fresh read confirms the invite is actually pending | working |
 | `get_company_profile` | Extract company information with explicit section selection (posts, jobs); about-section references may include a `company_urn` entry carrying the numeric id used by LinkedIn's people-search `currentCompany` URL facet | working |
 | `get_company_posts` | Get recent posts from a company's LinkedIn feed | working |
 | `search_companies` | Search for companies on LinkedIn by keywords | working |

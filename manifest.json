@@ -112,6 +112,10 @@
       "description": "List pending LinkedIn network invitations (received or sent) from /mynetwork/invitation-manager/"
     },
     {
+      "name": "withdraw_invitation",
+      "description": "Withdraw a previously sent LinkedIn connection request from the invitee's profile"
+    },
+    {
       "name": "get_feed",
       "description": "Get recent posts from the authenticated user's LinkedIn home feed"
     },
@@ -226,6 +230,10 @@
     {
       "name": "linkedin_get_my_analytics",
       "description": "Alias for get_my_analytics. Scrape the authenticated user's private LinkedIn analytics dashboards"
+    },
+    {
+      "name": "linkedin_withdraw_invitation",
+      "description": "Alias for withdraw_invitation. Withdraw a previously sent LinkedIn connection request from the invitee's profile"
     }
   ],
   "user_config": {},

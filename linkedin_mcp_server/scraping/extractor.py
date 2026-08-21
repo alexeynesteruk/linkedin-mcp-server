@@ -148,6 +148,55 @@ _DIALOG_PREMIUM_LINK_SELECTOR = (
 )
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
 
+# Resolves the ONE currently open/visible dialog element (native
+# dialog[open] preferred, else the first visible [role="dialog"]) rather
+# than matching page-wide. Some LinkedIn pages carry several
+# [role="dialog"] containers at once - most hidden (nav search overlays,
+# preloaded modals) - so a flat page-wide selector's "last button in
+# document order" can resolve to an unrelated, invisible, disabled button
+# from a different container entirely. Inlined into both the button-count
+# and button-click JS below so a single change to the resolution logic
+# propagates to both.
+_FIND_OPEN_DIALOG_FN_JS = r"""
+function findOpenDialog() {
+  const native = document.querySelector('dialog[open]');
+  if (native) return native;
+  for (const el of document.querySelectorAll('[role="dialog"]')) {
+    if (el.offsetParent !== null) return el;
+  }
+  return null;
+}
+"""
+
+_DIALOG_BUTTON_COUNT_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_OPEN_DIALOG_FN_JS
+    + r"""
+  const dialog = findOpenDialog();
+  if (!dialog) return -1;
+  return dialog.querySelectorAll('button').length;
+})
+"""
+)
+
+_CLICK_LAST_DIALOG_BUTTON_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_OPEN_DIALOG_FN_JS
+    + r"""
+  const dialog = findOpenDialog();
+  if (!dialog) return false;
+  const buttons = dialog.querySelectorAll('button');
+  if (buttons.length === 0) return false;
+  buttons[buttons.length - 1].click();
+  return true;
+})
+"""
+)
+
 _MESSAGING_COMPOSE_LINK_SELECTOR = 'main a[href*="/messaging/compose/"]'
 _MESSAGING_COMPOSE_SELECTOR = (
     'div[role="textbox"][contenteditable="true"][aria-label*="Write a message"]'
@@ -491,6 +540,61 @@ _CLICK_INCOMING_ACCEPT_JS = (
 """
 )
 
+# Open the More menu on a fingerprinted incoming-request row, as a
+# disprove step (#629): creator-mode/high-follower profiles render
+# [Follow][Save in Sales Navigator][More] with no Message button - a
+# structural match for the incoming-request fingerprint above, even
+# though Connect is really just demoted into the collapsed More menu.
+# LinkedIn lazily mounts that menu's Connect option into the DOM only
+# once More is actually clicked, so has_invite_anchor is false at
+# classification time and cannot tell the two shapes apart on its own.
+# Re-deriving findIncomingActionRow here (rather than reusing whatever
+# row a prior read happened to find) means the click can only ever land
+# on the SAME row's own expander, never on an unrelated More button
+# elsewhere on the page.
+_OPEN_INCOMING_ROW_MORE_BUTTON_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_INCOMING_ACTION_ROW_FN_JS
+    + r"""
+  const main = document.querySelector('main');
+  if (!main) return false;
+  const row = findIncomingActionRow(main);
+  if (!row) return false;
+  const expander = row.querySelector('button[aria-expanded]');
+  if (!expander) return false;
+  expander.click();
+  return true;
+})
+"""
+)
+
+# Click the Pending/withdraw anchor on a profile page, locale-independently.
+# This is the SAME structural target detect_connection_state reads as
+# hasLabeledActionAnchor -> "pending" in _ACTION_SIGNALS_JS above: the
+# single <a[aria-label]> inside the action root that findActionRoot
+# locates. Requiring exactly one such anchor (rather than trusting a stale
+# prior read) guards the click the same way _CLICK_INCOMING_ACCEPT_JS
+# guards Accept - ambiguity is treated as no match rather than a guess.
+_CLICK_WITHDRAW_ANCHOR_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_ACTION_ROOT_FN_JS
+    + r"""
+  const main = document.querySelector('main');
+  if (!main) return false;
+  const actionRoot = findActionRoot(main);
+  if (!actionRoot) return false;
+  const anchors = actionRoot.querySelectorAll('a[aria-label]');
+  if (anchors.length !== 1) return false;
+  anchors[0].click();
+  return true;
+})
+"""
+)
+
 
 def _connection_result(
     url: str,
@@ -507,6 +611,20 @@ def _connection_result(
         "message": message,
         "note_sent": note_sent,
     }
+    if profile:
+        result["profile"] = profile
+    return result
+
+
+def _withdraw_result(
+    url: str,
+    status: str,
+    message: str,
+    *,
+    profile: str = "",
+) -> dict[str, Any]:
+    """Build a structured response for a withdraw-invitation attempt."""
+    result: dict[str, Any] = {"url": url, "status": status, "message": message}
     if profile:
         result["profile"] = profile
     return result
@@ -1427,6 +1545,57 @@ class LinkedInExtractor:
             logger.debug("Primary dialog button click failed", exc_info=True)
             return False
 
+    async def _click_last_dialog_button(self) -> bool:
+        """Click the last button inside the one open generic dialog.
+
+        LinkedIn consistently places the primary/destructive action as the
+        last button in a dialog's button row - the same convention
+        ``_click_dialog_primary_button`` relies on for the invite dialog.
+        This scopes the query to a single resolved dialog element (native
+        ``dialog[open]`` preferred, else the first visible
+        ``[role="dialog"]``) rather than a page-wide selector: LinkedIn
+        pages can carry several ``[role="dialog"]`` containers at once,
+        most hidden (nav search overlays, preloaded modals), so a flat
+        page-wide button selector's "last in document order" can resolve
+        to an unrelated, invisible, disabled button from a different
+        container entirely (observed live 2026-08-21 on
+        ``/mynetwork/invitation-manager/``: the page-wide selector's last
+        match was a hidden, disabled submit button with no relation to the
+        open withdraw-confirmation dialog).
+        """
+        try:
+            return bool(await self._page.evaluate(_CLICK_LAST_DIALOG_BUTTON_JS))
+        except Exception:
+            logger.debug("Last dialog button click via JS failed", exc_info=True)
+            return False
+
+    async def _wait_for_dialog_buttons(
+        self, *, min_count: int = 2, timeout: int = 5000
+    ) -> bool:
+        """Poll until the one open generic dialog exposes at least
+        ``min_count`` buttons.
+
+        Some confirmation dialogs (e.g. withdraw) render a loading spinner
+        with only a Dismiss control before the real action buttons mount;
+        clicking before that settle window elapses risks clicking a button
+        that is about to be replaced. Scoped to the same single resolved
+        dialog element as ``_click_last_dialog_button`` (see its docstring)
+        rather than a page-wide selector, for the same reason. Returns True
+        once the threshold is met, False on timeout or when no dialog can
+        be resolved.
+        """
+        attempts = max(1, timeout // 250)
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(0.25)
+            try:
+                count = await self._page.evaluate(_DIALOG_BUTTON_COUNT_JS)
+            except Exception:
+                continue
+            if isinstance(count, int) and count >= min_count:
+                return True
+        return False
+
     async def _fill_dialog_textarea(self, value: str, *, timeout: int = 5000) -> bool:
         """Fill the first textarea inside the open invite dialog (structural)."""
         locator = self._page.locator(_INVITE_DIALOG_TEXTAREA_SELECTOR).first
@@ -1507,6 +1676,46 @@ class LinkedInExtractor:
             return bool(await self._page.evaluate(_CLICK_INCOMING_ACCEPT_JS))
         except Exception:
             logger.debug("Incoming accept click via JS failed", exc_info=True)
+            return False
+
+    async def _open_incoming_row_more_menu(self) -> bool:
+        """Open the More menu on the fingerprinted incoming-request row.
+
+        Used only as a disprove step before trusting ``_click_incoming_accept``
+        (#629): if the row's Connect option turns out to be reachable via
+        More, the row is not a genuine incoming request but a
+        creator-mode/follow-only profile with Connect demoted into the
+        menu. Returns True once a menu becomes visible; False if the row's
+        expander could not be found or clicked, or no menu opened -
+        callers must not proceed to Accept when this returns False (fail
+        closed rather than guess).
+        """
+        try:
+            clicked = bool(await self._page.evaluate(_OPEN_INCOMING_ROW_MORE_BUTTON_JS))
+        except Exception:
+            logger.debug("Opening incoming-row More menu via JS failed", exc_info=True)
+            return False
+        if not clicked:
+            return False
+        try:
+            await self._page.locator('[role="menu"]').first.wait_for(
+                state="visible", timeout=3000
+            )
+            return True
+        except Exception:
+            return False
+
+    async def _click_withdraw_anchor(self) -> bool:
+        """Click the Pending/withdraw anchor on a profile page, locale-independently.
+
+        Delegates to ``_CLICK_WITHDRAW_ANCHOR_JS``: the click fires only
+        when the action root contains exactly one labeled anchor (the
+        Pending control). Returns True iff the click landed.
+        """
+        try:
+            return bool(await self._page.evaluate(_CLICK_WITHDRAW_ANCHOR_JS))
+        except Exception:
+            logger.debug("Withdraw anchor click via JS failed", exc_info=True)
             return False
 
     async def _locator_is_visible(self, selector: str, *, timeout: int = 2000) -> bool:
@@ -2664,6 +2873,56 @@ class LinkedInExtractor:
             )
 
         if state == "incoming_request":
+            # The incoming-row fingerprint alone cannot distinguish a
+            # genuine incoming request from a creator-mode/high-follower
+            # profile whose top card renders [Follow][Save in Sales
+            # Navigator][More] with no Message button - structurally
+            # identical, and Connect is simply demoted into the collapsed
+            # More menu (#629). Disprove first: open that row's own More
+            # menu and see whether a Connect option (invite anchor) is
+            # revealed. Re-deriving the row from scratch means this can
+            # only ever open the SAME row's own expander, never an
+            # unrelated More button elsewhere on the page.
+            menu_opened = await self._open_incoming_row_more_menu()
+            if not menu_opened:
+                return _connection_result(
+                    url,
+                    "send_failed",
+                    "Could not verify this is a genuine incoming request "
+                    "(the row's More menu would not open); refusing to guess.",
+                    profile=page_text,
+                )
+            # Read while the menu is still open - the portal-rendered
+            # Connect option (if any) unmounts again once closed.
+            disprove_signals = await self._read_action_signals(username)
+            await self._page.keyboard.press("Escape")
+
+            if disprove_signals.has_invite_anchor:
+                # Not a genuine incoming request after all - Connect was
+                # reachable under More all along. Route through the same
+                # write-gated deeplink flow used for connectable/follow-only
+                # profiles instead of ever touching Accept.
+                return await self._send_invite_via_deeplink(
+                    username, note, url, page_text
+                )
+
+            if note:
+                # Accept never takes a note, so a note-bearing call signals
+                # connect intent, not accept intent. The open-More disprove
+                # found nothing, but that alone is not proof of a genuine
+                # incoming request - some creator-mode profiles hide Connect
+                # entirely, even under More (observed live on the reference
+                # fix this mirrors). Refuse rather than risk an unintended
+                # Follow/Accept click.
+                return _connection_result(
+                    url,
+                    "incoming_request_ambiguous",
+                    "This profile's action row matches the incoming-request "
+                    "shape, but a note was provided (Accept never takes "
+                    "one); refusing to guess between Accept and Connect.",
+                    profile=page_text,
+                )
+
             # Accept clicks the first labeled button in the fingerprinted
             # row. There is deliberately no locale-text fallback: clicking
             # a button matched by exact text anywhere in the page risks
@@ -2709,12 +2968,32 @@ class LinkedInExtractor:
             )
 
         # Connectable, follow-only, and unavailable all route through the
-        # custom-invite deeplink. Follow-only profiles (high-follower /
-        # creator-mode) commonly keep Connect inside the More menu as a
-        # button rather than a top-card invite anchor, so has_invite_anchor
-        # stays False; the deeplink opens the invite dialog regardless of
-        # button placement (#454 / #514). _submit_invite_dialog is the
-        # write-gate: it returns without sending when no invite dialog opens.
+        # same write-gated deeplink flow.
+        return await self._send_invite_via_deeplink(username, note, url, page_text)
+
+    async def _send_invite_via_deeplink(
+        self,
+        username: str,
+        note: str | None,
+        url: str,
+        page_text: str,
+    ) -> dict[str, Any]:
+        """Send a connection request via the custom-invite deeplink.
+
+        Used for the connectable/follow-only/unavailable states, and as
+        the fallthrough from `connect_with_person`'s incoming-request
+        branch once the open-More disprove reveals this is not actually a
+        genuine incoming request (#629). Follow-only profiles
+        (high-follower / creator-mode) commonly keep Connect inside the
+        More menu as a button rather than a top-card invite anchor, so
+        ``has_invite_anchor`` stays False beforehand; the deeplink opens
+        the invite dialog regardless of button placement (#454 / #514).
+        ``_submit_invite_dialog`` is the sole write-gate: it returns
+        without sending when no invite dialog opens, so a genuinely
+        unreachable/mis-classified profile cannot trigger a stray request.
+        """
+        from linkedin_mcp_server.scraping.connection import detect_connection_state
+
         invite_url = (
             "https://www.linkedin.com/preload/custom-invite/"
             f"?vanityName={quote_plus(username)}"
@@ -2785,6 +3064,145 @@ class LinkedInExtractor:
             + (f" State after send: {verified_state}." if verified_state else ""),
             note_sent=note_sent,
             profile=verified_text or page_text,
+        )
+
+    async def withdraw_invitation(self, username: str) -> dict[str, Any]:
+        """Withdraw a previously sent connection request.
+
+        Reuses the same locale-independent detection as
+        ``connect_with_person``: a profile only exposes
+        ``<a aria-label="Pending, click to withdraw invitation sent to
+        {Name}">`` when there is an outstanding sent invite to that person
+        (see ``connection.py``). This method only clicks when a fresh read
+        confirms ``state == "pending"`` - any other state (already
+        withdrawn, already connected, self profile, unavailable) returns
+        without touching the page, so a stale caller-side assumption about
+        who is pending can never withdraw the wrong invite.
+        """
+        from linkedin_mcp_server.scraping.connection import detect_connection_state
+
+        await self._reset_stale_messaging_ui()
+
+        url = f"https://www.linkedin.com/in/{username}/"
+
+        profile = await self.scrape_person(username, {"main_profile"})
+        page_text = profile.get("sections", {}).get("main_profile", "")
+        if not page_text:
+            return _withdraw_result(url, "unavailable", "Could not read profile page.")
+
+        signals = await self._read_action_signals(username)
+        state = detect_connection_state(signals)
+        logger.info(
+            "Connection signals for %s (withdraw): state=%s signals=%s",
+            username,
+            state,
+            signals,
+        )
+
+        if state == "self_profile":
+            return _withdraw_result(
+                url,
+                "self_profile",
+                "Cannot withdraw an invitation from your own profile.",
+                profile=page_text,
+            )
+        if state != "pending":
+            return _withdraw_result(
+                url,
+                "not_pending",
+                f"No pending sent invitation to withdraw (current state: {state}).",
+                profile=page_text,
+            )
+
+        clicked = await self._click_withdraw_anchor()
+        if not clicked:
+            return _withdraw_result(
+                url,
+                "withdraw_unavailable",
+                "Could not find or click the Pending/Withdraw control.",
+                profile=page_text,
+            )
+
+        dialog_opened = await self._dialog_is_open(timeout=3000)
+        if not dialog_opened:
+            # Some locales/flows may withdraw without a confirmation dialog;
+            # re-check state before declaring failure rather than assuming
+            # the click was a no-op.
+            verified_signals = await self._read_action_signals(username)
+            if detect_connection_state(verified_signals) != "pending":
+                verified = await self.scrape_person(username, {"main_profile"})
+                return _withdraw_result(
+                    url,
+                    "withdrawn",
+                    "Invitation withdrawn.",
+                    profile=verified.get("sections", {}).get("main_profile", "")
+                    or page_text,
+                )
+            return _withdraw_result(
+                url,
+                "withdraw_unavailable",
+                "LinkedIn did not open a confirmation dialog for withdrawal.",
+                profile=page_text,
+            )
+
+        # The withdraw confirmation dialog briefly renders a loading spinner
+        # with only its Dismiss control before the real Cancel/Withdraw
+        # buttons mount (verified live 2026-08-21); clicking during that
+        # window risks hitting a button that is about to be replaced. Wait
+        # for a second button to appear before trusting "last button".
+        if not await self._wait_for_dialog_buttons(min_count=2, timeout=5000):
+            await self._dismiss_dialog()
+            return _withdraw_result(
+                url,
+                "withdraw_failed",
+                "The withdrawal dialog never finished rendering its action buttons.",
+                profile=page_text,
+            )
+
+        confirmed = await self._click_last_dialog_button()
+        if not confirmed:
+            await self._dismiss_dialog()
+            return _withdraw_result(
+                url,
+                "withdraw_failed",
+                "Could not confirm the withdrawal dialog.",
+                profile=page_text,
+            )
+
+        try:
+            await self._page.wait_for_selector(
+                _DIALOG_SELECTOR, state="hidden", timeout=5000
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Withdraw confirmation dialog did not close in time")
+
+        # LinkedIn propagates the withdrawal asynchronously; verify with one
+        # settle retry, mirroring the incoming-request accept flow above.
+        verified_text = ""
+        verified_state: str | None = None
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(3.0)
+            verified = await self.scrape_person(username, {"main_profile"})
+            verified_text = verified.get("sections", {}).get("main_profile", "")
+            verified_signals = await self._read_action_signals(username)
+            verified_state = detect_connection_state(verified_signals)
+            if verified_state != "pending":
+                break
+
+        if verified_state == "pending":
+            return _withdraw_result(
+                url,
+                "withdraw_failed",
+                "Confirmed the dialog, but the profile still shows a pending invitation.",
+                profile=verified_text or page_text,
+            )
+
+        return _withdraw_result(
+            url,
+            "withdrawn",
+            f"Invitation withdrawn. State after withdrawal: {verified_state}.",
+            profile=verified_text,
         )
 
     async def _extract_profile_urn(self) -> str | None:

@@ -280,14 +280,20 @@ def register_person_tools(
             Dict with url, status, message, and note_sent.
             Statuses: pending, already_connected, connect_unavailable,
             note_required, unavailable, send_failed, note_not_supported,
-            custom_note_limit_reached, connected, or accepted.
+            custom_note_limit_reached, connected, accepted, or
+            incoming_request_ambiguous.
 
             Follow-primary / creator-mode profiles are attempted via the
             custom-invite deeplink (they no longer stop at a ``follow_only``
             status). When status is ``custom_note_limit_reached`` LinkedIn
             rejected personalized invite notes because the free note quota
             for the account is exhausted. The ``message`` is the raw Premium
-            dialog text read from LinkedIn.
+            dialog text read from LinkedIn. ``incoming_request_ambiguous``
+            means the profile's action row structurally matched an incoming
+            connection request, but a ``note`` was also provided (Accept
+            never takes one) and the row could not be disproven as a
+            mis-detected creator-mode profile - call again without a note
+            to accept, or verify manually.
         """
         try:
             username = _require_username(
