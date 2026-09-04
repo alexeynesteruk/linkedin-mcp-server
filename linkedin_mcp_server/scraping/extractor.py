@@ -130,23 +130,110 @@ _INVITE_DIALOG_ALT_SELECTORS = (
 )
 _INVITE_DIALOG_SELECTOR = ", ".join(_INVITE_DIALOG_ALT_SELECTORS)
 
-
-def _scoped_invite_dialog_selector(child: str) -> str:
-    """Scope *child* under each invite-dialog root alternative.
-
-    ``_INVITE_DIALOG_SELECTOR`` is a comma-OR of two roots. Appending
-    `` button`` to the raw string would parse as ``root1, root2 button``
-    and match the bare dialog node instead of its buttons.
-    """
-    return ", ".join(f"{root} {child}" for root in _INVITE_DIALOG_ALT_SELECTORS)
-
-
-_INVITE_DIALOG_BUTTONS_SELECTOR = _scoped_invite_dialog_selector("button")
-_INVITE_DIALOG_TEXTAREA_SELECTOR = _scoped_invite_dialog_selector("textarea")
 _DIALOG_PREMIUM_LINK_SELECTOR = (
     'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
 )
 _DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
+
+# Resolves the ONE currently open/visible invite (non-messaging) dialog,
+# mirroring _FIND_OPEN_DIALOG_FN_JS below but additionally excluding the
+# messaging-overlay dialog shape (a contenteditable textbox), matching
+# _INVITE_DIALOG_ALT_SELECTORS's semantics. Needed because the invite-note
+# flow (Add a note / Send button resolution, textarea lookup) indexes
+# buttons positionally (nth-from-end) rather than just checking
+# existence, so it is far more sensitive than _invite_dialog_is_open to
+# the same multi-dialog collision documented on _FIND_OPEN_DIALOG_FN_JS:
+# a page-wide selector's Nth button can land in an unrelated hidden
+# dialog when more than one [role="dialog"] container is present.
+_FIND_OPEN_INVITE_DIALOG_FN_JS = r"""
+function findOpenInviteDialog() {
+  const isMessagingOverlay = (el) =>
+    !!el.querySelector('div[role="textbox"][contenteditable="true"]');
+  const native = document.querySelector('dialog[open]');
+  if (native && !isMessagingOverlay(native)) return native;
+  for (const el of document.querySelectorAll('[role="dialog"]')) {
+    if (el.offsetParent !== null && !isMessagingOverlay(el)) return el;
+  }
+  return null;
+}
+"""
+
+_INVITE_DIALOG_BUTTON_COUNT_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_OPEN_INVITE_DIALOG_FN_JS
+    + r"""
+  const dialog = findOpenInviteDialog();
+  if (!dialog) return -1;
+  return dialog.querySelectorAll('button').length;
+})
+"""
+)
+
+_INVITE_DIALOG_PRIMARY_DISABLED_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_OPEN_INVITE_DIALOG_FN_JS
+    + r"""
+  const dialog = findOpenInviteDialog();
+  if (!dialog) return false;
+  const buttons = dialog.querySelectorAll('button');
+  if (buttons.length === 0) return false;
+  const primary = buttons[buttons.length - 1];
+  if (primary.disabled) return true;
+  return primary.getAttribute('aria-disabled') === 'true';
+})
+"""
+)
+
+# Clicks the button at `offsetFromEnd` positions from the last button in
+# the single resolved invite dialog (0 = primary/Send, 1 = Add a note -
+# LinkedIn consistently places these as the last two buttons).
+_CLICK_INVITE_DIALOG_BUTTON_FROM_END_JS = (
+    r"""
+(offsetFromEnd) => {
+"""
+    + _FIND_OPEN_INVITE_DIALOG_FN_JS
+    + r"""
+  const dialog = findOpenInviteDialog();
+  if (!dialog) return false;
+  const buttons = dialog.querySelectorAll('button');
+  const idx = buttons.length - 1 - offsetFromEnd;
+  if (idx < 0 || idx >= buttons.length) return false;
+  buttons[idx].click();
+  return true;
+}
+"""
+)
+
+_FIND_INVITE_DIALOG_PRIMARY_BUTTON_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_OPEN_INVITE_DIALOG_FN_JS
+    + r"""
+  const dialog = findOpenInviteDialog();
+  if (!dialog) return null;
+  const buttons = dialog.querySelectorAll('button');
+  return buttons.length ? buttons[buttons.length - 1] : null;
+})
+"""
+)
+
+_FIND_INVITE_DIALOG_TEXTAREA_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_OPEN_INVITE_DIALOG_FN_JS
+    + r"""
+  const dialog = findOpenInviteDialog();
+  if (!dialog) return null;
+  return dialog.querySelector('textarea');
+})
+"""
+)
 
 # Resolves the ONE currently open/visible dialog element (native
 # dialog[open] preferred, else the first visible [role="dialog"]) rather
@@ -1510,40 +1597,28 @@ class LinkedInExtractor:
             return False
 
     async def _invite_primary_button_disabled(self) -> bool:
-        """True when the invite dialog's primary action is disabled (#407)."""
-        buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
-        try:
-            count = await buttons.count()
-        except Exception:
-            return False
-        if count == 0:
-            return False
-        primary = buttons.nth(count - 1)
-        try:
-            if await primary.is_disabled():
-                return True
-        except Exception:
-            pass
-        aria_disabled = await primary.get_attribute("aria-disabled")
-        return aria_disabled == "true"
+        """True when the invite dialog's primary action is disabled (#407).
 
-    async def _click_dialog_primary_button(self, *, timeout: int = 5000) -> bool:
+        Scoped to the single resolved invite dialog via
+        ``_INVITE_DIALOG_PRIMARY_DISABLED_JS`` - see that constant's
+        docstring for why a page-wide ``nth()`` lookup is unsafe here.
+        """
+        try:
+            return bool(await self._page.evaluate(_INVITE_DIALOG_PRIMARY_DISABLED_JS))
+        except Exception:
+            return False
+
+    async def _click_dialog_primary_button(self) -> bool:
         """Click the last (primary/Send) button in the open invite dialog.
 
         LinkedIn consistently places the primary action as the last button.
-        Returns False (rather than raising) when the click is intercepted or
-        times out, so callers can fall back to a keyboard submit.
+        Scoped to the single resolved invite dialog via
+        ``_CLICK_INVITE_DIALOG_BUTTON_FROM_END_JS`` rather than a
+        page-wide ``nth()`` lookup - see that constant's docstring.
+        Returns False (rather than raising) when no dialog/button can be
+        resolved, so callers can fall back to a keyboard submit.
         """
-        buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
-        count = await buttons.count()
-        if count == 0:
-            return False
-        try:
-            await buttons.nth(count - 1).click(timeout=timeout)
-            return True
-        except Exception:
-            logger.debug("Primary dialog button click failed", exc_info=True)
-            return False
+        return await self._click_invite_dialog_button_from_end(0)
 
     async def _click_last_dialog_button(self) -> bool:
         """Click the last button inside the one open generic dialog.
@@ -1597,14 +1672,74 @@ class LinkedInExtractor:
         return False
 
     async def _fill_dialog_textarea(self, value: str, *, timeout: int = 5000) -> bool:
-        """Fill the first textarea inside the open invite dialog (structural)."""
-        locator = self._page.locator(_INVITE_DIALOG_TEXTAREA_SELECTOR).first
+        """Fill the textarea inside the single resolved open invite dialog.
+
+        Scoped via ``_FIND_OPEN_INVITE_DIALOG_FN_JS`` rather than a flat
+        page-wide textarea locator - see that JS constant's docstring for
+        why a page-wide textarea query can collide with an unrelated
+        hidden dialog.
+        """
         try:
-            if await self._page.locator(_INVITE_DIALOG_TEXTAREA_SELECTOR).count() == 0:
+            handle = await self._page.evaluate_handle(_FIND_INVITE_DIALOG_TEXTAREA_JS)
+            element = handle.as_element()
+            if element is None:
                 return False
-            await locator.fill(value, timeout=timeout)
+            await element.fill(value, timeout=timeout)
             return True
         except Exception:
+            return False
+
+    async def _wait_for_invite_dialog_textarea(self, *, timeout: int = 3000) -> bool:
+        """Poll until the single resolved invite dialog's textarea is visible.
+
+        Replaces a page-wide ``wait_for_selector`` for the same reason as
+        ``_fill_dialog_textarea``.
+        """
+        attempts = max(1, timeout // 250)
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(0.25)
+            try:
+                handle = await self._page.evaluate_handle(
+                    _FIND_INVITE_DIALOG_TEXTAREA_JS
+                )
+                element = handle.as_element()
+                if element is not None and await element.is_visible():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _invite_dialog_textarea_present(self) -> bool:
+        """Whether the single resolved invite dialog already has a textarea."""
+        try:
+            handle = await self._page.evaluate_handle(_FIND_INVITE_DIALOG_TEXTAREA_JS)
+            return handle.as_element() is not None
+        except Exception:
+            return False
+
+    async def _invite_dialog_button_count(self) -> int:
+        """Button count of the single resolved invite dialog, or 0 if unresolved."""
+        try:
+            count = await self._page.evaluate(_INVITE_DIALOG_BUTTON_COUNT_JS)
+        except Exception:
+            return 0
+        return count if isinstance(count, int) and count >= 0 else 0
+
+    async def _click_invite_dialog_button_from_end(self, offset_from_end: int) -> bool:
+        """Click the button ``offset_from_end`` positions from last (0 = primary).
+
+        Scoped to the single resolved invite dialog - see
+        ``_CLICK_INVITE_DIALOG_BUTTON_FROM_END_JS``.
+        """
+        try:
+            return bool(
+                await self._page.evaluate(
+                    _CLICK_INVITE_DIALOG_BUTTON_FROM_END_JS, offset_from_end
+                )
+            )
+        except Exception:
+            logger.debug("Invite dialog button click via JS failed", exc_info=True)
             return False
 
     async def _dismiss_dialog(self) -> None:
@@ -2715,21 +2850,12 @@ class LinkedInExtractor:
 
         note_filled = False
         if note:
-            textarea_count = await self._page.locator(
-                _INVITE_DIALOG_TEXTAREA_SELECTOR
-            ).count()
-            if textarea_count == 0:
-                buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
-                btn_count = await buttons.count()
+            textarea_present = await self._invite_dialog_textarea_present()
+            if not textarea_present:
+                btn_count = await self._invite_dialog_button_count()
                 if btn_count >= 2:
-                    await buttons.nth(btn_count - 2).click()
-                    try:
-                        await self._page.wait_for_selector(
-                            _INVITE_DIALOG_TEXTAREA_SELECTOR,
-                            state="visible",
-                            timeout=3000,
-                        )
-                    except PlaywrightTimeoutError:
+                    await self._click_invite_dialog_button_from_end(1)
+                    if not await self._wait_for_invite_dialog_textarea(timeout=3000):
                         logger.debug("Note textarea did not appear")
                     note_limit_message = await self._get_premium_upsell_message()
                     if note_limit_message is not None:
@@ -2753,15 +2879,17 @@ class LinkedInExtractor:
 
         sent = await self._click_dialog_primary_button()
         if not sent:
-            buttons = self._page.locator(_INVITE_DIALOG_BUTTONS_SELECTOR)
-            btn_count = await buttons.count()
-            if btn_count > 0:
-                try:
-                    await buttons.nth(btn_count - 1).focus()
+            try:
+                handle = await self._page.evaluate_handle(
+                    _FIND_INVITE_DIALOG_PRIMARY_BUTTON_JS
+                )
+                element = handle.as_element()
+                if element is not None:
+                    await element.focus()
                     await self._page.keyboard.press("Enter")
                     sent = not await self._invite_dialog_is_open(timeout=2000)
-                except Exception:
-                    logger.debug("Keyboard submit fallback failed", exc_info=True)
+            except Exception:
+                logger.debug("Keyboard submit fallback failed", exc_info=True)
             if not sent:
                 if note:
                     note_limit_message = await self._get_premium_upsell_message()

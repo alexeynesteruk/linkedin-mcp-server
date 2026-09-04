@@ -991,24 +991,6 @@ class TestDetectConnectionState:
         )
 
 
-class TestInviteDialogSelectors:
-    def test_child_selectors_scope_each_dialog_root(self):
-        from linkedin_mcp_server.scraping.extractor import (
-            _INVITE_DIALOG_ALT_SELECTORS,
-            _INVITE_DIALOG_BUTTONS_SELECTOR,
-            _INVITE_DIALOG_TEXTAREA_SELECTOR,
-        )
-
-        for selector, child in (
-            (_INVITE_DIALOG_BUTTONS_SELECTOR, "button"),
-            (_INVITE_DIALOG_TEXTAREA_SELECTOR, "textarea"),
-        ):
-            parts = [part.strip() for part in selector.split(",")]
-            assert len(parts) == len(_INVITE_DIALOG_ALT_SELECTORS)
-            for root, part in zip(_INVITE_DIALOG_ALT_SELECTORS, parts, strict=True):
-                assert part == f"{root} {child}"
-
-
 class TestConnectWithPerson:
     def _mock_scrape(
         self, profile_text: str, *, follow_up_text: str | None = None
@@ -1079,6 +1061,12 @@ class TestConnectWithPerson:
             ),
             patch.object(
                 extractor,
+                "_invite_primary_button_disabled",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor,
                 "_click_dialog_primary_button",
                 new_callable=AsyncMock,
                 return_value=True,
@@ -1113,6 +1101,12 @@ class TestConnectWithPerson:
                 "_invite_dialog_is_open",
                 new_callable=AsyncMock,
                 return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_invite_primary_button_disabled",
+                new_callable=AsyncMock,
+                return_value=False,
             ),
             patch.object(
                 extractor,
@@ -1151,24 +1145,7 @@ class TestConnectWithPerson:
 
     async def test_submit_invite_dialog_reports_premium_after_add_note(self, mock_page):
         """Add-note Premium upsell is a note-limit block, not no-dialog."""
-        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
-
         extractor = LinkedInExtractor(mock_page)
-        textarea = MagicMock()
-        textarea.count = AsyncMock(return_value=0)
-        add_note_button = MagicMock()
-        add_note_button.click = AsyncMock(return_value=None)
-        buttons = MagicMock()
-        buttons.count = AsyncMock(return_value=3)
-        buttons.nth.return_value = add_note_button
-
-        def locator_for(selector: str):
-            return textarea if "textarea" in selector else buttons
-
-        mock_page.locator.side_effect = locator_for
-        mock_page.wait_for_selector = AsyncMock(
-            side_effect=PlaywrightTimeoutError("textarea timeout")
-        )
 
         with (
             patch.object(
@@ -1176,6 +1153,30 @@ class TestConnectWithPerson:
                 "_invite_dialog_is_open",
                 new_callable=AsyncMock,
                 return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_invite_dialog_textarea_present",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                extractor,
+                "_invite_dialog_button_count",
+                new_callable=AsyncMock,
+                return_value=3,
+            ),
+            patch.object(
+                extractor,
+                "_click_invite_dialog_button_from_end",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_click_add_note,
+            patch.object(
+                extractor,
+                "_wait_for_invite_dialog_textarea",
+                new_callable=AsyncMock,
+                return_value=False,
             ),
             patch.object(
                 extractor,
@@ -1195,7 +1196,7 @@ class TestConnectWithPerson:
             "Wysyłaj nieograniczoną liczbę spersonalizowanych zaproszeń dzięki Premium",
             None,
         )
-        add_note_button.click.assert_awaited_once()
+        mock_click_add_note.assert_awaited_once_with(1)
         mock_message.assert_awaited_once()
         mock_dismiss.assert_awaited_once()
 
@@ -1215,21 +1216,11 @@ class TestConnectWithPerson:
 
         # Textarea already exposed so the reveal/fill branch succeeds and the
         # test focuses on the post-submit failure path.
-        textarea = MagicMock()
-        textarea.count = AsyncMock(return_value=1)
-        textarea.first = textarea
-        textarea.fill = AsyncMock()
-
-        buttons = MagicMock()
-        buttons.count = AsyncMock(return_value=2)
         primary_button = MagicMock()
         primary_button.focus = AsyncMock()
-        buttons.nth.return_value = primary_button
-
-        def locator_for(selector: str):
-            return textarea if "textarea" in selector else buttons
-
-        mock_page.locator.side_effect = locator_for
+        button_handle = MagicMock()
+        button_handle.as_element.return_value = primary_button
+        mock_page.evaluate_handle = AsyncMock(return_value=button_handle)
         mock_page.keyboard = MagicMock()
         mock_page.keyboard.press = AsyncMock()
 
@@ -1243,6 +1234,12 @@ class TestConnectWithPerson:
                 # First call: dialog open at entry. Second call: still open
                 # after the keyboard fallback, so sent remains False.
                 side_effect=[True, True],
+            ),
+            patch.object(
+                extractor,
+                "_invite_dialog_textarea_present",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 extractor,
@@ -1370,6 +1367,12 @@ class TestConnectWithPerson:
                 "_invite_dialog_is_open",
                 new_callable=AsyncMock,
                 return_value=True,
+            ),
+            patch.object(
+                extractor,
+                "_invite_primary_button_disabled",
+                new_callable=AsyncMock,
+                return_value=False,
             ),
             patch.object(
                 extractor,
@@ -1884,48 +1887,46 @@ class TestConnectWithPerson:
         extractor = LinkedInExtractor(mock_page)
 
         # Track each button click so we can assert the "Add a note" path
-        # was taken to reveal the textarea.
+        # was taken to reveal the textarea. The gating dialog always has
+        # exactly 2 buttons: nth(0) "Add a note" reveals the textarea and
+        # becomes the primary once clicked, nth(1) "Send without a note".
         clicks: list[int] = []
+        state = {"textarea_visible": False}
 
-        textarea_visible = {"value": False}
-
-        # Two button locators inside the gating dialog: nth(0) "Add a
-        # note" reveals the textarea, nth(1) "Send without a note".
-        button_locators = [MagicMock(), MagicMock()]
-        for idx, btn in enumerate(button_locators):
-
-            def make_click(i: int):
-                async def _click(*args, **kwargs):
-                    clicks.append(i)
-                    if i == 0:
-                        textarea_visible["value"] = True
-                    return None
-
-                return _click
-
-            btn.click = AsyncMock(side_effect=make_click(idx))
-            btn.focus = AsyncMock()
-
-        button_collection = MagicMock()
-        button_collection.count = AsyncMock(return_value=2)
-        button_collection.nth = MagicMock(side_effect=lambda i: button_locators[i])
-
-        textarea_locator = MagicMock()
-        textarea_locator.count = AsyncMock(
-            side_effect=lambda: 1 if textarea_visible["value"] else 0
+        textarea_element = MagicMock()
+        textarea_element.fill = AsyncMock()
+        textarea_element.is_visible = AsyncMock(
+            side_effect=lambda: state["textarea_visible"]
         )
-        textarea_locator.first = textarea_locator
-        textarea_locator.fill = AsyncMock()
 
-        # Route page.locator() calls by selector - buttons vs textarea -
-        # so the gating dialog's button collection is distinguishable
-        # from the textarea probe.
-        def locator_router(selector: str):
-            if "textarea" in selector:
-                return textarea_locator
-            return button_collection
+        def click_from_end(offset_from_end: int) -> bool:
+            idx = 2 - 1 - offset_from_end
+            clicks.append(idx)
+            if idx == 0:
+                state["textarea_visible"] = True
+            return True
 
-        mock_page.locator = MagicMock(side_effect=locator_router)
+        async def evaluate_router(js: str, *args):
+            if "buttons[idx].click()" in js:
+                return click_from_end(args[0])
+            if "querySelectorAll('button').length" in js:
+                return 2
+            if "aria-disabled" in js:
+                return False
+            raise AssertionError(f"Unexpected evaluate() call: {js[:80]}")
+
+        async def evaluate_handle_router(js: str, *args):
+            handle = MagicMock()
+            if "querySelector('textarea')" in js:
+                handle.as_element.return_value = (
+                    textarea_element if state["textarea_visible"] else None
+                )
+            else:
+                raise AssertionError(f"Unexpected evaluate_handle() call: {js[:80]}")
+            return handle
+
+        mock_page.evaluate = AsyncMock(side_effect=evaluate_router)
+        mock_page.evaluate_handle = AsyncMock(side_effect=evaluate_handle_router)
         mock_page.wait_for_selector = AsyncMock()
         mock_page.keyboard = MagicMock()
         mock_page.keyboard.press = AsyncMock()
@@ -1958,7 +1959,7 @@ class TestConnectWithPerson:
         # Clicked "Add a note" (index 0) to reveal the textarea, then the
         # primary button (index 1) to send.
         assert clicks == [0, 1]
-        textarea_locator.fill.assert_awaited_once()
+        textarea_element.fill.assert_awaited_once()
 
     async def test_connect_unavailable_state_still_uses_deeplink(self, mock_page):
         """Inconclusive detection still tries the vanityName deeplink (#454)."""
