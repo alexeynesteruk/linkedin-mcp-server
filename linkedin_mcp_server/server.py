@@ -27,6 +27,7 @@ from linkedin_mcp_server.bootstrap import (
     start_background_browser_setup_if_needed,
     stop_background_browser_setup,
 )
+from linkedin_mcp_server.client_compat_middleware import StripClientShimArgsMiddleware
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.drivers.browser import (
     close_browser,
@@ -220,6 +221,9 @@ def create_mcp_server(
         mask_error_details=True,
         auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
     )
+    # First, so it is the outermost layer on every role: a proxy forwards the
+    # cleaned arguments, and a replay after sign-in repair starts from them too.
+    mcp.add_middleware(StripClientShimArgsMiddleware())
     # Added before the serializing middleware below, which makes it the outer one.
     # An inner position would work: `close_browser` does not consult the in-flight
     # count, so quiescence succeeds from there, and the lease reference the inner
