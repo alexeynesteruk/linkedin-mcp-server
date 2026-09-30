@@ -375,6 +375,25 @@ class TestBuildReferences:
             }
         ]
 
+    def test_comments_section_names_the_commented_post_and_its_author(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/feed/update/urn:li:activity:9/",
+                    "text": "A post I commented on",
+                },
+                {"href": "https://www.linkedin.com/in/bob/", "text": "Bob"},
+                {"href": "https://www.linkedin.com/company/aws/", "text": "AWS"},
+            ],
+            "comments",
+        )
+
+        assert [(r["kind"], r["context"]) for r in references] == [
+            ("feed_post", "commented post"),
+            ("person", "post author"),
+            ("company", "post attachment"),
+        ]
+
     def test_drops_social_proof_company_labels(self):
         references = build_references(
             [

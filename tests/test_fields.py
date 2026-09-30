@@ -32,6 +32,7 @@ class TestPersonSections:
             "projects": ("/details/projects/", False),
             "contact_info": ("/overlay/contact-info/", True),
             "posts": ("/recent-activity/all/", False),
+            "comments": ("/recent-activity/comments/", False),
         }
         assert PERSON_SECTIONS == expected
         assert list(PERSON_SECTIONS.items()) == list(expected.items())
@@ -52,6 +53,7 @@ class TestPersonSections:
             "projects",
             "contact_info",
             "posts",
+            "comments",
         }
         assert set(PERSON_SECTIONS) == expected
 
@@ -144,7 +146,7 @@ class TestParsePersonSections:
 
     def test_all_sections(self):
         requested, unknown = parse_person_sections(
-            "experience,education,interests,honors,languages,certifications,skills,projects,contact_info,posts"
+            "experience,education,interests,honors,languages,certifications,skills,projects,contact_info,posts,comments"
         )
         assert requested == set(PERSON_SECTIONS)
         assert unknown == []

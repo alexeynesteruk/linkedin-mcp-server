@@ -113,6 +113,7 @@ _REFERENCE_CAPS = {
     "skills": 12,
     "projects": 12,
     "posts": 12,
+    "comments": 12,
     "jobs": 8,
     # Every card on the people page is a candidate an agent may act on, and
     # callers are told to take profile slugs from these references only. In
@@ -456,6 +457,16 @@ def derive_context(
             return "post author"
         if kind == "feed_post":
             return "company post"
+        return "post attachment"
+
+    if section_name == "comments":
+        # The member's recent comments: feed_post anchors are the posts they
+        # commented on, person anchors the authors of those posts (and the
+        # member themselves).
+        if kind == "person":
+            return "post author"
+        if kind == "feed_post":
+            return "commented post"
         return "post attachment"
 
     if section_name in {"main_profile", "about"}:

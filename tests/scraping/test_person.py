@@ -276,6 +276,7 @@ class TestScrapePersonUrls:
             "projects",
             "contact_info",
             "posts",
+            "comments",
         }
         with (
             patch.object(
@@ -300,8 +301,8 @@ class TestScrapePersonUrls:
         page_urls = [call.args[0] for call in mock_extract.call_args_list]
         overlay_urls = [call.args[0] for call in mock_overlay.call_args_list]
         all_urls = page_urls + overlay_urls
-        # 10 full-page sections + 1 overlay (contact_info)
-        assert len(page_urls) == 10
+        # 11 full-page sections + 1 overlay (contact_info)
+        assert len(page_urls) == 11
         assert len(overlay_urls) == 1
         assert [
             capture_call.kwargs["plan"].mode
@@ -311,6 +312,7 @@ class TestScrapePersonUrls:
             *([CaptureMode.DETAILS] * 6),
             CaptureMode.DETAILS | CaptureMode.SKILLS,
             CaptureMode.DETAILS,
+            CaptureMode.ACTIVITY,
             CaptureMode.ACTIVITY,
         ]
         assert mock_overlay.call_args.kwargs["plan"].mode is CaptureMode.OVERLAY
@@ -326,6 +328,7 @@ class TestScrapePersonUrls:
         assert any("/details/projects/" in u for u in all_urls)
         assert any("/overlay/contact-info/" in u for u in overlay_urls)
         assert any("/recent-activity/all/" in u for u in all_urls)
+        assert any("/recent-activity/comments/" in u for u in all_urls)
         assert set(result["sections"]) == all_sections
 
     async def test_posts_visits_recent_activity(self, mock_page):
@@ -353,6 +356,30 @@ class TestScrapePersonUrls:
         urls = [call.args[0] for call in mock_extract.call_args_list]
         assert any("/recent-activity/all/" in url for url in urls)
         assert "posts" in result["sections"]
+
+    async def test_comments_is_one_activity_navigation(self, mock_page):
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(
+                scraper._capture,
+                "capture",
+                new_callable=AsyncMock,
+                return_value=extracted("You commented on a post"),
+            ) as mock_extract,
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.scrape_person("test-user", {"comments"})
+
+        calls = mock_extract.call_args_list
+        comment_calls = [c for c in calls if "/recent-activity/comments/" in c.args[0]]
+        assert len(comment_calls) == 1
+        assert comment_calls[0].kwargs["plan"].mode is CaptureMode.ACTIVITY
+        assert comment_calls[0].kwargs["section_name"] == "comments"
+        assert not any("/recent-activity/all/" in c.args[0] for c in calls)
+        assert result["sections"]["comments"] == "You commented on a post"
 
     async def test_certifications_visits_details_page(self, mock_page):
         scraper = _scraper(mock_page)

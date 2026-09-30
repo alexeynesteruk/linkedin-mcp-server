@@ -22,6 +22,7 @@ PERSON_SECTIONS: dict[str, tuple[str, bool]] = {
     "projects": ("/details/projects/", False),
     "contact_info": ("/overlay/contact-info/", True),
     "posts": ("/recent-activity/all/", False),
+    "comments": ("/recent-activity/comments/", False),
 }
 
 COMPANY_SECTIONS: dict[str, tuple[str, bool]] = {
@@ -76,6 +77,7 @@ _PERSON_SECTION_MODES = {
     "projects": CaptureMode.DETAILS,
     "contact_info": CaptureMode.OVERLAY,
     "posts": CaptureMode.ACTIVITY,
+    "comments": CaptureMode.ACTIVITY,
 }
 _COMPANY_SECTION_MODES = {"posts": CaptureMode.ACTIVITY}
 
