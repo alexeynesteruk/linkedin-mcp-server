@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import itertools
 import json
+import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
+import time
 from typing import Any, Literal
 
 from linkedin_mcp_server.common_utils import secure_mkdir, slugify_fragment
-from linkedin_mcp_server.session_state import auth_root_dir, get_source_profile_dir
+from linkedin_mcp_server.exceptions import ProfileRootRefusedError
+from linkedin_mcp_server.session_state import (
+    _owned,
+    auth_root_dir,
+    get_source_profile_dir,
+)
+
+logger = logging.getLogger(__name__)
 
 TraceMode = Literal["off", "on_error", "always"]
 
@@ -19,6 +29,18 @@ _TRACE_COUNTER = itertools.count(1)
 _TRACE_DIR: Path | None = None
 _TRACE_KEEP = False
 _EXPLICIT_TRACE_DIR = False
+
+#: Run directories are made by ``tempfile.mkdtemp(prefix="run-")``: the prefix
+#: and eight characters from its ``[a-z0-9_]`` alphabet. Pruning matches exactly
+#: that shape, so a file or directory someone else put in the trace root is
+#: never a candidate.
+_RUN_PREFIX = "run-"
+_RUN_DIR_NAME = re.compile(r"^run-[a-z0-9_]{8}$")
+
+#: Retention for ``trace-runs``: the newest ``_TRACE_RUNS_KEEP`` runs survive,
+#: and of those only the ones younger than ``_TRACE_RUNS_MAX_AGE_DAYS``.
+_TRACE_RUNS_KEEP = 50
+_TRACE_RUNS_MAX_AGE_DAYS = 14.0
 
 
 def _trace_mode() -> TraceMode:
@@ -60,11 +82,80 @@ def get_trace_dir() -> Path | None:
     if _TRACE_DIR is None:
         _TRACE_DIR = Path(
             tempfile.mkdtemp(
-                prefix="run-",
+                prefix=_RUN_PREFIX,
                 dir=_trace_root(),
             )
         ).resolve()
+        _prune_trace_runs_best_effort(_TRACE_DIR)
     return _TRACE_DIR
+
+
+def _prune_trace_runs_best_effort(current: Path) -> None:
+    try:
+        prune_trace_runs(current.parent, keep_dir=current)
+    except Exception:
+        logger.debug("Trace-run pruning skipped", exc_info=True)
+
+
+def prune_trace_runs(
+    trace_root: Path,
+    *,
+    keep_dir: Path | None = None,
+    keep: int = _TRACE_RUNS_KEEP,
+    max_age_days: float = _TRACE_RUNS_MAX_AGE_DAYS,
+    now: float | None = None,
+) -> list[Path]:
+    """Delete old ``run-*`` directories from *trace_root*; return what went.
+
+    Bounded so retained traces (``on_error`` keeps one per failing run) cannot
+    accumulate forever. A run survives only if it is among the newest *keep* and
+    younger than *max_age_days*; *keep_dir*, this process's own run, always
+    survives.
+
+    Only deletes what this module made: a real (not symlinked) directory named
+    exactly like ``tempfile.mkdtemp(prefix="run-")`` output, directly inside
+    ``<auth root>/trace-runs``. The auth root has to pass the same ownership
+    check as every other destructive operation (``session_state._owned``); a
+    root this server cannot prove it owns is left untouched. Symlinks are
+    neither followed nor removed.
+    """
+    try:
+        source_profile = _owned(_safe_source_profile_dir())
+    except ProfileRootRefusedError:
+        logger.debug("Not pruning trace runs: profile root is not owned")
+        return []
+    expected_root = auth_root_dir(source_profile) / "trace-runs"
+    if trace_root.is_symlink() or trace_root.resolve() != expected_root.resolve():
+        return []
+
+    current = time.time() if now is None else now
+    runs: list[tuple[float, Path]] = []
+    with os.scandir(trace_root) as entries:
+        for entry in entries:
+            if not _RUN_DIR_NAME.match(entry.name):
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+                runs.append((entry.stat(follow_symlinks=False).st_mtime, Path(entry)))
+            except OSError:
+                continue
+
+    runs.sort(key=lambda run: run[0], reverse=True)
+    cutoff = current - max_age_days * 86400
+    removed: list[Path] = []
+    for rank, (mtime, path) in enumerate(runs):
+        if keep_dir is not None and path.resolve() == keep_dir.resolve():
+            continue
+        if rank < keep and mtime >= cutoff:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            logger.debug("Could not prune trace run %s", path, exc_info=True)
+            continue
+        removed.append(path)
+    return removed
 
 
 def mark_trace_for_retention() -> Path | None:
