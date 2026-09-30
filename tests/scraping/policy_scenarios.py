@@ -956,6 +956,66 @@ async def _connect_scenario() -> dict[str, Any]:
     )
 
 
+async def _withdraw_scenario() -> dict[str, Any]:
+    """A connected profile: the read decides, and nothing is clicked."""
+    name = "withdraw_invitation__not_pending"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    page.script("evaluate:root_content", _root("Profile"))
+    _script_profile_target(page, "unavailable")
+    page.script(
+        "evaluate:connection_action_signals",
+        {
+            "hasInvite": False,
+            "hasComposeInActionRoot": True,
+            "hasEditIntro": False,
+            "hasLabeledActionButton": True,
+            "hasLabeledActionAnchor": False,
+            "hasIncomingActionRow": False,
+        },
+    )
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("withdraw_invitation", "main_profile"):
+            result = await extractor.withdraw_invitation("ada-lovelace")
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "withdraw_invitation", "arguments": {"username": "ada-lovelace"}},
+        result,
+    )
+
+
+async def _pending_invitations_scenario() -> dict[str, Any]:
+    name = "get_pending_invitations__sent"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    page.script("evaluate:invitation_expand_notes", 0)
+    page.script(
+        "evaluate:root_content",
+        _root(
+            "Ada Lovelace\nSent 2 days ago",
+            [
+                {
+                    "href": "https://www.linkedin.com/in/ada-lovelace/",
+                    "text": "Ada Lovelace",
+                }
+            ],
+        ),
+    )
+    extractor = _extractor(page)
+    arguments = {"limit": 10, "kind": "sent"}
+    async with boundaries(recorder, clock):
+        with recorder.context("get_pending_invitations", "invitations"):
+            result = await extractor.get_pending_invitations(limit=10, kind="sent")
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "get_pending_invitations", "arguments": arguments},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
 async def _sidebar_scenario() -> dict[str, Any]:
     name = "get_sidebar_profiles__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1085,6 +1145,7 @@ TOOL_FACADE_METHODS = {
     "get_conversation",
     "get_inbox",
     "get_my_profile",
+    "get_pending_invitations",
     "get_saved_jobs",
     "get_sidebar_profiles",
     "scrape_company",
@@ -1096,6 +1157,7 @@ TOOL_FACADE_METHODS = {
     "search_people",
     "search_posts",
     "send_message",
+    "withdraw_invitation",
 }
 COMPATIBILITY_METHODS = {"get_page_text", "click_button_by_text"}
 
@@ -1156,6 +1218,8 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "message-c0.json": await _invalid_message_scenario("line\nbreak", "c0"),
         "message-del.json": await _invalid_message_scenario("text\x7f", "del"),
         "connect.json": await _connect_scenario(),
+        "withdraw-invitation.json": await _withdraw_scenario(),
+        "pending-invitations.json": await _pending_invitations_scenario(),
         "get-my-profile.json": await _get_my_profile_scenario(),
         "sidebar-profiles.json": await _sidebar_scenario(),
         "company-employees.json": await _single_capture_facade_scenario(

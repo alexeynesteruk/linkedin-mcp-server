@@ -59,6 +59,8 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 | `get_my_profile` | Read your own profile using the same selectable sections. |
 | `connect_with_person` | Send or accept a connection request, with an optional note. |
 | `get_sidebar_profiles` | Find recommended profile links in a person's sidebar. |
+| `get_pending_invitations` | List pending received or sent connection invitations, with full invitation notes. |
+| `withdraw_invitation` | Withdraw a sent connection request, only after a fresh read shows it pending. |
 | `get_inbox` | List recent messaging conversations from your LinkedIn inbox. |
 | `get_conversation` | Read a conversation by username or thread ID. |
 | `search_conversations` | Search messages by keyword across your conversations. |

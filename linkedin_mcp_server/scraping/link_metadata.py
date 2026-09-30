@@ -90,6 +90,7 @@ _SECTION_CONTEXTS = {
     "jobs": "jobs",
     "saved_jobs": "saved jobs",
     "feed": "feed",
+    "invitations": "invitation",
 }
 
 _DEFAULT_REFERENCE_CAP = 12
@@ -119,6 +120,9 @@ _REFERENCE_CAPS = {
     # Kept in sync with the literal cap=50 in feed_payload.build_feed_references
     # where SDUI-derived /posts/<slug> permalinks are appended.
     "feed": 50,
+    # Headroom for get_pending_invitations' limit ceiling (Field(ge=1, le=100));
+    # the reader slices to the requested limit itself.
+    "invitations": 100,
 }
 
 # A label must carry at least one letter or digit in any script, so the class is

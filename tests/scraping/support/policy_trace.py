@@ -596,6 +596,11 @@ def semantic_program_id(program: str) -> str:
     compact = " ".join(program.split())
     checks = (
         ("performance.timeOrigin", "document_origin"),
+        ("expandable-text-button", "invitation_expand_notes"),
+        ("invitation-manager/received/ALL", "invitation_received_zero"),
+        ("anchors.length !== 1", "withdraw_anchor_click"),
+        ("querySelectorAll('button').length : -1", "confirm_dialog_button_count"),
+        ("function findConfirmDialog", "confirm_dialog_primary_click"),
         ("MAX_HEADING_CONTAINERS", "root_content"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),

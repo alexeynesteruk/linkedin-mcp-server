@@ -55,6 +55,7 @@ TOOL_DELEGATES = {
     "get_inbox": "get_inbox",
     "get_job_details": "scrape_job",
     "get_my_profile": "get_my_profile",
+    "get_pending_invitations": "get_pending_invitations",
     "get_person_profile": "scrape_person",
     "get_saved_jobs": "get_saved_jobs",
     "get_sidebar_profiles": "get_sidebar_profiles",
@@ -64,6 +65,7 @@ TOOL_DELEGATES = {
     "search_people": "search_people",
     "search_posts": "search_posts",
     "send_message": "send_message",
+    "withdraw_invitation": "withdraw_invitation",
 }
 
 
@@ -98,6 +100,7 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
         "_content",
         "_conversations",
         "_feed",
+        "_invitations",
         "_jobs",
         "_message_sender",
         "_person",

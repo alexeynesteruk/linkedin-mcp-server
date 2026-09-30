@@ -11,6 +11,8 @@ Available Tools:
 - Company tools: Company profile and information extraction
 - Job tools: Job posting details and search functionality
 - Messaging tools: Inbox, conversations, search, and sending messages
+- Network tools: Pending invitations and withdrawing a sent one
+- Meta tools: Health and ping, answered without the browser
 - Feed tools: Home feed scraping
 - Post tools: Global post/content search
 

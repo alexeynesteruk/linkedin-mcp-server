@@ -276,6 +276,95 @@ CLICK_INCOMING_ACCEPT_JS = (
 )
 
 
+# Click the Pending control that withdraws a sent invitation. LinkedIn renders
+# Pending as the one labeled <a> in the top-card action root (the signal
+# ``hasLabeledActionAnchor`` reads), so the click fires only when exactly one
+# such anchor exists; zero or several is a page this cannot reason about.
+CLICK_WITHDRAW_ANCHOR_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_ACTION_ROOT_FN_JS
+    + r"""
+  const main = document.querySelector('main');
+  if (!main) return false;
+  const actionRoot = findActionRoot(main);
+  if (!actionRoot) return false;
+  const anchors = actionRoot.querySelectorAll('a[aria-label]');
+  if (anchors.length !== 1) return false;
+  anchors[0].click();
+  return true;
+})
+"""
+)
+
+# The ONE open confirmation dialog: native dialog[open] first, else the first
+# visible [role="dialog"], and never a messaging overlay (same exclusion as
+# ``_DIALOG_SELECTOR``). A page-wide "last button" can land in a hidden
+# preloaded container instead: measured live 2026-08-21 on the invitation
+# manager, the page-wide last match was a hidden, disabled submit button.
+_FIND_CONFIRM_DIALOG_FN_JS = r"""
+function findConfirmDialog() {
+  const usable = el =>
+    el.offsetParent !== null && !el.querySelector('[contenteditable="true"]');
+  for (const el of document.querySelectorAll('dialog[open]')) {
+    if (usable(el)) return el;
+  }
+  for (const el of document.querySelectorAll('[role="dialog"]')) {
+    if (usable(el)) return el;
+  }
+  return null;
+}
+"""
+
+CONFIRM_DIALOG_BUTTON_COUNT_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_CONFIRM_DIALOG_FN_JS
+    + r"""
+  const dialog = findConfirmDialog();
+  return dialog ? dialog.querySelectorAll('button').length : -1;
+})
+"""
+)
+
+# The primary action renders last in LinkedIn dialogs, the convention the
+# invite dialog's submit relies on too.
+CLICK_CONFIRM_DIALOG_PRIMARY_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_CONFIRM_DIALOG_FN_JS
+    + r"""
+  const dialog = findConfirmDialog();
+  if (!dialog) return false;
+  const buttons = dialog.querySelectorAll('button');
+  if (buttons.length === 0) return false;
+  buttons[buttons.length - 1].click();
+  return true;
+})
+"""
+)
+
+# Pause between reads of a withdrawal LinkedIn propagates asynchronously.
+WITHDRAW_SETTLE_SECONDS = 3.0
+
+
+def _withdraw_result(
+    url: str,
+    status: str,
+    message: str,
+    *,
+    profile: str = "",
+) -> dict[str, Any]:
+    """Build a structured response for a withdraw-invitation attempt."""
+    result: dict[str, Any] = {"url": url, "status": status, "message": message}
+    if profile:
+        result["profile"] = profile
+    return result
+
+
 def _connection_result(
     url: str,
     status: str,
@@ -925,5 +1014,160 @@ class ConnectionActions:
             "connected",
             f"Connection request sent. State after send: {verified_state}.",
             note_sent=note_sent,
+            profile=verified_text or page_text,
+        )
+
+    async def _click_withdraw_anchor(self) -> bool:
+        """Click the Pending control; True iff exactly one was there to click."""
+        try:
+            return bool(await self._session.page.evaluate(CLICK_WITHDRAW_ANCHOR_JS))
+        except Exception:
+            logger.debug("Withdraw anchor click via JS failed", exc_info=True)
+            return False
+
+    async def _wait_for_confirm_buttons(
+        self, *, min_count: int = 2, timeout: float = 5.0
+    ) -> bool:
+        """Wait until the open confirmation dialog shows *min_count* buttons.
+
+        The withdraw dialog first renders a spinner with only its Dismiss
+        control (measured live 2026-08-21). "Last button" is only the primary
+        action once the real Cancel/Withdraw pair has mounted.
+        """
+        attempts = max(1, int(timeout / 0.25))
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(0.25)
+            try:
+                count = await self._session.page.evaluate(
+                    CONFIRM_DIALOG_BUTTON_COUNT_JS
+                )
+            except Exception:
+                continue
+            if isinstance(count, int) and count >= min_count:
+                return True
+        return False
+
+    async def _click_confirm_dialog_primary(self) -> bool:
+        """Click the primary (last) button of the open confirmation dialog."""
+        try:
+            return bool(
+                await self._session.page.evaluate(CLICK_CONFIRM_DIALOG_PRIMARY_JS)
+            )
+        except Exception:
+            logger.debug("Confirm dialog click via JS failed", exc_info=True)
+            return False
+
+    async def _read_state(self, username: str) -> tuple[str, str]:
+        """One main-profile read and the relationship state it shows."""
+        profile = await self._read_main_profile(username)
+        text = profile.get("sections", {}).get("main_profile", "")
+        signals = await self._read_action_signals(username)
+        return text, connection.detect_connection_state(signals)
+
+    async def withdraw_invitation(self, username: str) -> dict[str, Any]:
+        """Withdraw a previously sent connection request.
+
+        Clicks only after a fresh read of the profile classifies it as
+        ``pending``, using the same structural signals as
+        ``connect_with_person``. Every other state (not pending, connected,
+        own profile, unreadable) is reported without touching the page, so a
+        stale idea of who is pending can never withdraw the wrong invite.
+        Success is declared only when a re-read no longer shows pending.
+        """
+        username = normalize_person_identifier(username)
+        url = person_profile_url(username, "/")
+
+        page_text, state = await self._read_state(username)
+        if not page_text:
+            return _withdraw_result(url, "unavailable", "Could not read profile page.")
+        logger.info("Connection state for %s (withdraw): %s", username, state)
+
+        if state == "self_profile":
+            return _withdraw_result(
+                url,
+                "self_profile",
+                "Cannot withdraw an invitation from your own profile.",
+                profile=page_text,
+            )
+        if state != "pending":
+            return _withdraw_result(
+                url,
+                "not_pending",
+                f"No pending sent invitation to withdraw (current state: {state}).",
+                profile=page_text,
+            )
+
+        if not await self._click_withdraw_anchor():
+            return _withdraw_result(
+                url,
+                "withdraw_unavailable",
+                "Could not find exactly one Pending control to click.",
+                profile=page_text,
+            )
+
+        if not await self._dialog_is_open(timeout=3000):
+            # A flow without a confirmation step is possible; the page decides.
+            verified_text, verified_state = await self._read_state(username)
+            if verified_state != "pending":
+                return _withdraw_result(
+                    url,
+                    "withdrawn",
+                    f"Invitation withdrawn. State after withdrawal: {verified_state}.",
+                    profile=verified_text or page_text,
+                )
+            return _withdraw_result(
+                url,
+                "withdraw_unavailable",
+                "LinkedIn did not open a confirmation dialog for withdrawal.",
+                profile=page_text,
+            )
+
+        if not await self._wait_for_confirm_buttons():
+            await self._dismiss_dialog()
+            return _withdraw_result(
+                url,
+                "withdraw_failed",
+                "The withdrawal dialog never finished rendering its buttons.",
+                profile=page_text,
+            )
+
+        if not await self._click_confirm_dialog_primary():
+            await self._dismiss_dialog()
+            return _withdraw_result(
+                url,
+                "withdraw_failed",
+                "Could not confirm the withdrawal dialog.",
+                profile=page_text,
+            )
+
+        try:
+            await self._session.page.wait_for_selector(
+                _DIALOG_SELECTOR, state="hidden", timeout=5000
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Withdraw confirmation dialog did not close in time")
+
+        verified_text = ""
+        verified_state = "pending"
+        for attempt in range(2):
+            if attempt:
+                await asyncio.sleep(WITHDRAW_SETTLE_SECONDS)
+            verified_text, verified_state = await self._read_state(username)
+            if verified_state != "pending":
+                break
+
+        if verified_state == "pending":
+            return _withdraw_result(
+                url,
+                "withdraw_failed",
+                "Confirmed the dialog, but the profile still shows a pending "
+                "invitation.",
+                profile=verified_text or page_text,
+            )
+        return _withdraw_result(
+            url,
+            "withdrawn",
+            f"Invitation withdrawn. State after withdrawal: {verified_state}.",
             profile=verified_text or page_text,
         )

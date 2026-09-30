@@ -424,6 +424,49 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "network",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "List pending LinkedIn network invitations, received or sent.\n\nReads /mynetwork/invitation-manager/{received|sent}/ and expands\ntruncated invitation notes first, so the text holds each full note.\nRead-only: nothing is accepted, ignored or withdrawn. Use\nwithdraw_invitation to take back a sent invitation.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "default": "received",
+          "description": "\"received\" (default) for incoming invitations, \"sent\" for\noutgoing ones still awaiting an answer.",
+          "enum": [
+            "received",
+            "sent"
+          ],
+          "type": "string"
+        },
+        "limit": {
+          "default": 20,
+          "description": "Maximum invitations to return (1-100, default 20).\nReferences are capped exactly; the text is cut where the first\nomitted invitation begins.",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_pending_invitations",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Pending Invitations"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "person",
           "scraping"
         ]
@@ -991,5 +1034,39 @@
       "type": "object"
     },
     "title": "Send Message"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "actions",
+          "network"
+        ]
+      }
+    },
+    "annotations": {
+      "destructiveHint": true,
+      "openWorldHint": true
+    },
+    "description": "Withdraw a connection request you sent that is still pending.\n\nOpens the person's profile and clicks Withdraw only when a fresh read\nof that profile shows the request as pending. Any other state is\nreported back without touching the page. LinkedIn may block a new\ninvitation to the same person for a while after a withdrawal.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "linkedin_username": {
+          "description": "LinkedIn username (e.g., \"stickerdaniel\", \"williamhgates\"). A full profile URL is accepted too and is reduced to the username.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "linkedin_username"
+      ],
+      "type": "object"
+    },
+    "name": "withdraw_invitation",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Withdraw Invitation"
   }
 ]

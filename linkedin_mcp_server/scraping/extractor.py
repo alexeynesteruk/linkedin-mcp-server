@@ -18,6 +18,7 @@ from linkedin_mcp_server.scraping.contracts import (
 )
 from linkedin_mcp_server.scraping.conversations import ConversationReader
 from linkedin_mcp_server.scraping.feed import FeedScraper
+from linkedin_mcp_server.scraping.invitations import InvitationKind, InvitationReader
 from linkedin_mcp_server.scraping.job_pages import JobPageReader
 from linkedin_mcp_server.scraping.jobs import JobScraper
 from linkedin_mcp_server.scraping.message_sender import MessageSender
@@ -68,6 +69,7 @@ class LinkedInExtractor:
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
+        self._invitations = InvitationReader(session, navigator, content)
 
     async def get_page_text(self) -> str:
         """Extract innerText from the main content area of the current page."""
@@ -131,6 +133,18 @@ class LinkedInExtractor:
     ) -> dict[str, Any]:
         """Send a LinkedIn connection request or accept an incoming one."""
         return await self._connection.connect_with_person(username, note=note)
+
+    async def withdraw_invitation(self, username: str) -> dict[str, Any]:
+        """Withdraw a sent connection request that is still pending."""
+        return await self._connection.withdraw_invitation(username)
+
+    async def get_pending_invitations(
+        self,
+        limit: int = 20,
+        kind: InvitationKind = "received",
+    ) -> dict[str, Any]:
+        """List pending received or sent network invitations."""
+        return await self._invitations.get_pending_invitations(limit=limit, kind=kind)
 
     async def get_sidebar_profiles(self, username: str) -> dict[str, Any]:
         """Extract profile links from sidebar sections on a profile page."""
