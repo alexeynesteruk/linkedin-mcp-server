@@ -280,6 +280,12 @@ CLICK_INCOMING_ACCEPT_JS = (
 # Pending as the one labeled <a> in the top-card action root (the signal
 # ``hasLabeledActionAnchor`` reads), so the click fires only when exactly one
 # such anchor exists; zero or several is a page this cannot reason about.
+#
+# The root must also sit in the top card, the scope the Accept row is held to.
+# ``findActionRoot`` walks from the first compose anchor in <main>, and on a
+# profile whose top card offers no Message that is a sidebar card's: the root
+# is then the sidebar, and its one labeled anchor (a Message link for another
+# member) reads as Pending. The state read cannot tell; the click can refuse.
 CLICK_WITHDRAW_ANCHOR_JS = (
     r"""
 (() => {
@@ -290,6 +296,8 @@ CLICK_WITHDRAW_ANCHOR_JS = (
   if (!main) return false;
   const actionRoot = findActionRoot(main);
   if (!actionRoot) return false;
+  const topCard = main.querySelector('section') || main.firstElementChild || main;
+  if (!topCard.contains(actionRoot)) return false;
   const anchors = actionRoot.querySelectorAll('a[aria-label]');
   if (anchors.length !== 1) return false;
   anchors[0].click();

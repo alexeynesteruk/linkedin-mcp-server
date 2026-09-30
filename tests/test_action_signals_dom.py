@@ -667,6 +667,39 @@ def two_labeled_anchors_top_card(labels: Labels) -> str:
 """
 
 
+def pending_top_card_without_message(labels: Labels) -> str:
+    """Pending on a profile that offers no Message: no compose anchor up here."""
+    return f"""
+<section class="topcard">
+  <h1>Florian</h1>
+  <div class="actions">
+    <a href="https://www.linkedin.com/in/florian/" aria-label="{labels.pending}"
+      onclick="event.preventDefault();
+        document.body.setAttribute('data-clicked','pending')"
+      >{labels.pending}</a>
+    <button type="button" aria-expanded="false">{labels.more}</button>
+  </div>
+</section>
+"""
+
+
+def sidebar_message_card(labels: Labels) -> str:
+    """One mutual connection with a labeled Message link, for somebody else."""
+    return f"""
+<section class="sidebar">
+  <div class="card">
+    <a href="https://www.linkedin.com/in/julien-f/">Julien</a>
+    <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AAAA"
+      aria-label="{labels.message}"
+      onclick="event.preventDefault();
+        document.body.setAttribute('data-clicked','sidebar-message')"
+      >{labels.message}</a>
+  </div>
+  <button type="button">{labels.show_all}</button>
+</section>
+"""
+
+
 def withdraw_dialog(labels: Labels, *, native: bool = True, extra: str = "") -> str:
     """The confirmation: Dismiss first, then Cancel, then the primary Withdraw."""
     buttons = f"""
@@ -767,6 +800,31 @@ class TestWithdrawAnchorIsStructural:
         await _in_every_locale(
             dom_page,
             two_labeled_anchors_top_card,
+            (False, None),
+            lambda page, html: _click(page, html, CLICK_WITHDRAW_ANCHOR_JS),
+        )
+
+    async def test_a_pending_top_card_beside_sidebar_cards_is_still_clicked(
+        self, dom_page
+    ):
+        await _in_every_locale(
+            dom_page,
+            _both(pending_top_card_clickable, sidebar_section),
+            (True, "pending"),
+            lambda page, html: _click(page, html, CLICK_WITHDRAW_ANCHOR_JS),
+        )
+
+    async def test_a_sidebar_card_is_never_the_pending_control(self, dom_page):
+        # Without a compose anchor in the top card, the action-root walk starts
+        # from the sidebar's Message link and roots itself in the sidebar, whose
+        # one labeled anchor then reads as Pending. The read says pending here,
+        # so only the click can refuse; clicking would open a conversation with
+        # a different member.
+        build = _both(pending_top_card_without_message, sidebar_message_card)
+        await _in_every_locale(dom_page, build, "pending", _state)
+        await _in_every_locale(
+            dom_page,
+            build,
             (False, None),
             lambda page, html: _click(page, html, CLICK_WITHDRAW_ANCHOR_JS),
         )
