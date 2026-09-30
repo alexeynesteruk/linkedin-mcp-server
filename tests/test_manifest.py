@@ -270,3 +270,20 @@ def test_a_mapped_variable_is_never_read_raw() -> None:
         f"os.environ: {sorted(offenders)}. Read them through _env(), which is "
         f"what turns an unsubstituted placeholder back into an unset value."
     )
+
+
+def test_every_registered_tool_is_listed_in_the_manifest(
+    manifest: dict[str, Any],
+) -> None:
+    """A tool the bundle serves but the manifest omits is invisible in the host's
+    tool listing. The registered set is the tool-contract fixture, which the
+    tool-schema tests keep equal to the real registry."""
+    fixture = json.loads(
+        (_REPO_ROOT / "tests/fixtures/tool-contract/tools.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    registered = {tool["name"] for tool in fixture}
+    listed = {tool["name"] for tool in manifest["tools"]}
+    assert registered - listed == set(), "tools missing from manifest.json"
+    assert listed - registered == set(), "manifest.json lists unregistered tools"

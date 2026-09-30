@@ -60,6 +60,14 @@
       "description": "Send a connection request or accept an incoming one, with optional note"
     },
     {
+      "name": "get_pending_invitations",
+      "description": "List pending LinkedIn network invitations, received or sent, with full invitation notes; read-only"
+    },
+    {
+      "name": "withdraw_invitation",
+      "description": "Withdraw a connection request you sent that is still pending; any other state is reported back without touching the page"
+    },
+    {
       "name": "get_sidebar_profiles",
       "description": "Extract profile URLs from LinkedIn sidebar recommendation sections on a profile page"
     },
@@ -124,8 +132,20 @@
       "description": "Search LinkedIn posts/content globally by keyword (the 'Posts' tab) with an optional recency filter (past-24h/past-week/past-month); returns unordered candidate permalinks in references"
     },
     {
+      "name": "get_my_analytics",
+      "description": "Get the authenticated user's own LinkedIn analytics dashboards (content, audience, top posts, profile views, search appearances)"
+    },
+    {
       "name": "close_session",
       "description": "Properly close browser session and clean up resources"
+    },
+    {
+      "name": "linkedin_health",
+      "description": "Report server version, storage paths, and browser/session readiness without opening the browser"
+    },
+    {
+      "name": "linkedin_ping",
+      "description": "List the registered tools and server capabilities"
     }
   ],
   "user_config": {
