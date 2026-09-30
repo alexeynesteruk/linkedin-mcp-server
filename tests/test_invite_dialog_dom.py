@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+import json
+
 import pytest
 from patchright.async_api import Page, async_playwright
 
@@ -110,3 +112,53 @@ async def test_invite_note_is_sent_past_an_open_chat_overlay(dom_page):
     assert await dom_page.evaluate("document.body.dataset.invite") == "sent"
     assert await dom_page.evaluate("document.body.dataset.note") == "Hello"
     assert await dom_page.evaluate("document.body.dataset.chat") is None
+
+
+LATE_INVITE_DIALOG = """
+  <script>
+    setTimeout(() => {
+      const holder = document.createElement('div');
+      holder.innerHTML = %s;
+      document.body.appendChild(holder.firstElementChild);
+    }, 400);
+  </script>
+"""
+
+HIDDEN_PRELOADED_DIALOG = """
+  <div role="dialog" id="preloaded" style="display:none">
+    <button onclick="document.body.dataset.preloaded = 'clicked'">Close</button>
+  </div>
+"""
+
+
+async def test_an_invite_dialog_that_mounts_after_load_is_sent(dom_page):
+    """The deeplink returns at DOMContentLoaded, and the dialog can mount a
+    moment later. Answering "no dialog" before it had the chance reported a
+    Connect-able profile as one LinkedIn opened no invite dialog for."""
+    script = LATE_INVITE_DIALOG % json.dumps(INVITE_DIALOG.strip())
+    await dom_page.set_content(f"<!DOCTYPE html><html><body>{script}</body></html>")
+
+    submitted, note_sent, note_limit = await _actions(dom_page)._submit_invite_dialog(
+        None
+    )
+
+    assert (submitted, note_sent, note_limit) == (True, False, None)
+    assert await dom_page.evaluate("document.body.dataset.invite") == "sent"
+
+
+async def test_a_hidden_preloaded_dialog_does_not_hide_the_invite(dom_page):
+    """A hidden [role=dialog] earlier in the document is not the one waited
+    on: the visible invite is found and sent, and the hidden one is not
+    clicked."""
+    await dom_page.set_content(
+        "<!DOCTYPE html><html><body>"
+        f"{HIDDEN_PRELOADED_DIALOG}{INVITE_DIALOG}</body></html>"
+    )
+
+    submitted, note_sent, note_limit = await _actions(dom_page)._submit_invite_dialog(
+        None
+    )
+
+    assert (submitted, note_sent, note_limit) == (True, False, None)
+    assert await dom_page.evaluate("document.body.dataset.invite") == "sent"
+    assert await dom_page.evaluate("document.body.dataset.preloaded") is None

@@ -466,12 +466,20 @@ class ConnectionActions:
         self._read_main_profile = read_main_profile
 
     async def _dialog_is_open(self, *, timeout: int = 1000) -> bool:
-        """Return whether a dialog is currently open (structural check)."""
-        locator = self._session.page.locator(_DIALOG_SELECTOR)
+        """Return whether a dialog is open, waiting up to ``timeout`` ms for one.
+
+        The wait is for a *visible* dialog to appear. Counting matches first
+        answered "no dialog" at once whenever the dialog had not mounted yet,
+        whatever the timeout said: the invite deeplink returns at
+        DOMContentLoaded, and a dialog mounted a moment later was reported as
+        LinkedIn opening none. Visible, so a hidden preloaded ``[role=dialog]``
+        earlier in the document is not the one waited on.
+        """
+        locator = self._session.page.locator(
+            f"{_DIALOG_SELECTOR} >> visible=true"
+        ).first
         try:
-            if await locator.count() == 0:
-                return False
-            await locator.first.wait_for(state="visible", timeout=timeout)
+            await locator.wait_for(state="visible", timeout=timeout)
             return True
         except Exception:
             return False
