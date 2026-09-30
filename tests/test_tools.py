@@ -661,6 +661,10 @@ class TestPersonTool:
             ("", []),
             (["F"], ["F"]),
             (None, None),
+            ("[101728296]", ["101728296"]),
+            ("[101728296, 103644278]", ["101728296", "103644278"]),
+            ('["101728296", 103644278]', ["101728296", "103644278"]),
+            ([101728296], ["101728296"]),
         ],
     )
     def test_coerce_str_list_repairs_stringified_arrays(self, raw, expected):
@@ -672,6 +676,54 @@ class TestPersonTool:
         from linkedin_mcp_server.tools.person import _coerce_str_list
 
         assert _coerce_str_list(raw) == expected
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "[[1]]",
+            '[{"id": 1}]',
+            "[true]",
+            "[1.5]",
+            "[null]",
+            [[1]],
+            [{"id": 1}],
+            [True],
+        ],
+    )
+    def test_coerce_str_list_leaves_non_scalar_junk_for_validation(self, raw):
+        """Only integers are repaired; anything else must still be rejected by
+        pydantic, so the coercion may not launder it into a string."""
+        from pydantic import TypeAdapter, ValidationError
+
+        from linkedin_mcp_server.tools.person import StrList
+
+        with pytest.raises(ValidationError):
+            TypeAdapter(StrList).validate_python(raw)
+
+    async def test_search_people_accepts_numeric_geo_urn_array(self, monkeypatch):
+        import linkedin_mcp_server.tools.person as person_module
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mock_extractor = _make_mock_extractor(
+            {"url": "u", "sections": {"search_results": "Jane Doe"}}
+        )
+
+        async def _fake_get_ready_extractor(ctx, tool_name):
+            return mock_extractor
+
+        monkeypatch.setattr(
+            person_module, "get_ready_extractor", _fake_get_ready_extractor
+        )
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        await mcp.call_tool(
+            "search_people", {"keywords": "engineer", "geo_urn": "[101728296]"}
+        )
+
+        assert mock_extractor.search_people.await_args.kwargs["geo_urn"] == [
+            "101728296"
+        ]
 
     async def test_search_people_accepts_stringified_network(self, monkeypatch):
         """Regression for #739.

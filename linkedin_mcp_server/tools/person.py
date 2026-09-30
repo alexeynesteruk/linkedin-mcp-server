@@ -38,7 +38,13 @@ def _coerce_str_list(value: Any) -> Any:
     ``LinkedInExtractor.search_people`` strictly ``list[str]``. Only the
     container shape is repaired; token values are still validated downstream,
     so an invalid token fails with the same message it always did.
+
+    Clients also send numeric ids (``geo_urn``) as JSON numbers, e.g. the
+    string ``'[101728296]'``. Integers become their decimal string; a bool,
+    float, null or nested value is left as it is so pydantic still rejects it.
     """
+    if isinstance(value, list):
+        return _stringify_ids(value)
     if not isinstance(value, str):
         return value
 
@@ -50,9 +56,17 @@ def _coerce_str_list(value: Any) -> Any:
             pass
         else:
             if isinstance(decoded, list):
-                return decoded
+                return _stringify_ids(decoded)
 
     return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _stringify_ids(items: list[Any]) -> list[Any]:
+    """Turn integer elements into strings; leave everything else untouched."""
+    return [
+        str(item) if isinstance(item, int) and not isinstance(item, bool) else item
+        for item in items
+    ]
 
 
 StrList = Annotated[list[str], BeforeValidator(_coerce_str_list)]
