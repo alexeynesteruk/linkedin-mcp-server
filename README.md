@@ -65,7 +65,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 | `get_inbox` | List recent messaging conversations from your LinkedIn inbox, optionally filtered (`inbox_filter`: unread, jobs, connections, inmail, starred). |
 | `get_conversation` | Read a conversation by username or thread ID. |
 | `search_conversations` | Search messages by keyword across your conversations. |
-| `send_message` | Send after confirmation. Targeting a profile may start a separate DM instead of replying in a thread ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
+| `send_message` | Send after confirmation. Pass `thread_id` to reply inside an existing thread, recruiter and InMail threads included; without it, targeting a profile may start a separate DM instead ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |
 | `get_company_profile` | Read posts and jobs; about references can include a `company_urn` for the `currentCompany` search facet. |
 | `get_company_posts` | Read recent posts published on a company's LinkedIn page. |
 | `search_companies` | Find LinkedIn company profiles matching a keyword search. |

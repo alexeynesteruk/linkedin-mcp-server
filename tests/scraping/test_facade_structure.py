@@ -52,7 +52,7 @@ PUBLIC_SIGNATURES = {
     "search_jobs": "(self, keywords: 'str', location: 'str | None' = None, max_pages: 'int' = 3, date_posted: 'str | None' = None, job_type: 'str | None' = None, experience_level: 'str | None' = None, work_type: 'str | None' = None, easy_apply: 'bool' = False, sort_by: 'str | None' = None, tool_timeout: 'float' = 180.0) -> 'dict[str, Any]'",
     "search_people": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None, geo_urn: 'list[str] | None' = None, max_pages: 'int' = 1) -> 'dict[str, Any]'",
     "search_posts": "(self, keywords: 'str', date_posted: 'str | None' = None, max_pages: 'int' = 3) -> 'dict[str, Any]'",
-    "send_message": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None) -> 'dict[str, Any]'",
+    "send_message": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None, thread_id: 'str | None' = None) -> 'dict[str, Any]'",
     "withdraw_invitation": "(self, username: 'str') -> 'dict[str, Any]'",
 }
 
@@ -106,7 +106,7 @@ DELEGATE_CALLS = {
     "search_jobs": "self._jobs.search_jobs(keywords, location, max_pages, date_posted, job_type, experience_level, work_type, easy_apply, sort_by, tool_timeout)",
     "search_people": "self._person.search_people(keywords, location=location, network=network, current_company=current_company, geo_urn=geo_urn, max_pages=max_pages)",
     "search_posts": "self._posts.search_posts(keywords, date_posted=date_posted, max_pages=max_pages)",
-    "send_message": "self._message_sender.send_message(linkedin_username, message, confirm_send=confirm_send, profile_urn=profile_urn)",
+    "send_message": "self._message_sender.send_message(linkedin_username, message, confirm_send=confirm_send, profile_urn=profile_urn, thread_id=thread_id)",
     "withdraw_invitation": "self._connection.withdraw_invitation(username)",
 }
 

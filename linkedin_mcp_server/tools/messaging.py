@@ -19,11 +19,14 @@ from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_er
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping.contracts import (
     SEND_INTERRUPTED_WARNING,
+    THREAD_REPLY_PROFILE_URN_REFUSAL,
     refuse_an_invalid_message,
+    refuse_an_invalid_thread_message,
 )
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     normalize_profile_urn,
+    normalize_reply_thread_id,
     normalize_thread_id,
 )
 
@@ -269,16 +272,28 @@ def register_messaging_tools(
         confirm_send: bool,
         ctx: Context,
         profile_urn: str | None = None,
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
         """
-        Compose and send a new message to a LinkedIn user.
+        Send a new message to a LinkedIn user, or reply inside an existing thread.
 
-        Profile-based targeting opens LinkedIn's compose flow. It is not a safe
-        reply path for an existing recruiter/InMail or messaging thread: it may
-        create a separate DM even after you inspect that thread with
-        get_conversation or search_conversations. Those tools only read an
-        existing thread; they do not send a reply. Until a thread-targeted send
-        path is available, do not treat profile-based send_message as a reply.
+        To reply in an existing conversation, such as a recruiter or InMail
+        thread, pass its thread_id. The reply is addressed by thread_id alone:
+        the tool opens /messaging/thread/<thread_id>/, stops unless LinkedIn
+        lands exactly there, and types only into the composer docked in that
+        thread's own pane. It never falls back to profile-based compose, so a
+        thread LinkedIn does not open returns ``thread_unavailable`` rather than
+        starting a separate DM. With thread_id, linkedin_username is ignored
+        (neither validated nor used; the schema still requires a value) and
+        profile_urn must be omitted. Thread IDs come from the
+        /messaging/thread/<id>/ references of get_inbox, get_conversation and
+        search_conversations; the reference itself is accepted.
+
+        Without thread_id, profile-based targeting opens LinkedIn's compose
+        flow. It is not a safe reply path for an existing recruiter/InMail or
+        messaging thread: it may create a separate DM even after you inspect
+        that thread with get_conversation or search_conversations. Those tools
+        only read an existing thread; pass its thread_id here to reply in it.
 
         The recipient must be directly messageable from the profile page. If
         LinkedIn does not expose a normal Message action, use connect_with_person
@@ -291,11 +306,14 @@ def register_messaging_tools(
         recipient-specific Message action carrying the target URN, then following
         its browser navigation and pinning the exact final route. Visible profile
         links or recipient URNs in the composer are optional corroboration; any
-        contradiction fails closed. No Voyager or other private API is used. This
-        is a write operation when confirm_send is True.
+        contradiction fails closed. A thread reply pins the thread route the same
+        way, and a local identity its pane header does not also show fails
+        closed. No Voyager or other private API is used. This is a write
+        operation when confirm_send is True.
 
         Args:
-            linkedin_username: LinkedIn username of the recipient; a full profile URL is accepted too
+            linkedin_username: LinkedIn username of the recipient; a full
+                profile URL is accepted too. Ignored when thread_id is given.
             message: Single-line message text to send. C0 control characters and
                 DEL are rejected, including CR, LF, and tab.
             confirm_send: Must be True to send the message
@@ -303,8 +321,14 @@ def register_messaging_tools(
             profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against
                 the URN exposed by the loaded profile before opening its Message
                 action. It never bypasses recipient verification. Obtain via
-                get_person_profile. Note: inbox may not always show all messages;
-                use search_conversations as a fallback.
+                get_person_profile. Refused together with thread_id. Note: inbox
+                may not always show all messages; use search_conversations as a
+                fallback.
+            thread_id: Optional id of an existing messaging thread to reply in,
+                or its /messaging/thread/<id>/ reference, exactly as get_inbox,
+                get_conversation or search_conversations returned it. When
+                given, the reply goes into that thread or nowhere:
+                linkedin_username is ignored and profile_urn must be omitted.
 
         Returns:
             Dict with url, status, message, recipient_selected, sent, and
@@ -319,7 +343,9 @@ def register_messaging_tools(
             ``outcome_unknown`` is that same warning from the transport rather
             than the page: the browser process went away with the call in
             flight, so ``sent`` is absent instead of false and only LinkedIn
-            itself can say whether the message left.
+            itself can say whether the message left. A ``status`` of
+            ``thread_unavailable`` means LinkedIn did not open the requested
+            thread and nothing was typed.
         """
         try:
             # Answered before a session is acquired. Caller-owned message
@@ -330,27 +356,53 @@ def register_messaging_tools(
             # `InvalidReferenceError`; outside, that error would skip
             # `raise_tool_error` and reach the caller masked by
             # `mask_error_details` instead of naming the correction.
-            refusal = refuse_an_invalid_message(linkedin_username, message)
-            if refusal is not None:
-                return refusal
-            linkedin_username = normalize_person_identifier(linkedin_username)
-            if profile_urn is not None:
-                profile_urn = normalize_profile_urn(profile_urn)
+            if thread_id is not None:
+                # A reply is addressed by its thread alone, so the username is
+                # not normalized: it plays no part and must not be able to
+                # refuse, or redirect, a reply.
+                if profile_urn is not None:
+                    raise InvalidReferenceError(THREAD_REPLY_PROFILE_URN_REFUSAL)
+                thread_id = normalize_reply_thread_id(thread_id)
+                refusal = refuse_an_invalid_thread_message(thread_id, message)
+                if refusal is not None:
+                    return refusal
+            else:
+                refusal = refuse_an_invalid_message(linkedin_username, message)
+                if refusal is not None:
+                    return refusal
+                linkedin_username = normalize_person_identifier(linkedin_username)
+                if profile_urn is not None:
+                    profile_urn = normalize_profile_urn(profile_urn)
             extractor = await get_ready_extractor(ctx, tool_name="send_message")
-            logger.info(
-                "Sending message to %s (confirm_send=%s)",
-                linkedin_username,
-                confirm_send,
-            )
 
-            await ctx.report_progress(progress=0, total=100, message="Sending message")
-
-            result = await extractor.send_message(
-                linkedin_username,
-                message,
-                confirm_send=confirm_send,
-                profile_urn=profile_urn,
-            )
+            if thread_id is not None:
+                logger.info(
+                    "Replying in thread %s (confirm_send=%s)", thread_id, confirm_send
+                )
+                await ctx.report_progress(
+                    progress=0, total=100, message="Replying in thread"
+                )
+                result = await extractor.send_message(
+                    linkedin_username,
+                    message,
+                    confirm_send=confirm_send,
+                    thread_id=thread_id,
+                )
+            else:
+                logger.info(
+                    "Sending message to %s (confirm_send=%s)",
+                    linkedin_username,
+                    confirm_send,
+                )
+                await ctx.report_progress(
+                    progress=0, total=100, message="Sending message"
+                )
+                result = await extractor.send_message(
+                    linkedin_username,
+                    message,
+                    confirm_send=confirm_send,
+                    profile_urn=profile_urn,
+                )
 
             try:
                 await ctx.report_progress(progress=100, total=100, message="Complete")

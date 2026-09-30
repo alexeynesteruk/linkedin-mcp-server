@@ -808,6 +808,60 @@ async def _messaging_cancellation_scenario() -> dict[str, Any]:
     )
 
 
+_THREAD_REPLY_ID = "2-policy-reply=="
+_THREAD_REPLY_URL = f"https://www.linkedin.com/messaging/thread/{_THREAD_REPLY_ID}/"
+
+
+async def _thread_reply_scenario(outcome: str) -> dict[str, Any]:
+    """A reply by thread_id: one navigation, to the thread, and no profile."""
+    recorder = TraceRecorder(f"send_message__thread_{outcome}", _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    confirm_send = outcome != "dry_run"
+    if outcome == "unavailable":
+        # LinkedIn sends a thread it cannot open to the inbox instead.
+        page.goto_landings.append("https://www.linkedin.com/messaging/")
+    else:
+        page.goto_landings.append(_THREAD_REPLY_URL)
+        page.script("wait_for_function:message_composer_ready", None)
+        states = (_VALID_COMPOSER,) if outcome == "dry_run" else (_VALID_COMPOSER,) * 2
+        page.script("evaluate:message_composer_state", *states)
+    if outcome in {"sent", "unconfirmed"}:
+        _script_message_owner(page)
+        page.script("handle-1.evaluate:message_submit_ready", "disabled", "ready")
+        page.script("evaluate:message_confirmation_prepare", "confirmation-1")
+        page.script("handle-1.evaluate:message_submit", "clicked")
+        page.script(
+            "wait_for_function:message_confirmation_ready",
+            None
+            if outcome == "sent"
+            else PlaywrightTimeoutError("thread acknowledgement not observed"),
+        )
+        _script_confirmation_cleanup(page)
+    extractor = _extractor(page)
+    async with boundaries(recorder, clock):
+        with recorder.context("send_message", "message"):
+            result = await extractor.send_message(
+                "ignored-for-a-thread",
+                "New text",
+                confirm_send=confirm_send,
+                thread_id=_THREAD_REPLY_ID,
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {
+            "method": "send_message",
+            "arguments": {
+                "linkedin_username": "ignored-for-a-thread",
+                "thread_id": _THREAD_REPLY_ID,
+                "confirm_send": confirm_send,
+                "thread_outcome": outcome,
+            },
+        },
+        result,
+    )
+
+
 async def _invalid_message_scenario(message: str, label: str) -> dict[str, Any]:
     recorder = TraceRecorder(f"send_message__invalid_{label}", _COMMON_ALLOWED)
     clock = FakeClock(recorder)
@@ -1281,6 +1335,10 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "message-blank.json": await _invalid_message_scenario("   ", "blank"),
         "message-c0.json": await _invalid_message_scenario("line\nbreak", "c0"),
         "message-del.json": await _invalid_message_scenario("text\x7f", "del"),
+        "message-thread-dry-run.json": await _thread_reply_scenario("dry_run"),
+        "message-thread-sent.json": await _thread_reply_scenario("sent"),
+        "message-thread-unavailable.json": await _thread_reply_scenario("unavailable"),
+        "message-thread-unconfirmed.json": await _thread_reply_scenario("unconfirmed"),
         "connect.json": await _connect_scenario(),
         "withdraw-invitation.json": await _withdraw_scenario(),
         "pending-invitations.json": await _pending_invitations_scenario(),

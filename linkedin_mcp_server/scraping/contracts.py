@@ -8,6 +8,7 @@ from typing import Any
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     person_profile_url,
+    reply_thread_url,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
@@ -41,6 +42,16 @@ SEND_INTERRUPTED_WARNING = (
     "Message submission was interrupted while in flight. The send outcome is "
     "unknown; check the conversation before retrying, as a retry may deliver "
     "the message twice."
+)
+
+
+# `profile_urn` verifies the recipient a profile page resolves. A reply never
+# loads that page and the thread page names nobody to hold the URN against, so
+# accepting it would read as a check that never ran.
+THREAD_REPLY_PROFILE_URN_REFUSAL = (
+    "profile_urn cannot be combined with thread_id. A thread reply is addressed "
+    "by thread_id alone and never loads the profile the URN is verified "
+    "against; omit profile_urn when replying in a thread."
 )
 
 
@@ -92,18 +103,23 @@ def message_action_result(
     }
 
 
+def _invalid_message_reason(message: str) -> str | None:
+    """Why a message may not reach the composer, or ``None`` when it may."""
+    if not message.strip():
+        return "Message must contain non-whitespace characters."
+    if any(ord(character) < 32 or ord(character) == 127 for character in message):
+        # Keep the browser-side insertion contract to plain message text.
+        # Reject every C0 control and DEL before a session is acquired so no
+        # control input can reach the contenteditable surface.
+        return "Message must not contain control characters or line breaks."
+    return None
+
+
 def refuse_an_invalid_message(
     linkedin_username: str, message: str
 ) -> dict[str, Any] | None:
     """Return the shared browser-free refusal for an unsafe message."""
-    reason = None
-    if not message.strip():
-        reason = "Message must contain non-whitespace characters."
-    elif any(ord(character) < 32 or ord(character) == 127 for character in message):
-        # Keep the browser-side insertion contract to plain message text.
-        # Reject every C0 control and DEL before a session is acquired so no
-        # control input can reach the contenteditable surface.
-        reason = "Message must not contain control characters or line breaks."
+    reason = _invalid_message_reason(message)
     if reason is None:
         return None
     return message_action_result(
@@ -111,6 +127,20 @@ def refuse_an_invalid_message(
         "invalid_message",
         reason,
     )
+
+
+def refuse_an_invalid_thread_message(
+    thread_id: str, message: str
+) -> dict[str, Any] | None:
+    """The same refusal for a reply, reported against the thread it named.
+
+    ``thread_id`` must already have passed ``normalize_reply_thread_id``. The
+    username plays no part: a reply is addressed by its thread alone.
+    """
+    reason = _invalid_message_reason(message)
+    if reason is None:
+        return None
+    return message_action_result(reply_thread_url(thread_id), "invalid_message", reason)
 
 
 @dataclass

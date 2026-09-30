@@ -1,0 +1,84 @@
+{
+  "call": {
+    "arguments": {
+      "confirm_send": true,
+      "linkedin_username": "ignored-for-a-thread",
+      "thread_id": "2-policy-reply==",
+      "thread_outcome": "unavailable"
+    },
+    "method": "send_message"
+  },
+  "events": [
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-reply==/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/",
+      "requested_url": "https://www.linkedin.com/messaging/thread/2-policy-reply==/",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "send_message",
+      "description": "goto https://www.linkedin.com/messaging/thread/2-policy-reply==/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-reply==/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    }
+  ],
+  "result": {
+    "message": "LinkedIn did not open the requested messaging thread, so nothing was typed or sent. Check the thread_id: pass it exactly as get_inbox, get_conversation or search_conversations returned it.",
+    "recipient_selected": false,
+    "retry_safe": true,
+    "sent": false,
+    "status": "thread_unavailable",
+    "url": "https://www.linkedin.com/messaging/"
+  },
+  "scenario": "send_message__thread_unavailable",
+  "schema_version": 1
+}

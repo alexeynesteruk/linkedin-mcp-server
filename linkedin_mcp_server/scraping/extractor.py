@@ -278,13 +278,15 @@ class LinkedInExtractor:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
-        """Compose and send a new message with explicit confirmation gating."""
+        """Send a new message, or reply in ``thread_id``, with confirmation gating."""
         return await self._message_sender.send_message(
             linkedin_username,
             message,
             confirm_send=confirm_send,
             profile_urn=profile_urn,
+            thread_id=thread_id,
         )
 
     async def get_my_analytics(

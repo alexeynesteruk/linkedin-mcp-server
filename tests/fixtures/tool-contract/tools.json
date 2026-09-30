@@ -1184,7 +1184,7 @@
       "destructiveHint": true,
       "openWorldHint": true
     },
-    "description": "Compose and send a new message to a LinkedIn user.\n\nProfile-based targeting opens LinkedIn's compose flow. It is not a safe\nreply path for an existing recruiter/InMail or messaging thread: it may\ncreate a separate DM even after you inspect that thread with\nget_conversation or search_conversations. Those tools only read an\nexisting thread; they do not send a reply. Until a thread-targeted send\npath is available, do not treat profile-based send_message as a reply.\n\nThe recipient must be directly messageable from the profile page. If\nLinkedIn does not expose a normal Message action, use connect_with_person\nfirst, then retry send_message only after the connection request is\naccepted. A ``status`` of ``enter_to_send_enabled`` means the account\nhas LinkedIn's \"Press Enter to Send\" preference on, which hides the Send\nbutton; relay the returned instructions to the user, who switches it to\n\"Click Send to send\" before retrying. The dry run (confirm_send False)\nreports it too. Recipient authorization comes from validating one\nrecipient-specific Message action carrying the target URN, then following\nits browser navigation and pinning the exact final route. Visible profile\nlinks or recipient URNs in the composer are optional corroboration; any\ncontradiction fails closed. No Voyager or other private API is used. This\nis a write operation when confirm_send is True.",
+    "description": "Send a new message to a LinkedIn user, or reply inside an existing thread.\n\nTo reply in an existing conversation, such as a recruiter or InMail\nthread, pass its thread_id. The reply is addressed by thread_id alone:\nthe tool opens /messaging/thread/<thread_id>/, stops unless LinkedIn\nlands exactly there, and types only into the composer docked in that\nthread's own pane. It never falls back to profile-based compose, so a\nthread LinkedIn does not open returns ``thread_unavailable`` rather than\nstarting a separate DM. With thread_id, linkedin_username is ignored\n(neither validated nor used; the schema still requires a value) and\nprofile_urn must be omitted. Thread IDs come from the\n/messaging/thread/<id>/ references of get_inbox, get_conversation and\nsearch_conversations; the reference itself is accepted.\n\nWithout thread_id, profile-based targeting opens LinkedIn's compose\nflow. It is not a safe reply path for an existing recruiter/InMail or\nmessaging thread: it may create a separate DM even after you inspect\nthat thread with get_conversation or search_conversations. Those tools\nonly read an existing thread; pass its thread_id here to reply in it.\n\nThe recipient must be directly messageable from the profile page. If\nLinkedIn does not expose a normal Message action, use connect_with_person\nfirst, then retry send_message only after the connection request is\naccepted. A ``status`` of ``enter_to_send_enabled`` means the account\nhas LinkedIn's \"Press Enter to Send\" preference on, which hides the Send\nbutton; relay the returned instructions to the user, who switches it to\n\"Click Send to send\" before retrying. The dry run (confirm_send False)\nreports it too. Recipient authorization comes from validating one\nrecipient-specific Message action carrying the target URN, then following\nits browser navigation and pinning the exact final route. Visible profile\nlinks or recipient URNs in the composer are optional corroboration; any\ncontradiction fails closed. A thread reply pins the thread route the same\nway, and a local identity its pane header does not also show fails\nclosed. No Voyager or other private API is used. This is a write\noperation when confirm_send is True.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1193,7 +1193,7 @@
           "type": "boolean"
         },
         "linkedin_username": {
-          "description": "LinkedIn username of the recipient; a full profile URL is accepted too",
+          "description": "LinkedIn username of the recipient; a full\nprofile URL is accepted too. Ignored when thread_id is given.",
           "type": "string"
         },
         "message": {
@@ -1210,7 +1210,19 @@
             }
           ],
           "default": null,
-          "description": "Optional profile URN (e.g. ACoAAB...) to verify against\nthe URN exposed by the loaded profile before opening its Message\naction. It never bypasses recipient verification. Obtain via\nget_person_profile. Note: inbox may not always show all messages;\nuse search_conversations as a fallback."
+          "description": "Optional profile URN (e.g. ACoAAB...) to verify against\nthe URN exposed by the loaded profile before opening its Message\naction. It never bypasses recipient verification. Obtain via\nget_person_profile. Refused together with thread_id. Note: inbox\nmay not always show all messages; use search_conversations as a\nfallback."
+        },
+        "thread_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional id of an existing messaging thread to reply in,\nor its /messaging/thread/<id>/ reference, exactly as get_inbox,\nget_conversation or search_conversations returned it. When\ngiven, the reply goes into that thread or nowhere:\nlinkedin_username is ignored and profile_urn must be omitted."
         }
       },
       "required": [

@@ -451,11 +451,13 @@ async def test_facade_send_message_forwards_every_argument(mock_page):
         new_callable=AsyncMock,
         return_value=expected,
     ) as send_message:
+        # The sender refuses this pair; the facade only has to hand both over.
         result = await extractor.send_message(
             "target",
             "Message text",
             confirm_send=False,
             profile_urn="ACoAAB",
+            thread_id="2-abc==",
         )
 
     assert result is expected
@@ -464,6 +466,7 @@ async def test_facade_send_message_forwards_every_argument(mock_page):
         "Message text",
         confirm_send=False,
         profile_urn="ACoAAB",
+        thread_id="2-abc==",
     )
 
 

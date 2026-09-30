@@ -222,6 +222,51 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             },
             "profile_urn is not a LinkedIn id",
         ),
+        (
+            "messaging",
+            "send_message",
+            {
+                "linkedin_username": "alice",
+                "thread_id": "/feed/",
+                "message": "Hello",
+                "confirm_send": False,
+            },
+            "thread_id is not a LinkedIn id",
+        ),
+        (
+            "messaging",
+            "send_message",
+            {
+                "linkedin_username": "alice",
+                "thread_id": "urn:li:msg_conversation:(urn:li:fsd_profile:A,2-b)",
+                "message": "Hello",
+                "confirm_send": False,
+            },
+            "thread_id is not a LinkedIn messaging thread id",
+        ),
+        (
+            "messaging",
+            "send_message",
+            {
+                "linkedin_username": "alice",
+                "thread_id": "",
+                "message": "Hello",
+                "confirm_send": False,
+            },
+            "thread_id is not a LinkedIn id",
+        ),
+        (
+            "messaging",
+            "send_message",
+            {
+                "linkedin_username": "alice",
+                "profile_urn": "ACoAAB",
+                "thread_id": "2-abc",
+                "message": "Hello",
+                "confirm_send": False,
+            },
+            "profile_urn cannot be combined with thread_id",
+        ),
     ],
 )
 async def test_invalid_reference_is_rejected_before_extractor(
@@ -280,6 +325,16 @@ async def test_invalid_reference_is_rejected_before_extractor(
         ),
         ("network", "get_pending_invitations", {}),
         ("network", "withdraw_invitation", {"linkedin_username": "alice"}),
+        (
+            "messaging",
+            "send_message",
+            {
+                "linkedin_username": "alice",
+                "message": "Hello",
+                "confirm_send": False,
+                "thread_id": "2-abc==",
+            },
+        ),
         ("feed", "get_feed", {}),
         (
             "feed",
@@ -2157,6 +2212,128 @@ class TestMessagingTools:
                 True,
                 mock_context,
             )
+
+    _THREAD_ID = "2-cmVjcnVpdGVyLXRocmVhZA=="
+
+    @pytest.mark.parametrize(
+        "username",
+        ["me", "", "https://www.linkedin.com/company/microsoft/"],
+        ids=["self-alias", "empty", "not-a-person"],
+    )
+    async def test_send_message_replies_in_thread_ignoring_the_username(
+        self, mock_context, serve_extractor, username
+    ):
+        """A thread reply is addressed by thread_id alone.
+
+        Every username here is refused on the profile path, so reaching the
+        extractor unchanged proves it is neither validated nor normalized, and
+        the absent profile_urn keyword proves the profile path never ran.
+        """
+        expected = {
+            "url": f"https://www.linkedin.com/messaging/thread/{self._THREAD_ID}/",
+            "status": "sent",
+            "sent": True,
+            "retry_safe": False,
+        }
+        mock_extractor = _make_mock_extractor(expected)
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        result = await tool_fn(
+            username,
+            "Hello!",
+            True,
+            mock_context,
+            thread_id=f"/messaging/thread/{self._THREAD_ID}/",
+        )
+
+        assert result == expected
+        mock_extractor.send_message.assert_awaited_once_with(
+            username, "Hello!", confirm_send=True, thread_id=self._THREAD_ID
+        )
+
+    @pytest.mark.parametrize("message", ["", "a\nb"], ids=["blank", "newline"])
+    async def test_thread_reply_refuses_an_invalid_message_before_a_session(
+        self, mock_context, message
+    ):
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        with patch(
+            "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+            new_callable=AsyncMock,
+        ) as ready:
+            result = await tool_fn(
+                "me", message, True, mock_context, thread_id=self._THREAD_ID
+            )
+
+        ready.assert_not_awaited()
+        assert result["status"] == "invalid_message"
+        assert result["retry_safe"] is True
+        assert result["url"] == (
+            f"https://www.linkedin.com/messaging/thread/{self._THREAD_ID}/"
+        )
+
+    async def test_send_message_schema_documents_thread_replies(self):
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        tool = await mcp.get_tool("send_message")
+        assert tool is not None
+        properties = tool.parameters["properties"]
+        # thread_id is optional: a profile send keeps its three required fields.
+        assert tool.parameters["required"] == [
+            "linkedin_username",
+            "message",
+            "confirm_send",
+        ]
+        thread = " ".join(properties["thread_id"]["description"].split())
+        username = " ".join(properties["linkedin_username"]["description"].split())
+        assert "linkedin_username is ignored and profile_urn must be omitted" in thread
+        assert "Ignored when thread_id is given." in username
+        assert tool.annotations is not None
+        assert tool.annotations.destructive_hint is True
+        assert tool.annotations.read_only_hint is not True
+
+    async def test_cancelled_thread_reply_completion_warns(self, mock_context, caplog):
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mock_extractor = _make_mock_extractor({})
+        mock_extractor.send_message = AsyncMock(
+            return_value={"status": "sent", "sent": True, "retry_safe": False}
+        )
+        mock_context.report_progress = AsyncMock(
+            side_effect=[None, asyncio.CancelledError()]
+        )
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "send_message")
+
+        with (
+            patch(
+                "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+                new_callable=AsyncMock,
+                return_value=mock_extractor,
+            ),
+            caplog.at_level(
+                logging.WARNING, logger="linkedin_mcp_server.tools.messaging"
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await tool_fn("me", "Hello!", True, mock_context, thread_id="2-abc")
+
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert SEND_INTERRUPTED_WARNING in warnings
 
 
 class TestGetMyProfileTool:

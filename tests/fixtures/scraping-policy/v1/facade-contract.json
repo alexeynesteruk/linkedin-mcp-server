@@ -102,7 +102,7 @@
       },
       "send_message": {
         "coroutine": true,
-        "signature": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None) -> 'dict[str, Any]'"
+        "signature": "(self, linkedin_username: 'str', message: 'str', *, confirm_send: 'bool', profile_urn: 'str | None' = None, thread_id: 'str | None' = None) -> 'dict[str, Any]'"
       },
       "withdraw_invitation": {
         "coroutine": true,
@@ -978,7 +978,7 @@
               "type": "boolean"
             },
             "linkedin_username": {
-              "description": "LinkedIn username of the recipient; a full profile URL is accepted too",
+              "description": "LinkedIn username of the recipient; a full\nprofile URL is accepted too. Ignored when thread_id is given.",
               "type": "string"
             },
             "message": {
@@ -995,7 +995,19 @@
                 }
               ],
               "default": null,
-              "description": "Optional profile URN (e.g. ACoAAB...) to verify against\nthe URN exposed by the loaded profile before opening its Message\naction. It never bypasses recipient verification. Obtain via\nget_person_profile. Note: inbox may not always show all messages;\nuse search_conversations as a fallback."
+              "description": "Optional profile URN (e.g. ACoAAB...) to verify against\nthe URN exposed by the loaded profile before opening its Message\naction. It never bypasses recipient verification. Obtain via\nget_person_profile. Refused together with thread_id. Note: inbox\nmay not always show all messages; use search_conversations as a\nfallback."
+            },
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional id of an existing messaging thread to reply in,\nor its /messaging/thread/<id>/ reference, exactly as get_inbox,\nget_conversation or search_conversations returned it. When\ngiven, the reply goes into that thread or nowhere:\nlinkedin_username is ignored and profile_urn must be omitted."
             }
           },
           "required": [

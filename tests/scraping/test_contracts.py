@@ -13,6 +13,7 @@ from linkedin_mcp_server.scraping.contracts import (
     message_action_result,
     rate_limited_section_error,
     refuse_an_invalid_message,
+    refuse_an_invalid_thread_message,
 )
 
 
@@ -121,3 +122,29 @@ class TestRefuseAnInvalidMessage:
                 "Message must contain non-whitespace characters.",
             )
         ]
+
+
+class TestRefuseAnInvalidThreadMessage:
+    THREAD_ID = "2-abc=="
+
+    @pytest.mark.parametrize(
+        ("message", "reason"),
+        [
+            ("  ", "Message must contain non-whitespace characters."),
+            ("a\tb", "Message must not contain control characters or line breaks."),
+        ],
+        ids=["blank", "control"],
+    )
+    def test_it_refuses_like_a_profile_send_but_names_the_thread(self, message, reason):
+        assert refuse_an_invalid_thread_message(self.THREAD_ID, message) == {
+            "url": "https://www.linkedin.com/messaging/thread/2-abc==/",
+            "status": "invalid_message",
+            "message": reason,
+            "recipient_selected": False,
+            "sent": False,
+            "retry_safe": True,
+        }
+        assert refuse_an_invalid_message("alice", message)["message"] == reason
+
+    def test_a_usable_message_is_not_refused(self):
+        assert refuse_an_invalid_thread_message(self.THREAD_ID, "Hello!") is None

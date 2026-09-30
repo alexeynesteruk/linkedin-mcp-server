@@ -57,8 +57,11 @@ __all__ = [
     "normalize_person_identifier",
     "normalize_post_url",
     "normalize_profile_urn",
+    "normalize_reply_thread_id",
     "normalize_thread_id",
     "person_profile_url",
+    "reply_thread_path",
+    "reply_thread_url",
 ]
 
 # linkedin.com and every host under it. There is no canonical host to normalize
@@ -155,6 +158,15 @@ _POSTS_ROUTE = "posts"
 
 _PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
 _PROFILE_URN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# A thread id a reply can be pinned to. LinkedIn's are base64url and keep their
+# `=` padding literally in the path: measured, an existing conversation
+# redirects to /messaging/thread/2-ZDBk...XzEwMA==/ (see message_sender's
+# `_MESSAGE_THREAD_PATH_RE`). The send path compares the route it lands on with
+# the one it asked for, character for character, so an id outside this alphabet
+# is refused rather than escaped: `quote` would turn the padding into `%3D`, a
+# path LinkedIn never reports back, and every reply would stop as a route change.
+_REPLY_THREAD_ID = re.compile(r"^[A-Za-z0-9_=-]+$")
 
 
 def _decoded(value: str) -> str | None:
@@ -528,6 +540,41 @@ def normalize_job_id(value: str) -> str:
 def normalize_thread_id(value: str) -> str:
     """The id for a conversation, from the id or from a reference to it."""
     return normalize_opaque_id(value, field="thread_id", route=_THREAD_ROUTE)
+
+
+def normalize_reply_thread_id(value: str) -> str:
+    """A thread id :func:`reply_thread_path` can turn into an exact route.
+
+    :func:`normalize_thread_id` first, so the same references are accepted
+    (``/messaging/thread/2-abc==/``, one layer of percent-encoding), then the
+    base64url alphabet the route is compared in. Nothing outside it is escaped.
+    """
+    thread_id = normalize_thread_id(value)
+    if not _REPLY_THREAD_ID.fullmatch(thread_id):
+        raise InvalidReferenceError(
+            "thread_id is not a LinkedIn messaging thread id. Pass the id, or the "
+            "/messaging/thread/<id>/ reference, exactly as get_inbox, "
+            "get_conversation or search_conversations returned it: letters, "
+            "digits, '-', '_' and '=' padding."
+        )
+    return thread_id
+
+
+def reply_thread_path(thread_id: str) -> str:
+    """The route a reply pins, for an id :func:`normalize_reply_thread_id` accepted.
+
+    Interpolated rather than escaped, because the alphabet it was checked
+    against carries no path, query or escape syntax, and escaping the padding
+    would name a path LinkedIn never lands on.
+    """
+    if not _REPLY_THREAD_ID.fullmatch(thread_id):
+        raise InvalidReferenceError("thread_id was not normalized for a reply.")
+    return f"/messaging/thread/{thread_id}/"
+
+
+def reply_thread_url(thread_id: str) -> str:
+    """The absolute URL of :func:`reply_thread_path`."""
+    return f"https://www.linkedin.com{reply_thread_path(thread_id)}"
 
 
 def normalize_profile_urn(value: str) -> str:

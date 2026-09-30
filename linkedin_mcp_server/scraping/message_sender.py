@@ -14,12 +14,18 @@ import anyio
 import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
-from linkedin_mcp_server.core.exceptions import LinkedInScraperException
+from linkedin_mcp_server.core.exceptions import (
+    InvalidReferenceError,
+    LinkedInScraperException,
+)
 import linkedin_mcp_server.scraping.contracts as contracts
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     normalize_profile_urn,
+    normalize_reply_thread_id,
     person_profile_url,
+    reply_thread_path,
+    reply_thread_url,
 )
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
@@ -133,10 +139,70 @@ _PROFILE_MESSAGE_TARGET_TIMEOUT_MS = 1_000
 _MESSAGE_SUBMIT_READY_TIMEOUT_MS = 1_000
 _MESSAGE_CLEANUP_TIMEOUT_SECONDS = 1.0
 
+# A reply waits on the thread page itself, not on a compose surface. A long
+# thread hydrates its history before its composer settles, and the user's
+# fork recorded intermittent "Thread page did not load" on heavy React
+# threads with the 5000ms default page timeout (fork commit 491b38d meant to
+# raise it and committed no code). These are ceilings: a thread that settles
+# sooner returns sooner, and every one of them expires before anything is
+# typed or with the outcome reported as unconfirmed, never as a send.
+_THREAD_READY_TIMEOUT_MS = 30_000
+_THREAD_SUBMIT_READY_TIMEOUT_MS = 3_000
+_THREAD_CONFIRMATION_TIMEOUT_MS = 15_000
+
+# A thread target names a conversation, not a person, so no recipient identity
+# exists to hold a local one against. The one reference the page offers is the
+# pane's participant header: the profile links and recipient URNs the thread
+# pane shows outside every message item and outside the composer's own scopes.
+# A local identity the header does not also show is a contradiction, and so is
+# one the check cannot read. Identities compare as bare identifiers, because a
+# header link to /in/<URN>/ and a data-recipient-urn name the same member.
+# Inlined after its host program defines visible, normalizeUrn and profilePath.
+_MESSAGE_THREAD_IDENTITY_JS = r"""
+    const threadMode = target => typeof target?.threadPath === 'string';
+    const pathIdentifier = path =>
+        typeof path === 'string' && path.startsWith('/in/') && path.endsWith('/')
+            ? path.slice('/in/'.length, -1) || null
+            : null;
+    const paneHeaderIdentifiers = (pane, scopes, editor) => {
+        const outside = element =>
+            element !== editor &&
+            !editor.contains(element) &&
+            !element.closest('[data-view-name="message-list-item"]') &&
+            !scopes.some(scope => scope.contains(element));
+        const identifiers = new Set();
+        for (const anchor of pane.querySelectorAll('a[href*="/in/"]')) {
+            if (!visible(anchor) || !outside(anchor)) continue;
+            const identifier = pathIdentifier(
+                profilePath(anchor.getAttribute('href') || anchor.href || '')
+            );
+            if (identifier) identifiers.add(identifier);
+        }
+        for (const element of pane.querySelectorAll(
+            '[data-profile-urn], [data-recipient-urn]'
+        )) {
+            if (!visible(element) || !outside(element)) continue;
+            for (const name of ['data-profile-urn', 'data-recipient-urn']) {
+                if (!element.hasAttribute(name)) continue;
+                const identifier = normalizeUrn(element.getAttribute(name));
+                if (identifier) identifiers.add(identifier);
+            }
+        }
+        return identifiers;
+    };
+    const threadIdentitiesCorroborated = (paths, urns, header) =>
+        paths.every(path => {
+            const identifier = pathIdentifier(path);
+            return identifier !== null && header.has(identifier);
+        }) &&
+        urns.every(urn => urn !== null && header.has(urn));
+"""
+
 # Narrow exception to the generic-selector rule for #1107: enterToSend uses
 # the send-toggle class only when the verified composer has no Send button.
 # If the class changes, confirmed sends remain unavailable.
-_MESSAGE_COMPOSER_INSPECT_JS = r"""
+_MESSAGE_COMPOSER_INSPECT_JS = (
+    r"""
     const visible = element => {
         const visibility = element && getComputedStyle(element).visibility;
         return !!(
@@ -175,6 +241,9 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             return null;
         }
     };
+"""
+    + _MESSAGE_THREAD_IDENTITY_JS
+    + r"""
     const messageRoute = target => {
         try {
             const url = new URL(window.location.href);
@@ -197,6 +266,13 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
                 ...url.searchParams.getAll('recipient'),
                 ...url.searchParams.getAll('profileUrn'),
             ];
+            if (threadMode(target)) {
+                // A thread route may name no recipient: there is none here to
+                // hold one against, and the path alone is the target.
+                return url.pathname === target.threadPath && values.length === 0
+                    ? url.href
+                    : null;
+            }
             return values.every(value => normalizeUrn(value) === target.profileUrn)
                 ? url.href
                 : null;
@@ -227,6 +303,24 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
         const owner = localScopes.find(scope =>
             scope.matches('dialog, [role="dialog"]')
         ) || localScopes[0];
+        // A thread is answered from its own pane on the full messaging page:
+        // the nearest ancestor of the composer that holds a visible message.
+        // Until one renders the conversation has not hydrated and nothing is
+        // proven yet. An overlay chat belongs to whichever conversation it was
+        // opened for, and it never qualifies: a dialog above the editor is the
+        // owner, and threadScope never climbs out of a dialog.
+        let pane = null;
+        if (threadMode(target)) {
+            pane = threadScope(owner);
+            if (
+                pane === owner ||
+                !Array.from(
+                    pane.querySelectorAll('[data-view-name="message-list-item"]')
+                ).some(visible)
+            ) {
+                return {status: 'thread_pending'};
+            }
+        }
         const outsideDraftAndHistory = element =>
             element !== editor &&
             !editor.contains(element) &&
@@ -250,8 +344,12 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
                 .map(name => normalizeUrn(element.getAttribute(name)))
         );
         if (
-            paths.some(path => path !== target.profilePath) ||
-            urns.some(urn => urn !== target.profileUrn)
+            threadMode(target)
+                ? !threadIdentitiesCorroborated(
+                    paths, urns, paneHeaderIdentifiers(pane, localScopes, editor)
+                )
+                : paths.some(path => path !== target.profilePath) ||
+                    urns.some(urn => urn !== target.profileUrn)
         ) {
             return {status: 'recipient_mismatch'};
         }
@@ -283,6 +381,7 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
             active: document.activeElement === editor,
             empty: !(editor.innerText || '').replace(/\s+/g, ' ').trim(),
             messageRoute: messageRoute(target),
+            pane,
         };
     };
     // The element whose subtree holds this conversation's messages. An
@@ -306,6 +405,7 @@ _MESSAGE_COMPOSER_INSPECT_JS = r"""
         return owner;
     };
 """
+)
 
 _MESSAGE_COMPOSER_OWNER_JS = (
     "(arg) => {"
@@ -338,6 +438,8 @@ _MESSAGE_COMPOSER_OWNER_JS = (
             localScope: state.localScope,
             profilePath: target.profilePath,
             profileUrn: target.profileUrn,
+            threadPath: threadMode(target) ? target.threadPath : null,
+            pane: state.pane,
             route: arg.expectedRoute,
             ownedMessage: null,
         };
@@ -355,6 +457,8 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
             composer.status !== 'valid' ||
             composer.messageRoute !== pinned?.route ||
             !pinned ||
+            pinned.threadPath !== (threadMode(arg) ? arg.threadPath : null) ||
+            composer.pane !== pinned.pane ||
             composer.owner !== arg.owner ||
             composer.editor !== pinned.editor ||
             composer.ancestorChain.length !== pinned.ancestorChain.length ||
@@ -463,7 +567,7 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
                         state.invalid = true;
                         marker.setAttribute('data-linkedin-mcp-invalid', 'true');
                     }
-                    for (const [candidate] of state.candidates) {
+                    for (const [candidate, entry] of state.candidates) {
                         if (
                             (removed === candidate || removed.contains(candidate)) &&
                             exactUnit(candidate, false)
@@ -472,6 +576,22 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
                             marker.setAttribute(
                                 'data-linkedin-mcp-invalid', 'true'
                             );
+                            // LinkedIn's own rendering of this submission
+                            // (measured, #1108): a node inserted after it, seen
+                            // showing exactly the text under a client-side ID,
+                            // then taken away as the server copy replaced it.
+                            // An attribute, since the readiness check runs in
+                            // another world. Only a thread reply requires it.
+                            if (
+                                entry.matched &&
+                                !(candidate.getAttribute('data-event-urn') || '')
+                                    .trim()
+                                    .startsWith('urn:li:msg_message:')
+                            ) {
+                                marker.setAttribute(
+                                    'data-linkedin-mcp-placeholder', 'true'
+                                );
+                            }
                         }
                     }
                 }
@@ -570,6 +690,30 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                 sender.querySelectorAll('a[href*="/in/"]')
             ).some(linksRecipient);
         };
+        // A thread target knows no recipient, so the other side is whoever
+        // the pane's participant header names. The sender is found as above;
+        // a node whose sender cannot be found, whose header link cannot be
+        // read, or who is named in the pane header, is not this submission.
+        // A header that names nobody refuses nothing here, which is why a
+        // thread acknowledgement also needs LinkedIn's local placeholder.
+        const sentByParticipant = (scope, node, composer) => {
+            const all = Array.from(scope.querySelectorAll(itemSelector));
+            const sender = all.slice(0, all.indexOf(node) + 1).reverse().find(
+                item => item.querySelector('a[href*="/in/"]')
+            );
+            if (!sender) return true;
+            const header = paneHeaderIdentifiers(
+                scope, composer.ancestorChain, composer.editor
+            );
+            return Array.from(sender.querySelectorAll('a[href*="/in/"]')).some(
+                anchor => {
+                    const identifier = pathIdentifier(
+                        profilePath(anchor.getAttribute('href') || '')
+                    );
+                    return identifier === null || header.has(identifier);
+                }
+            );
+        };
         // LinkedIn acknowledges a send by rendering a node whose event ID is
         // a server message URN. In an open thread it inserts that node and
         // removes its client-side placeholder; the first message of a new
@@ -610,7 +754,18 @@ _MESSAGE_CONFIRMATION_READY_JS = (
             ).filter(visible);
             const startPath = marker.getAttribute('data-linkedin-mcp-route') || '';
             const path = window.location.pathname;
-            if (path.startsWith('/messaging/thread/')) {
+            if (threadMode(arg)) {
+                // A reply never moves: it started on the thread the caller
+                // named and is acknowledged there, after LinkedIn rendered
+                // this submission locally first.
+                if (
+                    path !== arg.threadPath ||
+                    startPath !== arg.threadPath ||
+                    marker.getAttribute('data-linkedin-mcp-placeholder') !== 'true'
+                ) {
+                    return false;
+                }
+            } else if (path.startsWith('/messaging/thread/')) {
                 if (startPath.startsWith('/messaging/thread/')) {
                     if (path !== startPath) return false;
                 } else if (
@@ -631,7 +786,9 @@ _MESSAGE_CONFIRMATION_READY_JS = (
             });
             return acknowledged.length === 1 &&
                 acknowledged[0] === items[items.length - 1] &&
-                !sentByRecipient(scope, acknowledged[0]);
+                !(threadMode(arg)
+                    ? sentByParticipant(scope, acknowledged[0], composer)
+                    : sentByRecipient(scope, acknowledged[0]));
         };
         if (!arg.owner?.isConnected) return serverAcknowledged();
         const markers = Array.from(
@@ -758,7 +915,8 @@ _MESSAGE_COMPOSER_FOCUS_JS = (
     }"""
 )
 
-_MESSAGE_COMPOSER_PINNED_JS = r"""
+_MESSAGE_COMPOSER_PINNED_JS = (
+    r"""
     const visible = element => {
         const visibility = element && getComputedStyle(element).visibility;
         return !!(
@@ -797,6 +955,9 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
             return null;
         }
     };
+"""
+    + _MESSAGE_THREAD_IDENTITY_JS
+    + r"""
     const messageRoute = target => {
         try {
             const url = new URL(window.location.href);
@@ -819,6 +980,11 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
                 ...url.searchParams.getAll('recipient'),
                 ...url.searchParams.getAll('profileUrn'),
             ];
+            if (threadMode(target)) {
+                return url.pathname === target.threadPath && values.length === 0
+                    ? url.href
+                    : null;
+            }
             return values.every(value => normalizeUrn(value) === target.profileUrn)
                 ? url.href
                 : null;
@@ -837,7 +1003,7 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
         }
         return scopes;
     };
-    const identitiesMatch = (scopes, editor, target) => {
+    const identitiesMatch = (scopes, editor, target, pane) => {
         const outsideDraftAndHistory = element =>
             element !== editor &&
             !editor.contains(element) &&
@@ -860,6 +1026,13 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
                 .filter(name => element.hasAttribute(name))
                 .map(name => normalizeUrn(element.getAttribute(name)))
         );
+        if (threadMode(target)) {
+            // The pane pinned with the composer: PREPARE refuses a submission
+            // once the composer sits in any other.
+            return !!pane && threadIdentitiesCorroborated(
+                paths, urns, paneHeaderIdentifiers(pane, scopes, editor)
+            );
+        }
         return !(
             paths.some(path => path !== target.profilePath) ||
             urns.some(urn => urn !== target.profileUrn)
@@ -871,11 +1044,12 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
             !pinned ||
             pinned.profilePath !== target.profilePath ||
             pinned.profileUrn !== target.profileUrn ||
+            pinned.threadPath !== (threadMode(target) ? target.threadPath : null) ||
             messageRoute(target) !== pinned.route
         ) {
             return null;
         }
-        const {editor, ancestorChain, button, localScope} = pinned;
+        const {editor, ancestorChain, button, localScope, pane} = pinned;
         const currentChain = semanticAncestors(editor);
         if (
             !owner.isConnected ||
@@ -894,7 +1068,7 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
             !visible(editor) ||
             !visible(button) ||
             !editor.matches('[role="textbox"][contenteditable="true"]') ||
-            !identitiesMatch(currentChain, editor, target)
+            !identitiesMatch(currentChain, editor, target, pane)
         ) {
             return null;
         }
@@ -917,6 +1091,7 @@ _MESSAGE_COMPOSER_PINNED_JS = r"""
         return pinned;
     };
 """
+)
 
 _MESSAGE_COMPOSER_WRITE_JS = (
     "(owner, arg) => {"
@@ -1040,6 +1215,9 @@ _PROFILE_PATH_RE = re.compile(r"^/in/[^/?#]+/$")
 # the account had already written to. Only '=' is added: '%' would readmit an
 # encoded slash and let one path pose as another. The id identifies nobody on
 # its own, and the recipient is proven by the composer rather than this path.
+# A thread reply is the exception by design: there the caller named the
+# conversation, so this exact path is the target (see _ThreadMessageTarget),
+# and identifiers.normalize_reply_thread_id admits the same alphabet.
 _MESSAGE_THREAD_PATH_RE = re.compile(r"^/messaging/thread/[A-Za-z0-9_=-]+/$")
 _PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
 
@@ -1056,6 +1234,34 @@ class _ProfileMessageTarget:
 class _ProfileMessageTargetResolution:
     status: Literal["resolved", "unavailable", "failed"]
     target: _ProfileMessageTarget | None = None
+
+
+@dataclass(frozen=True)
+class _ThreadMessageTarget:
+    """An existing conversation, named by the thread id the caller passed.
+
+    It names no person. The route is the whole target: the page JS pins
+    ``thread_path`` exactly, accepts only a composer docked in that thread's
+    own pane, and holds any local identity against the pane's participant
+    header, the one reference a thread page offers.
+    """
+
+    thread_id: str
+    thread_path: str
+    thread_url: str
+
+
+_MessageTarget = _ProfileMessageTarget | _ThreadMessageTarget
+
+
+def _thread_message_target(thread_id: str) -> _ThreadMessageTarget:
+    """Validate a caller's thread id into the route a reply is pinned to."""
+    thread_id = normalize_reply_thread_id(thread_id)
+    return _ThreadMessageTarget(
+        thread_id=thread_id,
+        thread_path=reply_thread_path(thread_id),
+        thread_url=reply_thread_url(thread_id),
+    )
 
 
 def _safe_linkedin_url(value: str, *, base: str | None = None) -> ParseResult | None:
@@ -1155,6 +1361,29 @@ def _message_page_url_is_safe(value: str, profile_urn: str) -> bool:
     return all(_normalize_profile_urn(item) == profile_urn for item in recipient_values)
 
 
+def _thread_page_url_is_safe(value: str, thread_path: str) -> bool:
+    """Whether a page URL is exactly the requested thread and names nobody.
+
+    A ``recipient`` or ``profileUrn`` on a thread route would be a person this
+    target cannot corroborate, so any, even blank, refuses the route.
+    """
+    parsed = _safe_linkedin_url(value)
+    if (
+        parsed is None
+        or parsed.path != thread_path
+        or not _MESSAGE_THREAD_PATH_RE.fullmatch(parsed.path)
+    ):
+        return False
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    return not any(key in params for key in ("recipient", "profileUrn"))
+
+
+def _route_is_safe(value: str, target: _MessageTarget) -> bool:
+    if isinstance(target, _ThreadMessageTarget):
+        return _thread_page_url_is_safe(value, target.thread_path)
+    return _message_page_url_is_safe(value, target.profile_urn)
+
+
 class MessageSender:
     """Compose and send messages through LinkedIn's browser UI."""
 
@@ -1232,20 +1461,32 @@ class MessageSender:
         return resolution.target.compose_url if resolution.target else None
 
     async def _wait_for_message_surface(
-        self, target: _ProfileMessageTarget
+        self, target: _MessageTarget
     ) -> Literal["composer"] | None:
         """Wait for one editor with no contradictory local recipient identity."""
         if await self._wait_for_message_composer(target):
             return "composer"
         return None
 
-    async def _wait_for_message_composer(self, target: _ProfileMessageTarget) -> bool:
-        """Wait for the complete verified LinkedIn composer state to settle."""
+    async def _wait_for_message_composer(self, target: _MessageTarget) -> bool:
+        """Wait for the complete verified LinkedIn composer state to settle.
+
+        A thread target is ready only once its pane shows a message, so this
+        is also the wait for the thread's history to hydrate, and it gets the
+        longer ceiling a heavy thread needs.
+        """
         try:
-            await self._page.wait_for_function(
-                _MESSAGE_COMPOSER_READY_JS,
-                arg=self._message_target_argument(target),
-            )
+            if isinstance(target, _ThreadMessageTarget):
+                await self._page.wait_for_function(
+                    _MESSAGE_COMPOSER_READY_JS,
+                    arg=self._message_target_argument(target),
+                    timeout=_THREAD_READY_TIMEOUT_MS,
+                )
+            else:
+                await self._page.wait_for_function(
+                    _MESSAGE_COMPOSER_READY_JS,
+                    arg=self._message_target_argument(target),
+                )
         except PlaywrightTimeoutError:
             return False
         except Exception:
@@ -1266,15 +1507,20 @@ class MessageSender:
 
     @staticmethod
     def _message_target_argument(
-        target: _ProfileMessageTarget,
+        target: _MessageTarget,
     ) -> dict[str, str | bool]:
+        # Exactly one shape per target. The page JS switches on the presence
+        # of threadPath, so a thread argument must carry no profile fields
+        # and a profile argument no threadPath.
+        if isinstance(target, _ThreadMessageTarget):
+            return {"threadPath": target.thread_path}
         return {
             "profilePath": target.profile_path,
             "profileUrn": target.profile_urn,
         }
 
     async def _read_message_composer_state(
-        self, target: _ProfileMessageTarget
+        self, target: _MessageTarget
     ) -> dict[str, Any]:
         """Inspect the unique editor and reject contradictory local identity."""
         state = await self._page.evaluate(
@@ -1283,9 +1529,7 @@ class MessageSender:
         )
         return state if isinstance(state, dict) else {"status": "invalid"}
 
-    async def _focus_verified_message_editor(
-        self, target: _ProfileMessageTarget
-    ) -> bool:
+    async def _focus_verified_message_editor(self, target: _MessageTarget) -> bool:
         """Focus the same editor after local contradiction checks."""
         focused = await self._page.evaluate(
             _MESSAGE_COMPOSER_FOCUS_JS,
@@ -1297,7 +1541,7 @@ class MessageSender:
         self,
         message: str,
         *,
-        target: _ProfileMessageTarget,
+        target: _MessageTarget,
         owner: Any,
     ) -> str:
         """Insert text synchronously into the pinned local editor."""
@@ -1311,11 +1555,16 @@ class MessageSender:
         self,
         message: str,
         *,
-        target: _ProfileMessageTarget,
+        target: _MessageTarget,
         owner: Any,
     ) -> bool:
         """Wait briefly for the exact pinned submit button to become active."""
-        deadline = time.monotonic() + _MESSAGE_SUBMIT_READY_TIMEOUT_MS / 1_000
+        timeout_ms = (
+            _THREAD_SUBMIT_READY_TIMEOUT_MS
+            if isinstance(target, _ThreadMessageTarget)
+            else _MESSAGE_SUBMIT_READY_TIMEOUT_MS
+        )
+        deadline = time.monotonic() + timeout_ms / 1_000
         argument = {**self._message_target_argument(target), "message": message}
         while True:
             try:
@@ -1340,7 +1589,7 @@ class MessageSender:
         self,
         message: str,
         *,
-        target: _ProfileMessageTarget,
+        target: _MessageTarget,
         owner: Any,
     ) -> str:
         """Click the one active submit button pinned with the local editor."""
@@ -1366,7 +1615,7 @@ class MessageSender:
 
     async def _resolve_message_owner(
         self,
-        target: _ProfileMessageTarget,
+        target: _MessageTarget,
         *,
         expected_route: str,
     ) -> Any | None:
@@ -1413,7 +1662,7 @@ class MessageSender:
     def _message_confirmation_argument(
         self,
         message: str,
-        target: _ProfileMessageTarget,
+        target: _MessageTarget,
         owner: Any,
     ) -> dict[str, Any]:
         return {
@@ -1426,7 +1675,7 @@ class MessageSender:
         self,
         message: str,
         *,
-        target: _ProfileMessageTarget,
+        target: _MessageTarget,
         owner: Any,
     ) -> str | None:
         """Start the owner-scoped DOM observer immediately before submission."""
@@ -1440,7 +1689,7 @@ class MessageSender:
         self,
         message: str,
         *,
-        target: _ProfileMessageTarget,
+        target: _MessageTarget,
         owner: Any,
         confirmation: str,
     ) -> bool:
@@ -1456,17 +1705,29 @@ class MessageSender:
         thread remounts the pane under /messaging/thread/<id>/. Every timeout
         or ambiguity answers "not observed" because submission already
         happened.
+
+        A thread target narrows the second signal: the route never left the
+        named thread, the observer saw LinkedIn's client placeholder for this
+        text leave the pane, and the node's sender is nobody the pane header
+        names. It also waits longer, since a heavy thread re-renders slowly.
         """
+        argument = {
+            **self._message_target_argument(target),
+            "expected": message,
+            "owner": owner,
+            "token": confirmation,
+        }
         try:
-            await self._page.wait_for_function(
-                _MESSAGE_CONFIRMATION_READY_JS,
-                arg={
-                    **self._message_target_argument(target),
-                    "expected": message,
-                    "owner": owner,
-                    "token": confirmation,
-                },
-            )
+            if isinstance(target, _ThreadMessageTarget):
+                await self._page.wait_for_function(
+                    _MESSAGE_CONFIRMATION_READY_JS,
+                    arg=argument,
+                    timeout=_THREAD_CONFIRMATION_TIMEOUT_MS,
+                )
+            else:
+                await self._page.wait_for_function(
+                    _MESSAGE_CONFIRMATION_READY_JS, arg=argument
+                )
             return True
         except Exception:
             logger.debug("Message send could not be confirmed", exc_info=True)
@@ -1497,23 +1758,40 @@ class MessageSender:
         *,
         confirm_send: bool,
         profile_urn: str | None = None,
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
-        """Compose and send a new message with explicit confirmation gating.
+        """Compose and send a message with explicit confirmation gating.
 
-        Opens LinkedIn's profile-based compose flow. That may create a separate
-        DM instead of replying in an existing recruiter/InMail or messaging
-        thread. Recipient authorization comes from the validated top-card action
-        carrying the target URN and the browser navigation it initiates. The exact
-        resulting route is pinned through every later operation; visible local
-        identities are optional corroboration, but any contradiction fails closed.
+        Without ``thread_id`` this opens LinkedIn's profile-based compose flow.
+        That may create a separate DM instead of replying in an existing
+        recruiter/InMail or messaging thread. Recipient authorization comes from
+        the validated top-card action carrying the target URN and the browser
+        navigation it initiates. The exact resulting route is pinned through
+        every later operation; visible local identities are optional
+        corroboration, but any contradiction fails closed.
+
+        With ``thread_id`` it replies inside that existing thread instead
+        (#483), and never falls back to the profile flow: see
+        :meth:`_send_in_thread`. ``linkedin_username`` is then ignored, neither
+        validated nor used, and ``profile_urn`` is refused because a thread
+        page offers nothing to verify it against.
 
         Args:
-            linkedin_username: LinkedIn username of the recipient.
+            linkedin_username: LinkedIn username of the recipient. Ignored when
+                ``thread_id`` is given.
             message: The message text to send.
             confirm_send: Must be True to actually send (False does a dry run).
             profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against
                 the recipient resolved from the loaded profile snapshot.
+            thread_id: Optional id of an existing conversation to reply in.
         """
+        if thread_id is not None:
+            if profile_urn is not None:
+                raise InvalidReferenceError(contracts.THREAD_REPLY_PROFILE_URN_REFUSAL)
+            return await self._send_in_thread(
+                thread_id, message, confirm_send=confirm_send
+            )
+
         refusal = contracts.refuse_an_invalid_message(linkedin_username, message)
         if refusal is not None:
             return refusal
@@ -1569,7 +1847,87 @@ class MessageSender:
                 "recipient_resolution_failed",
                 "LinkedIn opened an unexpected messaging URL.",
             )
+        return await self._send_on_pinned_route(
+            target,
+            message,
+            expected_route=expected_route,
+            confirm_send=confirm_send,
+            label=linkedin_username,
+        )
 
+    async def _send_in_thread(
+        self,
+        thread_id: str,
+        message: str,
+        *,
+        confirm_send: bool,
+    ) -> dict[str, Any]:
+        """Reply inside the existing thread ``thread_id`` names (#483).
+
+        The thread id is the whole target. It is validated into the exact
+        ``/messaging/thread/<id>/`` route before any browser work, the page is
+        opened there, and the route it lands on must be that one: LinkedIn
+        redirecting an unknown or foreign thread elsewhere is
+        ``thread_unavailable``, never a reason to try the profile flow. From
+        then on the route is pinned exactly like a profile send's, and the
+        composer has to be the one docked in that thread's own pane. The rest
+        of the path is the profile send's, step for step.
+        """
+        target = _thread_message_target(thread_id)
+        refusal = contracts.refuse_an_invalid_thread_message(target.thread_id, message)
+        if refusal is not None:
+            return refusal
+
+        await self._navigator._navigate_to_page(target.thread_url)
+        # Before the landing check, so a checkpoint reached instead of the
+        # thread reports itself as one rather than as a missing thread.
+        await self._session.check_rate_limit()
+        expected_route = self._page.url
+        if not _thread_page_url_is_safe(expected_route, target.thread_path):
+            return contracts.message_action_result(
+                expected_route,
+                "thread_unavailable",
+                "LinkedIn did not open the requested messaging thread, so nothing "
+                "was typed or sent. Check the thread_id: pass it exactly as "
+                "get_inbox, get_conversation or search_conversations returned it.",
+            )
+        return await self._send_on_pinned_route(
+            target,
+            message,
+            expected_route=expected_route,
+            confirm_send=confirm_send,
+            label=f"thread {target.thread_id}",
+        )
+
+    async def _wait_for_main(self, target: _MessageTarget, label: str) -> None:
+        """Let the messaging page's ``main`` render; its absence is not fatal."""
+        try:
+            if isinstance(target, _ThreadMessageTarget):
+                await self._page.wait_for_selector(
+                    "main", timeout=_THREAD_READY_TIMEOUT_MS
+                )
+            else:
+                await self._page.wait_for_selector("main")
+        except PlaywrightTimeoutError:
+            logger.debug("Compose page did not fully load for %s", label)
+
+    async def _send_on_pinned_route(
+        self,
+        target: _MessageTarget,
+        message: str,
+        *,
+        expected_route: str,
+        confirm_send: bool,
+        label: str,
+    ) -> dict[str, Any]:
+        """Verify, write, submit and confirm on the route captured on arrival.
+
+        Shared by both targets from the moment the route is pinned, so a thread
+        reply clears every gate a profile send does: the unchanged route after
+        each await, one verified composer, the dry run, an occupied draft,
+        Enter-to-send, one pinned submit, the verified write, the confirmation
+        observer, and cleanup of text nothing submitted.
+        """
         await self._session.check_rate_limit()
         if self._page.url != expected_route:
             return contracts.message_action_result(
@@ -1578,10 +1936,7 @@ class MessageSender:
                 "The messaging URL changed while the composer was loading.",
             )
 
-        try:
-            await self._page.wait_for_selector("main")
-        except PlaywrightTimeoutError:
-            logger.debug("Compose page did not fully load for %s", linkedin_username)
+        await self._wait_for_main(target, label)
         if self._page.url != expected_route:
             return contracts.message_action_result(
                 self._page.url,
@@ -1596,9 +1951,7 @@ class MessageSender:
                 "recipient_resolution_failed",
                 "The messaging URL changed while the composer was loading.",
             )
-        logger.debug(
-            "Message surface for %s was %s", linkedin_username, message_surface
-        )
+        logger.debug("Message surface for %s was %s", label, message_surface)
         if message_surface != "composer":
             return contracts.message_action_result(
                 self._page.url,
@@ -1616,13 +1969,16 @@ class MessageSender:
         if state.get("status") != "valid":
             logger.debug(
                 "Message recipient verification for %s returned %s",
-                linkedin_username,
+                label,
                 state.get("status"),
             )
             return contracts.message_action_result(
                 self._page.url,
                 "recipient_resolution_failed",
-                "The local composer did not identify exactly the requested profile.",
+                "The local composer did not identify exactly the requested thread."
+                if isinstance(target, _ThreadMessageTarget)
+                else "The local composer did not identify exactly the requested "
+                "profile.",
             )
         recipient_selected = True
         if state.get("enterToSend") is True:
@@ -1697,7 +2053,7 @@ class MessageSender:
                     target=target,
                     owner=owner,
                 )
-                if not _message_page_url_is_safe(self._page.url, target.profile_urn):
+                if not _route_is_safe(self._page.url, target):
                     return contracts.message_action_result(
                         self._page.url,
                         "recipient_resolution_failed",

@@ -45,7 +45,9 @@ instances, clear profiles, or replace the user's browser session.
 - Content: `get_feed` and `search_posts`.
 - Messages: `get_inbox`, `get_conversation`, and `search_conversations`.
 - Writes: `send_message` and `connect_with_person`, subject to the explicit
-  authorization rules above.
+  authorization rules above. To answer an existing conversation, recruiter and
+  InMail threads included, pass its `thread_id` to `send_message`; sending to a
+  profile may start a separate DM instead.
 - Cleanup: use `close_session` only when the user asks to end the managed
   browser session or when the current LinkedIn task is finished and no follow-up
   call is expected.

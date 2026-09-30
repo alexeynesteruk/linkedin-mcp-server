@@ -22,9 +22,12 @@ from linkedin_mcp_server.scraping.identifiers import (
     normalize_opaque_id,
     normalize_person_identifier,
     normalize_post_url,
+    normalize_reply_thread_id,
     normalize_profile_urn,
     normalize_thread_id,
     person_profile_url,
+    reply_thread_path,
+    reply_thread_url,
 )
 
 PROFILE_ID = "ACoAADdZSNYBiaacxEw6je-wVIKjGkKp-it0gD8"
@@ -670,3 +673,65 @@ class TestNormalizePostUrl:
     def test_a_short_link_gets_the_redirect_explanation(self):
         with pytest.raises(InvalidReferenceError, match="shortened LinkedIn link"):
             normalize_post_url("https://lnkd.in/abc123")
+
+
+class TestReplyThreadId:
+    """A reply pins /messaging/thread/<id>/ and compares the landed route with it
+    character for character, so the id has to survive into the path exactly as
+    LinkedIn reports it back: base64url with literal '=' padding."""
+
+    PADDED = "2-ZDBkMjZiY2UtNjQwYi00NzczLWIxYWYtNTczZTZhZDkzMzQ4XzEwMA=="
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            PADDED,
+            f"/messaging/thread/{PADDED}/",
+            f"https://www.linkedin.com/messaging/thread/{PADDED}/",
+            # One layer of escaping, as a browser address bar may copy it.
+            PADDED.replace("=", "%3D"),
+            f"  {PADDED}  ",
+        ],
+        ids=["bare", "reference", "url", "escaped-padding", "padded-whitespace"],
+    )
+    def test_every_form_this_server_emits_yields_the_id(self, value: str):
+        assert normalize_reply_thread_id(value) == self.PADDED
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "urn:li:msg_conversation:(urn:li:fsd_profile:ACoAAB,2-abc)",
+            "2-abc.def",
+            "2-abc+def",
+            "2-abc%252F",
+            "",
+            "/feed/",
+        ],
+        ids=["urn", "period", "plus", "double-escape", "empty", "other-route"],
+    )
+    def test_anything_outside_the_route_alphabet_is_refused(self, value: str):
+        # normalize_thread_id accepts the first three; a reply cannot pin them.
+        with pytest.raises(InvalidReferenceError, match="thread_id"):
+            normalize_reply_thread_id(value)
+
+    def test_the_alphabet_is_narrower_than_a_readable_thread_id(self):
+        value = "urn:li:msg_conversation:(urn:li:fsd_profile:ACoAAB,2-abc)"
+
+        assert normalize_thread_id(value) == value
+        with pytest.raises(InvalidReferenceError, match="letters, digits"):
+            normalize_reply_thread_id(value)
+
+    def test_the_route_keeps_the_padding_literal(self):
+        # messaging_thread_url escapes it, which names a path LinkedIn never
+        # lands on; the reply route must not.
+        assert reply_thread_path(self.PADDED) == f"/messaging/thread/{self.PADDED}/"
+        assert (
+            reply_thread_url(self.PADDED)
+            == f"https://www.linkedin.com/messaging/thread/{self.PADDED}/"
+        )
+        assert "%3D" in messaging_thread_url(self.PADDED, "/")
+
+    @pytest.mark.parametrize("value", ["a/b", "a b", "a%3D", "../x"])
+    def test_the_route_builder_refuses_an_unnormalized_id(self, value: str):
+        with pytest.raises(InvalidReferenceError):
+            reply_thread_path(value)

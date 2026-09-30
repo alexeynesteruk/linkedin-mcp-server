@@ -1380,3 +1380,535 @@ class TestMessageConfirmation:
             _MESSAGE_CONFIRMATION_DISPOSE_JS,
             {"owner": owner, "token": "confirmation-token"},
         )
+
+
+THREAD_ID = "2-cmVjcnVpdGVyLXRocmVhZA=="
+THREAD_URL = f"https://www.linkedin.com/messaging/thread/{THREAD_ID}/"
+
+
+class TestThreadTargetUrls:
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            (THREAD_URL, True),
+            (f"https://de.linkedin.com/messaging/thread/{THREAD_ID}/", True),
+            (f"{THREAD_URL}?trk=inbox", True),
+            (f"{THREAD_URL}?recipient=ACoAAB", False),
+            (f"{THREAD_URL}?recipient=", False),
+            (f"{THREAD_URL}?profileUrn=urn%3Ali%3Afsd_profile%3AACoAAB", False),
+            ("https://www.linkedin.com/messaging/thread/2-other/", False),
+            (THREAD_URL.replace("==", "%3D%3D"), False),
+            ("https://www.linkedin.com/messaging/", False),
+            ("https://www.linkedin.com/messaging/compose/", False),
+            (THREAD_URL.replace("https:", "http:"), False),
+            (THREAD_URL.replace("www.linkedin.com", "evil.example"), False),
+            (THREAD_URL.replace("www.linkedin.com", "user@www.linkedin.com"), False),
+            (THREAD_URL.replace("www.linkedin.com", "www.linkedin.com:444"), False),
+            (f"{THREAD_URL}#draft", False),
+        ],
+    )
+    def test_landing_url_must_be_exactly_the_thread(self, url, expected):
+        target = message_sender_module._thread_message_target(THREAD_ID)
+        assert (
+            message_sender_module._thread_page_url_is_safe(url, target.thread_path)
+            is expected
+        )
+
+    def test_target_pins_the_padded_route_literally(self):
+        target = message_sender_module._thread_message_target(
+            f"/messaging/thread/{THREAD_ID}/"
+        )
+
+        assert target.thread_id == THREAD_ID
+        assert target.thread_path == f"/messaging/thread/{THREAD_ID}/"
+        assert target.thread_url == THREAD_URL
+
+    def test_thread_argument_carries_no_profile_fields(self):
+        target = message_sender_module._thread_message_target(THREAD_ID)
+
+        assert MessageSender._message_target_argument(target) == {
+            "threadPath": f"/messaging/thread/{THREAD_ID}/"
+        }
+
+
+class TestSendInThread:
+    """The thread_id path replies in that thread or nowhere (#483)."""
+
+    @staticmethod
+    def _target():
+        return message_sender_module._thread_message_target(THREAD_ID)
+
+    @staticmethod
+    def _patches(
+        sender,
+        mock_page,
+        *,
+        landed_url=THREAD_URL,
+        states=None,
+        submission="clicked",
+        write_result="written",
+        confirmed=True,
+    ):
+        """Every browser-facing step, with the page landing on ``landed_url``."""
+        mock_page.keyboard = MagicMock(type=AsyncMock(), press=AsyncMock())
+        owner = MagicMock()
+        owner.as_element.return_value = owner
+        owner.evaluate = AsyncMock(return_value="ready")
+        owner.dispose = AsyncMock()
+        mock_page.evaluate_handle = AsyncMock(return_value=owner)
+
+        async def land(url):
+            mock_page.url = landed_url
+
+        valid = {
+            "status": "valid",
+            "active": False,
+            "empty": True,
+            "submitCount": 1,
+            "submitUsable": True,
+        }
+        return {
+            "navigate": patch.object(
+                PageNavigator,
+                "_navigate_to_page",
+                new_callable=AsyncMock,
+                side_effect=land,
+            ),
+            "rate_limit": patch.object(
+                ScrapingSession, "check_rate_limit", new_callable=AsyncMock
+            ),
+            "profile_target": patch.object(
+                sender, "_read_profile_message_target", new_callable=AsyncMock
+            ),
+            "surface": patch.object(
+                sender,
+                "_wait_for_message_surface",
+                new_callable=AsyncMock,
+                return_value="composer",
+            ),
+            "state": patch.object(
+                sender,
+                "_read_message_composer_state",
+                new_callable=AsyncMock,
+                side_effect=states,
+                return_value=valid,
+            ),
+            "write": patch.object(
+                sender,
+                "_write_verified_message",
+                new_callable=AsyncMock,
+                return_value=write_result,
+            ),
+            "submit": patch.object(
+                sender,
+                "_submit_verified_message",
+                new_callable=AsyncMock,
+                return_value=submission,
+            ),
+            "sleep": patch(
+                "linkedin_mcp_server.scraping.message_sender.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+            "prepare": patch.object(
+                sender,
+                "_prepare_message_confirmation",
+                new_callable=AsyncMock,
+                return_value="confirmation-token",
+            ),
+            "confirmed": patch.object(
+                sender,
+                "_message_send_confirmed",
+                new_callable=AsyncMock,
+                return_value=confirmed,
+            ),
+        }
+
+    @staticmethod
+    def _enter(stack, patches):
+        return {name: stack.enter_context(item) for name, item in patches.items()}
+
+    @pytest.mark.parametrize(
+        "thread_id",
+        [
+            "",
+            "   ",
+            "/feed/",
+            "2-a/../../feed",
+            "urn:li:msg_conversation:(urn:li:fsd_profile:ACoAAB,2-abc)",
+            "2-abc.def",
+            "2-abc%252F",
+        ],
+        ids=["empty", "blank", "other-route", "traversal", "urn", "dot", "double"],
+    )
+    async def test_unusable_thread_id_is_refused_before_navigation(
+        self, mock_page, thread_id
+    ):
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._enter(stack, self._patches(sender, mock_page))
+            with pytest.raises(InvalidReferenceError, match="thread_id"):
+                await sender.send_message(
+                    "testuser", "Hello!", confirm_send=True, thread_id=thread_id
+                )
+
+        # Refused, not re-routed: an empty thread_id is still a thread reply.
+        mocks["navigate"].assert_not_awaited()
+        mocks["profile_target"].assert_not_awaited()
+
+    async def test_profile_urn_with_thread_id_is_refused_before_navigation(
+        self, mock_page
+    ):
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._enter(stack, self._patches(sender, mock_page))
+            with pytest.raises(InvalidReferenceError, match="profile_urn"):
+                await sender.send_message(
+                    "testuser",
+                    "Hello!",
+                    confirm_send=True,
+                    profile_urn="ACoAAB",
+                    thread_id=THREAD_ID,
+                )
+
+        mocks["navigate"].assert_not_awaited()
+
+    @pytest.mark.parametrize("message", ["  ", "line\nbreak"], ids=["blank", "c0"])
+    async def test_invalid_message_is_refused_against_the_thread(
+        self, mock_page, message
+    ):
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._enter(stack, self._patches(sender, mock_page))
+            result = await sender.send_message(
+                "testuser", message, confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "invalid_message"
+        assert result["url"] == THREAD_URL
+        assert result["retry_safe"] is True
+        mocks["navigate"].assert_not_awaited()
+
+    async def test_username_is_ignored_and_the_profile_is_never_loaded(self, mock_page):
+        # `../../feed` is refused on the profile path; here it plays no part.
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._enter(stack, self._patches(sender, mock_page))
+            result = await sender.send_message(
+                "../../feed", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        assert result["retry_safe"] is False
+        assert result["url"] == THREAD_URL
+        mocks["navigate"].assert_awaited_once_with(THREAD_URL)
+        mocks["profile_target"].assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "landed_url",
+        [
+            "https://www.linkedin.com/messaging/",
+            "https://www.linkedin.com/messaging/thread/2-other/",
+            "https://www.linkedin.com/messaging/compose/?recipient=ACoAAB",
+            f"{THREAD_URL}?recipient=ACoAAB",
+            "https://www.linkedin.com/in/testuser/",
+        ],
+        ids=["inbox", "other-thread", "compose", "recipient-query", "profile"],
+    )
+    async def test_landing_anywhere_else_is_thread_unavailable(
+        self, mock_page, landed_url
+    ):
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._enter(
+                stack, self._patches(sender, mock_page, landed_url=landed_url)
+            )
+            result = await sender.send_message(
+                "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "thread_unavailable"
+        assert result["url"] == landed_url
+        assert result["recipient_selected"] is False
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        # One navigation, to the thread. No profile, no compose fallback.
+        mocks["navigate"].assert_awaited_once_with(THREAD_URL)
+        mocks["profile_target"].assert_not_awaited()
+        mocks["surface"].assert_not_awaited()
+        mocks["write"].assert_not_awaited()
+        mocks["submit"].assert_not_awaited()
+
+    async def test_checkpoint_instead_of_the_thread_is_a_rate_limit(self, mock_page):
+        from linkedin_mcp_server.core.exceptions import RateLimitError
+
+        sender = _sender(mock_page)
+        patches = self._patches(
+            sender, mock_page, landed_url="https://www.linkedin.com/checkpoint/lg/"
+        )
+        # The real check reads the landed URL; only the navigation is faked.
+        del patches["rate_limit"]
+        with ExitStack() as stack:
+            mocks = self._enter(stack, patches)
+            with pytest.raises(RateLimitError):
+                await sender.send_message(
+                    "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+                )
+
+        mocks["surface"].assert_not_awaited()
+
+    async def test_dry_run_verifies_the_thread_composer_and_stops(self, mock_page):
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._enter(stack, self._patches(sender, mock_page))
+            result = await sender.send_message(
+                "testuser", "Hello!", confirm_send=False, thread_id=THREAD_ID
+            )
+
+        assert result == {
+            "url": THREAD_URL,
+            "status": "confirmation_required",
+            "message": "Set confirm_send=true to send the message.",
+            "recipient_selected": True,
+            "sent": False,
+            "retry_safe": True,
+        }
+        mocks["surface"].assert_awaited_once_with(self._target())
+        mocks["state"].assert_awaited_once_with(self._target())
+        mocks["write"].assert_not_awaited()
+        mocks["submit"].assert_not_awaited()
+        mock_page.evaluate_handle.assert_not_awaited()
+
+    async def test_unverified_thread_composer_is_not_a_recipient(self, mock_page):
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._enter(
+                stack,
+                self._patches(
+                    sender, mock_page, states=[{"status": "recipient_mismatch"}]
+                ),
+            )
+            result = await sender.send_message(
+                "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert "requested thread" in result["message"]
+        assert result["recipient_selected"] is False
+        mocks["write"].assert_not_awaited()
+
+    async def test_route_change_while_waiting_for_the_composer_fails_closed(
+        self, mock_page
+    ):
+        sender = _sender(mock_page)
+
+        async def switch_route(_target):
+            mock_page.url = "https://www.linkedin.com/messaging/thread/2-other/"
+            return "composer"
+
+        with ExitStack() as stack:
+            mocks = self._enter(stack, self._patches(sender, mock_page))
+            mocks["surface"].side_effect = switch_route
+            result = await sender.send_message(
+                "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["retry_safe"] is True
+        mocks["state"].assert_not_awaited()
+        mocks["write"].assert_not_awaited()
+
+    async def test_route_change_during_text_entry_fails_before_submit(self, mock_page):
+        sender = _sender(mock_page)
+
+        async def change_route(message, *, target, owner):
+            assert target == self._target()
+            mock_page.url = "https://www.linkedin.com/messaging/thread/2-other/"
+            return "written"
+
+        with ExitStack() as stack:
+            mocks = self._enter(stack, self._patches(sender, mock_page))
+            mocks["write"].side_effect = change_route
+            result = await sender.send_message(
+                "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["retry_safe"] is True
+        mocks["prepare"].assert_not_awaited()
+        mocks["submit"].assert_not_awaited()
+
+    async def test_owner_is_pinned_to_the_landed_thread_route(self, mock_page):
+        sender = _sender(mock_page)
+        landed = f"{THREAD_URL}?trk=inbox"
+        with ExitStack() as stack:
+            self._enter(stack, self._patches(sender, mock_page, landed_url=landed))
+            resolve_owner = stack.enter_context(
+                patch.object(
+                    sender,
+                    "_resolve_message_owner",
+                    new_callable=AsyncMock,
+                    return_value=None,
+                )
+            )
+            result = await sender.send_message(
+                "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "recipient_resolution_failed"
+        resolve_owner.assert_awaited_once_with(self._target(), expected_route=landed)
+
+    async def test_steps_run_in_order_against_the_thread_target(self, mock_page):
+        sender = _sender(mock_page)
+        steps: list[str] = []
+
+        def step(name, value):
+            async def record(*_args, target, **_kwargs):
+                assert target == self._target()
+                steps.append(name)
+                return value
+
+            return record
+
+        with ExitStack() as stack:
+            mocks = self._enter(stack, self._patches(sender, mock_page))
+            mocks["write"].side_effect = step("write", "written")
+            mocks["prepare"].side_effect = step("prepare", "confirmation-token")
+            mocks["submit"].side_effect = step("submit", "clicked")
+            mocks["confirmed"].side_effect = step("confirm", True)
+            result = await sender.send_message(
+                "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "sent"
+        assert steps == ["write", "prepare", "submit", "confirm"]
+
+    async def test_unconfirmed_submission_is_never_retry_safe(self, mock_page):
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            self._enter(stack, self._patches(sender, mock_page, confirmed=False))
+            result = await sender.send_message(
+                "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    async def test_occupied_thread_composer_is_left_alone(self, mock_page):
+        sender = _sender(mock_page)
+        valid = {"status": "valid", "empty": True, "submitCount": 1}
+        with ExitStack() as stack:
+            mocks = self._enter(
+                stack,
+                self._patches(
+                    sender, mock_page, states=[valid, {**valid, "empty": False}]
+                ),
+            )
+            result = await sender.send_message(
+                "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "composer_occupied"
+        mocks["write"].assert_not_awaited()
+
+    async def test_cancellation_after_dispatch_is_logged(self, mock_page, caplog):
+        sender = _sender(mock_page)
+        with (
+            ExitStack() as stack,
+            caplog.at_level(
+                logging.WARNING, logger="linkedin_mcp_server.scraping.message_sender"
+            ),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            mocks = self._enter(stack, self._patches(sender, mock_page))
+            mocks["confirmed"].side_effect = asyncio.CancelledError()
+            await sender.send_message(
+                "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
+            )
+
+        warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("retry may deliver the message twice" in w for w in warnings)
+
+
+class TestThreadWaits:
+    """A heavy thread gets its own ceilings; a profile send keeps the defaults."""
+
+    async def test_composer_wait_uses_the_thread_ceiling(self, mock_page):
+        sender = _sender(mock_page)
+        target = message_sender_module._thread_message_target(THREAD_ID)
+
+        assert await sender._wait_for_message_composer(target) is True
+
+        mock_page.wait_for_function.assert_awaited_once_with(
+            message_sender_module._MESSAGE_COMPOSER_READY_JS,
+            arg={"threadPath": target.thread_path},
+            timeout=message_sender_module._THREAD_READY_TIMEOUT_MS,
+        )
+        assert message_sender_module._THREAD_READY_TIMEOUT_MS >= 20_000
+
+    async def test_profile_composer_wait_keeps_the_page_default(self, mock_page):
+        sender = _sender(mock_page)
+
+        assert await sender._wait_for_message_composer(TestSendMessage._target())
+
+        assert "timeout" not in mock_page.wait_for_function.await_args.kwargs
+
+    async def test_main_wait_uses_the_thread_ceiling(self, mock_page):
+        sender = _sender(mock_page)
+        target = message_sender_module._thread_message_target(THREAD_ID)
+
+        await sender._wait_for_main(target, "thread")
+        await sender._wait_for_main(TestSendMessage._target(), "testuser")
+
+        assert mock_page.wait_for_selector.await_args_list[0].kwargs == {
+            "timeout": message_sender_module._THREAD_READY_TIMEOUT_MS
+        }
+        assert mock_page.wait_for_selector.await_args_list[1].kwargs == {}
+
+    async def test_confirmation_uses_the_thread_ceiling(self, mock_page):
+        sender = _sender(mock_page)
+        target = message_sender_module._thread_message_target(THREAD_ID)
+        owner = MagicMock()
+
+        assert await sender._message_send_confirmed(
+            "Hello!", target=target, owner=owner, confirmation="token"
+        )
+
+        mock_page.wait_for_function.assert_awaited_once_with(
+            _MESSAGE_CONFIRMATION_READY_JS,
+            arg={
+                "threadPath": target.thread_path,
+                "expected": "Hello!",
+                "owner": owner,
+                "token": "token",
+            },
+            timeout=message_sender_module._THREAD_CONFIRMATION_TIMEOUT_MS,
+        )
+
+    async def test_submit_wait_uses_the_thread_ceiling(self, mock_page):
+        sender = _sender(mock_page)
+        target = message_sender_module._thread_message_target(THREAD_ID)
+        owner = MagicMock(evaluate=AsyncMock(return_value="disabled"))
+        clock = {"now": 0.0}
+
+        async def sleep(seconds):
+            clock["now"] += seconds
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.message_sender.time.monotonic",
+                side_effect=lambda: clock["now"],
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.message_sender.asyncio.sleep",
+                side_effect=sleep,
+            ),
+        ):
+            assert not await sender._wait_for_verified_submit(
+                "Hello!", target=target, owner=owner
+            )
+
+        assert clock["now"] == pytest.approx(
+            message_sender_module._THREAD_SUBMIT_READY_TIMEOUT_MS / 1_000
+        )
