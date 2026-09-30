@@ -21,7 +21,12 @@ import pytest
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.scraping.connection import ActionSignals
-from linkedin_mcp_server.scraping.connection_actions import ConnectionActions
+from linkedin_mcp_server.scraping.connection_actions import (
+    MAX_INVITE_NOTE_LENGTH,
+    ConnectionActions,
+    InviteNotSent,
+    _InviteDialogState,
+)
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 
@@ -86,6 +91,115 @@ def _signals(
         has_labeled_action_button=labeled_action,
         has_labeled_action_anchor=labeled_anchor,
         has_incoming_action_row=incoming_row,
+    )
+
+
+class _FakeInviteDialog:
+    """The one open invite dialog, as the two scoped page reads answer.
+
+    ``page.evaluate`` is a mock here, so the dialog programs never run
+    (``tests/test_invite_dialog_dom.py`` runs them against a real DOM). This
+    stands in for their answers: buttons by position, a note field, and what
+    a click or a fill does to them. Clicks are recorded as the index of the
+    button in the dialog, so ``buttons - 1`` is the primary.
+    """
+
+    def __init__(
+        self,
+        *,
+        buttons: int = 3,
+        note_field: str = "none",
+        max_length: int | None = None,
+        keeps: int | None = None,
+        dialogs: int = 1,
+        primary_disabled: bool = False,
+        enabled_after_reads: int | None = None,
+        on_click: dict[int, Any] | None = None,
+    ):
+        self.buttons = buttons
+        self.note_field = note_field
+        self.note_value = ""
+        self.max_length = max_length
+        self.keeps = keeps if keeps is not None else max_length
+        self.dialogs = dialogs
+        self.primary_disabled = primary_disabled
+        self.enabled_after_reads = enabled_after_reads
+        self.on_click = on_click or {}
+        self.reads = 0
+        self.clicks: list[int] = []
+        self.lookups: list[tuple[str, int]] = []
+        self.fills: list[str] = []
+
+    async def state(self) -> _InviteDialogState:
+        self.reads += 1
+        if (
+            self.enabled_after_reads is not None
+            and self.reads > self.enabled_after_reads
+        ):
+            self.primary_disabled = False
+        if self.dialogs != 1:
+            return _InviteDialogState(dialogs=self.dialogs)
+        return _InviteDialogState(
+            dialogs=1,
+            buttons=self.buttons,
+            primary_disabled=self.primary_disabled,
+            note_field=self.note_field,
+            note_value=self.note_value,
+            note_max_length=self.max_length,
+        )
+
+    async def element(self, part: str, *, from_end: int = 0) -> Any:
+        self.lookups.append((part, from_end))
+        if self.dialogs != 1:
+            return None
+        handle = MagicMock()
+        handle.dispose = AsyncMock()
+        if part == "note":
+            if self.note_field == "none":
+                return None
+
+            async def fill(value: str, **_kwargs: Any) -> None:
+                self.fills.append(value)
+                stored = value.replace("\r\n", "\n")
+                self.note_value = stored[: self.keeps] if self.keeps else stored
+
+            handle.fill = AsyncMock(side_effect=fill)
+            return handle
+        index = self.buttons - 1 - from_end
+        if index < 0:
+            return None
+
+        async def click(**_kwargs: Any) -> None:
+            self.clicks.append(index)
+            hook = self.on_click.get(index)
+            if hook is not None:
+                hook(self)
+
+        handle.click = AsyncMock(side_effect=click)
+        handle.focus = AsyncMock()
+        return handle
+
+    @contextmanager
+    def installed(self, actions: ConnectionActions):
+        with (
+            patch.object(actions, "_invite_dialog_state", new=self.state),
+            patch.object(actions, "_invite_dialog_element", new=self.element),
+        ):
+            yield self
+
+
+def _state(
+    note_field: str = "visible",
+    *,
+    buttons: int = 2,
+    value: str = "",
+    dialogs: int = 1,
+) -> _InviteDialogState:
+    """One scripted read of the invite dialog."""
+    if dialogs != 1:
+        return _InviteDialogState(dialogs=dialogs)
+    return _InviteDialogState(
+        dialogs=1, buttons=buttons, note_field=note_field, note_value=value
     )
 
 
@@ -917,25 +1031,20 @@ class TestInviteDialog:
     async def test_reports_premium_after_add_note(self, mock_page):
         """Add-note Premium upsell is a note-limit block, not no-dialog."""
         actions = _actions(mock_page)
-        textarea = MagicMock()
-        textarea.count = AsyncMock(return_value=0)
-        add_note_button = MagicMock()
-        add_note_button.click = AsyncMock(return_value=None)
-        buttons = MagicMock()
-        buttons.count = AsyncMock(return_value=3)
-        buttons.nth.return_value = add_note_button
-
-        def locator_for(selector: str):
-            return textarea if "textarea" in selector else buttons
-
-        mock_page.locator.side_effect = locator_for
-        mock_page.wait_for_selector = AsyncMock(
-            side_effect=PlaywrightTimeoutError("textarea timeout")
-        )
+        # The legacy three-button dialog, whose "Add a note" never mounts a
+        # textarea: the upsell took its place.
+        dialog = _FakeInviteDialog(buttons=3, note_field="none")
 
         with (
+            dialog.installed(actions),
             patch.object(
                 actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            ),
+            patch.object(
+                actions,
+                "_wait_for_invite_note_field",
+                new_callable=AsyncMock,
+                return_value=False,
             ),
             patch.object(
                 actions,
@@ -950,7 +1059,8 @@ class TestInviteDialog:
             result = await actions._submit_invite_dialog("Hello")
 
         assert result == (False, False, PREMIUM_MESSAGE)
-        add_note_button.click.assert_awaited_once()
+        # "Add a note" only: the secondary, never the primary.
+        assert dialog.clicks == [1]
         mock_message.assert_awaited_once()
         mock_dismiss.assert_awaited_once()
 
@@ -976,24 +1086,26 @@ class TestInviteDialog:
         open lets it pass.
         """
         actions = _actions(mock_page)
-        textarea = MagicMock()
-        textarea.count = AsyncMock(return_value=0)
-        add_note_button = MagicMock()
-        add_note_button.click = AsyncMock(return_value=None)
-        buttons = MagicMock()
-        buttons.count = AsyncMock(return_value=2)
-        buttons.nth.return_value = add_note_button
 
-        def locator_for(selector: str):
-            return textarea if "textarea" in selector else buttons
+        def mount_textarea(dialog: _FakeInviteDialog) -> None:
+            dialog.note_field = "visible"
 
-        mock_page.locator.side_effect = locator_for
-        # Textarea mounts successfully, and afterwards the dialog closes on
-        # schedule after Send — both are plain "did not time out" waits, and
-        # the Premium banner is present in the DOM throughout regardless.
+        # The gating dialog: "Add a note" (index 0) mounts the textarea.
+        dialog = _FakeInviteDialog(
+            buttons=2, note_field="none", on_click={0: mount_textarea}
+        )
+        # The dialog closes on schedule after Send — a plain "did not time
+        # out" wait, and the Premium banner is present in the DOM throughout
+        # regardless.
         mock_page.wait_for_selector = AsyncMock(return_value=None)
 
+        async def fill(note: str) -> bool:
+            dialog.note_value = note
+            return True
+
         with (
+            dialog.installed(actions),
+            patch("linkedin_mcp_server.scraping.connection_actions.asyncio.sleep"),
             patch.object(
                 actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
@@ -1001,7 +1113,7 @@ class TestInviteDialog:
                 actions,
                 "_fill_dialog_textarea",
                 new_callable=AsyncMock,
-                return_value=True,
+                side_effect=fill,
             ) as mock_fill,
             patch.object(
                 actions,
@@ -1032,7 +1144,7 @@ class TestInviteDialog:
 
     @pytest.mark.parametrize(
         "recount",
-        [1, RuntimeError("count failed")],
+        [_state("visible"), None],
         ids=["textarea-mounted", "recount-failed"],
     )
     async def test_failed_fill_beside_a_mounted_textarea_is_not_a_note_limit(
@@ -1047,11 +1159,16 @@ class TestInviteDialog:
         absence, so it reports no quota either.
         """
         actions = _actions(mock_page)
-        textarea = MagicMock()
-        textarea.count = AsyncMock(side_effect=[1, recount])
-        mock_page.locator.return_value = textarea
 
         with (
+            # Mounted when the dialog opens; the recount after the failed
+            # fill either still sees it or cannot be read at all.
+            patch.object(
+                actions,
+                "_invite_dialog_state",
+                new_callable=AsyncMock,
+                side_effect=[_state("visible"), recount],
+            ),
             patch.object(
                 actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
@@ -1083,12 +1200,15 @@ class TestInviteDialog:
     async def test_failed_fill_after_the_upsell_replaced_the_textarea(self, mock_page):
         """The upsell taking the textarea's place is still a note limit."""
         actions = _actions(mock_page)
-        textarea = MagicMock()
-        # Mounted when the dialog opens, gone once the fill has failed.
-        textarea.count = AsyncMock(side_effect=[1, 0])
-        mock_page.locator.return_value = textarea
 
         with (
+            # Mounted when the dialog opens, gone once the fill has failed.
+            patch.object(
+                actions,
+                "_invite_dialog_state",
+                new_callable=AsyncMock,
+                side_effect=[_state("visible"), _state("none")],
+            ),
             patch.object(
                 actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
@@ -1118,17 +1238,14 @@ class TestInviteDialog:
     ):
         """A textarea the upsell left mounted but hidden is no note field."""
         actions = _actions(mock_page)
-        mounted = MagicMock()
-        mounted.count = AsyncMock(return_value=1)
-        shown = MagicMock()
-        shown.count = AsyncMock(return_value=0)
-
-        def locator_for(selector: str):
-            return shown if "visible" in selector else mounted
-
-        mock_page.locator.side_effect = locator_for
 
         with (
+            patch.object(
+                actions,
+                "_invite_dialog_state",
+                new_callable=AsyncMock,
+                return_value=_state("hidden"),
+            ),
             patch.object(
                 actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
@@ -1164,27 +1281,15 @@ class TestInviteDialog:
 
         # Textarea already exposed so the reveal/fill branch succeeds and the
         # test focuses on the post-submit failure path.
-        textarea = MagicMock()
-        textarea.count = AsyncMock(return_value=1)
-        textarea.first = textarea
-        textarea.fill = AsyncMock()
-
-        buttons = MagicMock()
-        buttons.count = AsyncMock(return_value=2)
-        primary_button = MagicMock()
-        primary_button.focus = AsyncMock()
-        buttons.nth.return_value = primary_button
-
-        def locator_for(selector: str):
-            return textarea if "textarea" in selector else buttons
-
-        mock_page.locator.side_effect = locator_for
+        dialog = _FakeInviteDialog(buttons=2, note_field="visible")
+        dialog.note_value = "Hello"
         mock_page.keyboard = MagicMock()
         mock_page.keyboard.press = AsyncMock()
 
         message = "You're out of free custom notes. Bypass the limit with Premium..."
 
         with (
+            dialog.installed(actions),
             patch.object(
                 actions,
                 "_dialog_is_open",
@@ -1236,11 +1341,8 @@ class TestInviteDialog:
         """
         actions = _actions(mock_page)
 
-        textarea = MagicMock()
-        textarea.count = AsyncMock(return_value=1)
-        textarea.first = textarea
-        textarea.fill = AsyncMock()
-        mock_page.locator.return_value = textarea
+        dialog = _FakeInviteDialog(buttons=2, note_field="visible")
+        dialog.note_value = "Hello"
         # The close-wait times out: the upsell modal that replaced the
         # invite dialog still matches _DIALOG_SELECTOR, so it never becomes
         # "hidden".
@@ -1249,6 +1351,7 @@ class TestInviteDialog:
         )
 
         with (
+            dialog.installed(actions),
             patch.object(
                 actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
@@ -1294,31 +1397,12 @@ class TestInviteDialog:
         through ``connect_with_person`` replaces it wholesale.
         """
         actions = _actions(mock_page)
-        clicks: list[int] = []
-
-        def button_at(index: int):
-            button = MagicMock()
-
-            async def click(*_args, **_kwargs):
-                clicks.append(index)
-
-            button.click = AsyncMock(side_effect=click)
-            return button
-
         # The legacy three-button invite dialog: dismiss, "Add a note", Send.
-        buttons = MagicMock()
-        buttons.count = AsyncMock(return_value=3)
-        buttons.nth = MagicMock(side_effect=button_at)
-        textarea = MagicMock()
-        textarea.count = AsyncMock(return_value=0)
-
-        def locator_for(selector: str):
-            return textarea if "textarea" in selector else buttons
-
-        mock_page.locator.side_effect = locator_for
-        mock_page.wait_for_selector = AsyncMock()
+        dialog = _FakeInviteDialog(buttons=3, note_field="none")
 
         with (
+            dialog.installed(actions),
+            patch("linkedin_mcp_server.scraping.connection_actions.asyncio.sleep"),
             patch.object(
                 actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
@@ -1336,7 +1420,7 @@ class TestInviteDialog:
             message = await actions._probe_invite_note_limit()
 
         assert message == PREMIUM_MESSAGE
-        assert clicks == [1]
+        assert dialog.clicks == [1]
         mock_dismiss.assert_awaited_once()
 
     async def test_handles_two_button_gating_dialog(self, mock_page):
@@ -1348,54 +1432,22 @@ class TestInviteDialog:
         the click, leaving the textarea unmounted)."""
         actions = _actions(mock_page)
 
-        # Track each button click so we can assert the "Add a note" path
-        # was taken to reveal the textarea.
-        clicks: list[int] = []
+        def mount_textarea(dialog: _FakeInviteDialog) -> None:
+            dialog.note_field = "visible"
 
-        textarea_visible = {"value": False}
-
-        # Two button locators inside the gating dialog: nth(0) "Add a
-        # note" reveals the textarea, nth(1) "Send without a note".
-        button_locators = [MagicMock(), MagicMock()]
-        for idx, btn in enumerate(button_locators):
-
-            def make_click(i: int):
-                async def _click(*args, **kwargs):
-                    clicks.append(i)
-                    if i == 0:
-                        textarea_visible["value"] = True
-                    return None
-
-                return _click
-
-            btn.click = AsyncMock(side_effect=make_click(idx))
-            btn.focus = AsyncMock()
-
-        button_collection = MagicMock()
-        button_collection.count = AsyncMock(return_value=2)
-        button_collection.nth = MagicMock(side_effect=lambda i: button_locators[i])
-
-        textarea_locator = MagicMock()
-        textarea_locator.count = AsyncMock(
-            side_effect=lambda: 1 if textarea_visible["value"] else 0
+        # Two buttons inside the gating dialog: index 0 "Add a note"
+        # reveals the textarea, index 1 "Send without a note". Clicks are
+        # recorded by index so the "Add a note" path is visible.
+        dialog = _FakeInviteDialog(
+            buttons=2, note_field="none", on_click={0: mount_textarea}
         )
-        textarea_locator.first = textarea_locator
-        textarea_locator.fill = AsyncMock()
-
-        # Route page.locator() calls by selector — buttons vs textarea —
-        # so the gating dialog's button collection is distinguishable
-        # from the textarea probe.
-        def locator_router(selector: str):
-            if "textarea" in selector:
-                return textarea_locator
-            return button_collection
-
-        mock_page.locator = MagicMock(side_effect=locator_router)
         mock_page.wait_for_selector = AsyncMock()
         mock_page.keyboard = MagicMock()
         mock_page.keyboard.press = AsyncMock()
 
         with (
+            dialog.installed(actions),
+            patch("linkedin_mcp_server.scraping.connection_actions.asyncio.sleep"),
             patch.object(
                 actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
             ),
@@ -1417,8 +1469,319 @@ class TestInviteDialog:
         assert note_limit_message is None
         # Clicked "Add a note" (index 0) to reveal the textarea, then the
         # primary button (index 1) to send.
-        assert clicks == [0, 1]
-        textarea_locator.fill.assert_awaited_once()
+        assert dialog.clicks == [0, 1]
+        assert dialog.fills == ["Hi from a test"]
+
+
+_SLEEP = "linkedin_mcp_server.scraping.connection_actions.asyncio.sleep"
+
+
+@contextmanager
+def _submitting(actions: ConnectionActions, dialog: _FakeInviteDialog):
+    """Drive ``_submit_invite_dialog`` over the fake: open at once, the close
+    after Send on schedule, and the dismissal recorded."""
+    with ExitStack() as stack:
+        stack.enter_context(dialog.installed(actions))
+        stack.enter_context(patch(_SLEEP))
+        stack.enter_context(
+            patch.object(
+                actions, "_dialog_is_open", new_callable=AsyncMock, return_value=True
+            )
+        )
+        stack.enter_context(
+            patch.object(
+                actions,
+                "_get_premium_upsell_message",
+                new_callable=AsyncMock,
+                return_value=None,
+            )
+        )
+        dismiss = stack.enter_context(
+            patch.object(actions, "_dismiss_dialog", new_callable=AsyncMock)
+        )
+        yield dismiss
+
+
+class TestInviteRefusals:
+    """What the one invite dialog can refuse before anything is submitted."""
+
+    async def test_send_disabled_over_an_empty_note_field_is_note_required(
+        self, mock_page
+    ):
+        """Upstream #407: the profile only takes an invitation with a note."""
+        actions = _actions(mock_page)
+        dialog = _FakeInviteDialog(
+            buttons=2, note_field="visible", primary_disabled=True
+        )
+
+        with _submitting(actions, dialog) as dismiss:
+            with pytest.raises(InviteNotSent) as refused:
+                await actions._submit_invite_dialog(None)
+
+        assert refused.value.status == "note_required"
+        assert dialog.clicks == []
+        dismiss.assert_awaited_once()
+        # The whole settle window was read, not a first glance.
+        assert dialog.reads >= 7
+
+    async def test_a_send_that_enables_inside_the_window_is_clicked(self, mock_page):
+        """Disabled only while the dialog hydrates is not a request for a note."""
+        actions = _actions(mock_page)
+        mock_page.wait_for_selector = AsyncMock()
+        dialog = _FakeInviteDialog(
+            buttons=2,
+            note_field="visible",
+            primary_disabled=True,
+            enabled_after_reads=4,
+        )
+
+        with _submitting(actions, dialog):
+            result = await actions._submit_invite_dialog(None)
+
+        assert result == (True, False, None)
+        assert dialog.clicks == [1]
+
+    @pytest.mark.parametrize("note_field", ["none", "hidden"])
+    async def test_a_disabled_send_without_a_shown_note_field_is_not_note_required(
+        self, mock_page, note_field
+    ):
+        """Some other gate; the click path (which waits for Send) is kept."""
+        actions = _actions(mock_page)
+        mock_page.wait_for_selector = AsyncMock()
+        dialog = _FakeInviteDialog(
+            buttons=3, note_field=note_field, primary_disabled=True
+        )
+
+        with _submitting(actions, dialog):
+            await actions._submit_invite_dialog(None)
+
+        assert ("button", 0) in dialog.lookups
+        assert dialog.clicks == [2]
+
+    async def test_a_note_the_field_cut_is_not_sent(self, mock_page):
+        """A 250-character note in a 200-character field, measured live: the
+        field keeps 200 without a sound, and Send would deliver them."""
+        actions = _actions(mock_page)
+        dialog = _FakeInviteDialog(buttons=2, note_field="visible", max_length=200)
+
+        with _submitting(actions, dialog) as dismiss:
+            with pytest.raises(InviteNotSent) as refused:
+                await actions._submit_invite_dialog("x" * 250)
+
+        assert refused.value.status == "note_too_long"
+        assert refused.value.note_limit == 200
+        assert "250" in refused.value.message
+        assert dialog.fills == ["x" * 250]
+        assert dialog.clicks == []
+        dismiss.assert_awaited_once()
+
+    async def test_a_cut_without_maxlength_reports_what_was_kept(self, mock_page):
+        """A field that trims in script says its limit only by what it kept."""
+        actions = _actions(mock_page)
+        dialog = _FakeInviteDialog(buttons=2, note_field="visible", keeps=200)
+
+        with _submitting(actions, dialog):
+            with pytest.raises(InviteNotSent) as refused:
+                await actions._submit_invite_dialog("y" * 230)
+
+        assert refused.value.status == "note_too_long"
+        assert refused.value.note_limit == 200
+        assert dialog.clicks == []
+
+    async def test_a_note_at_the_limit_is_sent_whole(self, mock_page):
+        actions = _actions(mock_page)
+        mock_page.wait_for_selector = AsyncMock()
+        dialog = _FakeInviteDialog(buttons=2, note_field="visible", max_length=200)
+
+        with _submitting(actions, dialog):
+            result = await actions._submit_invite_dialog("z" * 200)
+
+        assert result == (True, True, None)
+        assert dialog.clicks == [1]
+
+    async def test_line_endings_the_field_stores_as_lf_are_the_same_note(
+        self, mock_page
+    ):
+        actions = _actions(mock_page)
+        mock_page.wait_for_selector = AsyncMock()
+        dialog = _FakeInviteDialog(buttons=2, note_field="visible")
+
+        with _submitting(actions, dialog):
+            result = await actions._submit_invite_dialog("Hi Ada,\r\nlet's talk.")
+
+        assert result == (True, True, None)
+        assert dialog.clicks == [1]
+
+    @pytest.mark.parametrize(
+        "kept",
+        [_state("visible", value="something else"), None, _state(dialogs=0)],
+        ids=["different-text", "unreadable", "dialog-gone"],
+    )
+    async def test_a_note_that_cannot_be_confirmed_is_not_sent(self, mock_page, kept):
+        """The field holds text that is not the note, or cannot be read back."""
+        actions = _actions(mock_page)
+
+        with (
+            _submitting(actions, _FakeInviteDialog()) as dismiss,
+            patch.object(
+                actions,
+                "_invite_dialog_state",
+                new_callable=AsyncMock,
+                side_effect=[_state("visible"), kept],
+            ),
+            patch.object(
+                actions,
+                "_fill_dialog_textarea",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                actions, "_click_dialog_primary_button", new_callable=AsyncMock
+            ) as mock_send,
+        ):
+            with pytest.raises(InviteNotSent) as refused:
+                await actions._submit_invite_dialog("Hello there")
+
+        assert refused.value.status == "connect_unavailable"
+        assert refused.value.note_limit is None
+        mock_send.assert_not_awaited()
+        dismiss.assert_awaited_once()
+
+    @pytest.mark.parametrize("note", [None, "Hello"], ids=["no-note", "note"])
+    async def test_two_open_dialogs_are_not_guessed_between(self, mock_page, note):
+        actions = _actions(mock_page)
+        dialog = _FakeInviteDialog(dialogs=2, note_field="visible")
+
+        with _submitting(actions, dialog) as dismiss:
+            with pytest.raises(InviteNotSent) as refused:
+                await actions._submit_invite_dialog(note)
+
+        assert refused.value.status == "connect_unavailable"
+        assert "More than one dialog" in refused.value.message
+        assert dialog.lookups == []
+        assert dialog.fills == []
+        dismiss.assert_awaited_once()
+
+    async def test_a_second_dialog_that_closes_in_the_settle_is_waited_out(
+        self, mock_page
+    ):
+        actions = _actions(mock_page)
+        mock_page.wait_for_selector = AsyncMock()
+        dialog = _FakeInviteDialog(buttons=2)
+        reads = [_state(dialogs=2), _state("none", buttons=2)]
+
+        async def settling() -> _InviteDialogState:
+            return reads.pop(0) if reads else await dialog.state()
+
+        with (
+            _submitting(actions, dialog),
+            patch.object(actions, "_invite_dialog_state", new=settling),
+        ):
+            result = await actions._submit_invite_dialog(None)
+
+        assert result == (True, False, None)
+        assert dialog.clicks == [1]
+
+    async def test_the_quota_probe_touches_nothing_beside_a_second_dialog(
+        self, mock_page
+    ):
+        actions = _actions(mock_page)
+        dialog = _FakeInviteDialog(dialogs=2)
+
+        with _submitting(actions, dialog) as dismiss:
+            message = await actions._probe_invite_note_limit()
+
+        assert message is None
+        assert dialog.clicks == []
+        dismiss.assert_awaited_once()
+
+
+class TestInviteRefusalStatuses:
+    """How ``connect_with_person`` reports what the dialog refused."""
+
+    _TEXT = "Jane\n\n· 3rd\n\nEngineer\n\nConnect\nMore\nAbout\n"
+
+    @pytest.mark.parametrize(
+        ("refusal", "note"),
+        [
+            (InviteNotSent("note_required", "needs a note"), None),
+            (InviteNotSent("note_too_long", "too long", note_limit=200), "x" * 250),
+        ],
+        ids=["note-required", "note-too-long"],
+    )
+    async def test_a_refusal_is_the_status_and_nothing_is_verified(
+        self, mock_page, refusal, note
+    ):
+        # One read: a refusal is final, so no verification re-read follows.
+        read = _reads(self._TEXT)
+        actions = _actions(mock_page, read)
+
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=_signals(invite=True),
+            ),
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(
+                actions,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                side_effect=refusal,
+            ),
+        ):
+            result = await actions.connect_with_person("testuser", note=note)
+
+        assert result["status"] == refusal.status
+        assert result["message"] == refusal.message
+        assert result["note_sent"] is False
+        assert result.get("note_limit") == refusal.note_limit
+        assert result["profile"] == self._TEXT
+        read.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        "note",
+        [
+            "x" * (MAX_INVITE_NOTE_LENGTH + 1),
+            # An emoji is two UTF-16 code units, which is what maxlength counts.
+            "\U0001f600" * (MAX_INVITE_NOTE_LENGTH // 2 + 1),
+        ],
+        ids=["ascii", "emoji"],
+    )
+    async def test_a_note_no_account_could_send_opens_no_page(self, mock_page, note):
+        # The default read refuses to be called.
+        actions = _actions(mock_page)
+
+        with patch.object(
+            PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+        ) as mock_nav:
+            result = await actions.connect_with_person("testuser", note=note)
+
+        assert result["status"] == "note_too_long"
+        assert result["note_sent"] is False
+        assert str(MAX_INVITE_NOTE_LENGTH) in result["message"]
+        mock_nav.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "note",
+        [
+            "x" * MAX_INVITE_NOTE_LENGTH,
+            "\U0001f600" * (MAX_INVITE_NOTE_LENGTH // 2),
+            # 450 Python characters, 300 once the field stores CR LF as LF.
+            "a\r\n" * (MAX_INVITE_NOTE_LENGTH // 2),
+        ],
+        ids=["ascii", "emoji", "crlf"],
+    )
+    async def test_a_note_at_the_ceiling_reaches_the_profile(self, mock_page, note):
+        read = _reads("")
+        actions = _actions(mock_page, read)
+
+        result = await actions.connect_with_person("testuser", note=note)
+
+        # The empty read is what stopped it, so the length check let it by.
+        assert result["status"] == "unavailable"
+        read.assert_awaited_once()
 
 
 _PENDING_TEXT = "Frank\n\n· 3rd\n\nFounder\n\nMessage\nPending\nMore\n"

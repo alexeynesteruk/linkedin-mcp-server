@@ -24,12 +24,14 @@ primary button.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote_plus
 
 import asyncio
 import logging
 
+from patchright.async_api import ElementHandle, JSHandle
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 import linkedin_mcp_server.scraping.connection as connection
@@ -52,7 +54,26 @@ _DIALOG_SELECTOR = f'dialog[open]{_NOT_MESSAGING}, [role="dialog"]{_NOT_MESSAGIN
 _DIALOG_PREMIUM_LINK_SELECTOR = (
     'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
 )
-_DIALOG_TEXTAREA_SELECTOR = '[role="dialog"] textarea, dialog textarea'
+# Every visible non-messaging dialog. A wait for this to be hidden ends only
+# once none is left: without the filter the wait judges the first match alone,
+# and a hidden preloaded dialog earlier in the document answered "closed" at
+# once (measured in Chromium) while the invite, or the upsell that replaced
+# it, was still on screen.
+_VISIBLE_DIALOG_SELECTOR = f"{_DIALOG_SELECTOR} >> visible=true"
+
+# The longest note any account can send: LinkedIn takes 300 characters with
+# Premium and 200 without. Which of the two applies is only known once the
+# invite dialog is open (its note field's maxlength, or what the field kept),
+# so the read-back after the fill is the guard and this only refuses early a
+# note no account could send. Counted in UTF-16 code units, as Chromium counts
+# maxlength: measured 2026-09-30, an emoji takes two of them and a CR LF pair
+# is stored as one LF.
+MAX_INVITE_NOTE_LENGTH = 300
+
+# How long the invite dialog's primary must stay disabled over an empty note
+# field, with no note to give, before the call reads it as asking for one.
+NOTE_REQUIRED_SETTLE_SECONDS = 1.5
+_INVITE_POLL_SECONDS = 0.25
 
 # Shared JS function that walks up from any /messaging/compose/ anchor
 # inside <main> to find the smallest ancestor that satisfies the
@@ -395,8 +416,187 @@ CLICK_CONFIRM_DIALOG_PRIMARY_JS = (
 """
 )
 
+# The ONE open invite dialog, which everything that reads, fills or clicks the
+# invite goes through. Visible and never a messaging overlay, by the same tests
+# as ``findConfirmDialog``, and a dialog inside another one is that one. Unlike
+# the confirmation, native dialog[open] and [role="dialog"] count together and
+# neither is preferred: the submit clicks by position, and it is the one write
+# here whose result reaches a member, so a second open dialog is a refusal
+# rather than a tie to break.
+#
+# Page-wide picks reached past the invite. Measured in Chromium on upstream
+# v4.26.1: a hidden preloaded [role=dialog] holding a textarea took the note
+# fill, and one after the invite gave the page its last, disabled button, so
+# both calls ended connect_unavailable for a dialog that was fine. A native
+# <dialog open> without a role had no button under the old selector list,
+# whose first entry then matched the dialog itself as the last "button": the
+# click landed on the container and the call reported a submit that sent
+# nothing.
+#
+# The note field is the dialog's first visible textarea, else its first one:
+# a hidden one is still a field the upsell left behind, which the quota
+# checks below rely on telling apart from a missing one.
+_FIND_INVITE_DIALOG_FN_JS = r"""
+function isShown(el) {
+  return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) &&
+    getComputedStyle(el).visibility !== 'hidden';
+}
+function openInviteDialogs() {
+  const found = [...document.querySelectorAll('dialog[open], [role="dialog"]')]
+    .filter(el => isShown(el) && !el.querySelector('[contenteditable="true"]'));
+  return found.filter(el => !found.some(other => other !== el && other.contains(el)));
+}
+function inviteButtons(dialog) {
+  return [...dialog.querySelectorAll('button, [role="button"]')];
+}
+function inviteNoteField(dialog) {
+  const fields = [...dialog.querySelectorAll('textarea')];
+  return fields.find(isShown) || fields[0] || null;
+}
+"""
+
+# One read of the invite dialog. The primary is its last button, the
+# convention every LinkedIn dialog here follows. Disabled is the property or
+# ``aria-disabled="true"``, an attribute value and no label.
+INVITE_DIALOG_STATE_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_INVITE_DIALOG_FN_JS
+    + r"""
+  const dialogs = openInviteDialogs();
+  if (dialogs.length !== 1) return {inviteDialogs: dialogs.length};
+  const buttons = inviteButtons(dialogs[0]);
+  const primary = buttons[buttons.length - 1];
+  const note = inviteNoteField(dialogs[0]);
+  return {
+    inviteDialogs: 1,
+    buttons: buttons.length,
+    primaryDisabled: !!primary &&
+      (primary.disabled === true || primary.getAttribute('aria-disabled') === 'true'),
+    noteField: note ? (isShown(note) ? 'visible' : 'hidden') : 'none',
+    noteValue: note ? note.value : '',
+    noteMaxLength: note && note.maxLength > 0 ? note.maxLength : null,
+  };
+})
+"""
+)
+
+# The element an action targets, resolved in the same call that finds the
+# dialog: its note field, or the button ``fromEnd`` places before its last.
+# Null unless exactly one dialog is open. The click and fill themselves go
+# through Playwright on the returned handle, so they are real input with
+# actionability checks rather than a scripted ``click()``.
+INVITE_DIALOG_ELEMENT_JS = (
+    r"""
+((target) => {
+"""
+    + _FIND_INVITE_DIALOG_FN_JS
+    + r"""
+  const dialogs = openInviteDialogs();
+  if (dialogs.length !== 1) return null;
+  if (target.part === 'note') return inviteNoteField(dialogs[0]);
+  const buttons = inviteButtons(dialogs[0]);
+  const index = buttons.length - 1 - target.fromEnd;
+  return index >= 0 ? buttons[index] : null;
+})
+"""
+)
+
 # Pause between reads of a withdrawal LinkedIn propagates asynchronously.
 WITHDRAW_SETTLE_SECONDS = 3.0
+
+
+class InviteNotSent(Exception):
+    """The invite dialog showed the invitation cannot go out as asked.
+
+    Raised by ``_submit_invite_dialog`` before anything was submitted, after
+    it dismissed the dialog. ``status`` and ``message`` are what
+    ``connect_with_person`` returns; ``note_limit`` is the note length the
+    dialog's field takes, when it said.
+    """
+
+    def __init__(self, status: str, message: str, *, note_limit: int | None = None):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+        self.note_limit = note_limit
+
+
+@dataclass(frozen=True)
+class _InviteDialogState:
+    """One read of ``INVITE_DIALOG_STATE_JS``.
+
+    Every field after ``dialogs`` describes the one open dialog and keeps its
+    default unless exactly one was open.
+    """
+
+    dialogs: int
+    buttons: int = 0
+    primary_disabled: bool = False
+    note_field: str = "none"
+    note_value: str = ""
+    note_max_length: int | None = None
+
+    @property
+    def single(self) -> bool:
+        return self.dialogs == 1
+
+
+def _stored_note(note: str) -> str:
+    """The note as a textarea stores it: CR LF and a lone CR become LF."""
+    return note.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _note_length(note: str) -> int:
+    """Length in UTF-16 code units, the unit maxlength counts in Chromium."""
+    return len(_stored_note(note).encode("utf-16-le")) // 2
+
+
+def _note_kept(note: str, kept: str) -> bool:
+    """Whether the field holds the note as given.
+
+    Whitespace at either end carries nothing a member reads, so a field that
+    trimmed it still holds the note.
+    """
+    return kept.strip() == _stored_note(note).strip()
+
+
+def _note_refusal(note: str, state: _InviteDialogState | None) -> InviteNotSent:
+    """Why a filled note field that does not hold the note stops the send."""
+    if state is None or not state.single:
+        return InviteNotSent(
+            "connect_unavailable",
+            "The note field could not be read back after the note was typed, "
+            "so the invitation was not sent.",
+        )
+    length = _note_length(note)
+    limit = state.note_max_length
+    if limit is None or length <= limit:
+        kept = state.note_value
+        limit = (
+            _note_length(kept) if kept and _stored_note(note).startswith(kept) else None
+        )
+    if limit is None:
+        return InviteNotSent(
+            "connect_unavailable",
+            "LinkedIn's note field did not keep the note as written, so the "
+            "invitation was not sent.",
+        )
+    return InviteNotSent(
+        "note_too_long",
+        f"The note is {length} characters and LinkedIn's note field takes "
+        f"{limit} for this account, so the invitation was not sent. Shorten "
+        f"the note to at most {limit} characters and call again.",
+        note_limit=limit,
+    )
+
+
+async def _release(handle: JSHandle) -> None:
+    try:
+        await handle.dispose()
+    except Exception:
+        logger.debug("Could not release an invite dialog handle", exc_info=True)
 
 
 def _withdraw_result(
@@ -431,6 +631,7 @@ def _connection_result(
     message: str,
     *,
     note_sent: bool = False,
+    note_limit: int | None = None,
     profile: str = "",
 ) -> dict[str, Any]:
     """Build a structured response for a profile connection attempt."""
@@ -440,6 +641,8 @@ def _connection_result(
         "message": message,
         "note_sent": note_sent,
     }
+    if note_limit is not None:
+        result["note_limit"] = note_limit
     if profile:
         result["profile"] = profile
     return result
@@ -484,37 +687,176 @@ class ConnectionActions:
         except Exception:
             return False
 
+    async def _invite_dialog_state(self) -> _InviteDialogState | None:
+        """Read the one open invite dialog; None when the read proves nothing."""
+        try:
+            data = await self._session.page.evaluate(INVITE_DIALOG_STATE_JS)
+        except Exception:
+            logger.debug("Invite dialog read failed", exc_info=True)
+            return None
+        if not isinstance(data, dict):
+            return None
+        dialogs = data.get("inviteDialogs")
+        if not isinstance(dialogs, int) or isinstance(dialogs, bool):
+            return None
+        if dialogs != 1:
+            return _InviteDialogState(dialogs=dialogs)
+        buttons = data.get("buttons")
+        note_field = data.get("noteField")
+        note_value = data.get("noteValue")
+        max_length = data.get("noteMaxLength")
+        return _InviteDialogState(
+            dialogs=1,
+            buttons=buttons if isinstance(buttons, int) else 0,
+            primary_disabled=data.get("primaryDisabled") is True,
+            note_field=note_field if note_field in ("visible", "hidden") else "none",
+            note_value=note_value if isinstance(note_value, str) else "",
+            note_max_length=(
+                max_length
+                if isinstance(max_length, int)
+                and not isinstance(max_length, bool)
+                and max_length > 0
+                else None
+            ),
+        )
+
+    async def _settled_invite_dialog(
+        self, *, timeout: float = 1.0
+    ) -> _InviteDialogState | None:
+        """Read the invite dialog, giving a second open one a moment to go.
+
+        A read that proves nothing, or exactly one dialog, answers at once.
+        """
+        attempts = int(timeout / _INVITE_POLL_SECONDS) + 1
+        state = None
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(_INVITE_POLL_SECONDS)
+            state = await self._invite_dialog_state()
+            if state is None or state.dialogs <= 1:
+                return state
+        return state
+
+    async def _invite_dialog_element(
+        self, part: str, *, from_end: int = 0
+    ) -> ElementHandle | None:
+        """Resolve the one invite dialog's note field or a button in it.
+
+        ``from_end`` counts buttons back from the last one, the primary.
+        None unless exactly one dialog is open; the caller releases the
+        handle.
+        """
+        try:
+            handle = await self._session.page.evaluate_handle(
+                INVITE_DIALOG_ELEMENT_JS, {"part": part, "fromEnd": from_end}
+            )
+        except Exception:
+            logger.debug("Invite dialog element lookup failed", exc_info=True)
+            return None
+        element = handle.as_element()
+        if element is None:
+            await _release(handle)
+        return element
+
+    async def _click_invite_dialog_button(
+        self, from_end: int, *, timeout: int = 5000
+    ) -> bool:
+        """Click a button of the one invite dialog, counted back from its last.
+
+        0 is the primary and 1 the secondary beside it. Returns False rather
+        than raising when no single dialog is open, or when the click is
+        intercepted or times out (a disabled button is never clicked: the
+        click waits for it to be enabled).
+        """
+        button = await self._invite_dialog_element("button", from_end=from_end)
+        if button is None:
+            return False
+        try:
+            await button.click(timeout=timeout)
+            return True
+        except Exception:
+            logger.debug("Invite dialog button click failed", exc_info=True)
+            return False
+        finally:
+            await _release(button)
+
     async def _click_dialog_primary_button(self, *, timeout: int = 5000) -> bool:
-        """Click the last (primary/Send) button in the open dialog.
+        """Click the last (primary/Send) button of the one invite dialog.
 
         LinkedIn consistently places the primary action as the last button.
         Returns False (rather than raising) when the click is intercepted or
         times out, so callers can fall back to a keyboard submit.
         """
-        buttons = self._session.page.locator(
-            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-        )
-        count = await buttons.count()
-        if count == 0:
+        return await self._click_invite_dialog_button(0, timeout=timeout)
+
+    async def _press_enter_on_primary(self) -> bool:
+        """Keyboard fallback: focus the primary, press Enter, see the dialog go.
+
+        Focus first, so Enter reaches the button rather than the note field,
+        where it would only insert a newline.
+        """
+        button = await self._invite_dialog_element("button", from_end=0)
+        if button is None:
             return False
         try:
-            await buttons.nth(count - 1).click(timeout=timeout)
-            return True
+            await button.focus()
+            await self._session.page.keyboard.press("Enter")
         except Exception:
-            logger.debug("Primary dialog button click failed", exc_info=True)
+            logger.debug("Keyboard submit fallback failed", exc_info=True)
             return False
+        finally:
+            await _release(button)
+        return not await self._dialog_is_open(timeout=2000)
 
     async def _fill_dialog_textarea(self, value: str, *, timeout: int = 5000) -> bool:
-        """Fill the first textarea inside the open dialog (structural)."""
-        locator = self._session.page.locator(_DIALOG_TEXTAREA_SELECTOR).first
+        """Fill the note field of the one invite dialog (structural)."""
+        field = await self._invite_dialog_element("note")
+        if field is None:
+            return False
         try:
-            if await self._session.page.locator(_DIALOG_TEXTAREA_SELECTOR).count() == 0:
-                return False
-            await locator.fill(value, timeout=timeout)
+            await field.fill(value, timeout=timeout)
             return True
         except Exception:
             logger.debug("Invite note fill failed", exc_info=True)
             return False
+        finally:
+            await _release(field)
+
+    async def _wait_for_invite_note_field(self, *, timeout: float = 3.0) -> bool:
+        """Wait for the one invite dialog to show a note field."""
+        attempts = int(timeout / _INVITE_POLL_SECONDS) + 1
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(_INVITE_POLL_SECONDS)
+            state = await self._invite_dialog_state()
+            if state is not None and state.single and state.note_field == "visible":
+                return True
+        return False
+
+    async def _send_waits_for_a_note(self) -> bool:
+        """Whether the invite's Send stays disabled over an empty note field.
+
+        That is how a profile that only takes an invitation with a note shows
+        it (upstream issue #407): the dialog opens with its note field, and
+        Send stays disabled until something is typed. Every read over
+        ``NOTE_REQUIRED_SETTLE_SECONDS`` has to show one dialog with its
+        primary disabled, so a Send that is only disabled while the dialog
+        hydrates is clicked as before. A disabled Send without an empty,
+        visible note field is some other gate and is not claimed as this one.
+        """
+        attempts = int(NOTE_REQUIRED_SETTLE_SECONDS / _INVITE_POLL_SECONDS) + 1
+        state = None
+        for attempt in range(attempts):
+            if attempt:
+                await asyncio.sleep(_INVITE_POLL_SECONDS)
+            state = await self._invite_dialog_state()
+            if state is None or not state.single or not state.primary_disabled:
+                return False
+        return (
+            state is not None
+            and state.note_field == "visible"
+            and not state.note_value.strip()
+        )
 
     async def _dismiss_dialog(self) -> None:
         """Dismiss any open dialog via Escape key (structural)."""
@@ -686,19 +1028,35 @@ class ConnectionActions:
         the upsell was detected; in that case ``submitted`` is False, the
         dialog is dismissed, and callers should surface that text directly.
 
-        All interaction uses structural selectors and positional indexing
-        — no localized text matching. Owns dialog cleanup: the dialog is
-        dismissed on every failure path, callers must not dismiss again.
+        Raises ``InviteNotSent``, before anything is submitted, when the
+        dialog shows the invitation cannot go out as asked: more than one
+        dialog is open, the note field did not keep the note whole
+        (``note_too_long`` when it cut it), or, with no note, Send stays
+        disabled over an empty note field (``note_required``).
+
+        Every read, fill and click is scoped to the one open invite dialog
+        (``_FIND_INVITE_DIALOG_FN_JS``) and uses structural selectors and
+        positional indexing — no localized text matching. Owns dialog
+        cleanup: the dialog is dismissed on every failure path, callers must
+        not dismiss again.
         """
         if not await self._dialog_is_open(timeout=5000):
             return False, False, None
 
+        state = await self._settled_invite_dialog()
+        if state is not None and state.dialogs > 1:
+            logger.info("%d dialogs open on the invite page", state.dialogs)
+            await self._dismiss_dialog()
+            raise InviteNotSent(
+                "connect_unavailable",
+                "More than one dialog was open on the invite page and nothing "
+                "tells which one is the invitation, so nothing was clicked and "
+                "the invitation was not sent.",
+            )
+
         note_filled = False
         if note:
-            textarea_count = await self._session.page.locator(
-                _DIALOG_TEXTAREA_SELECTOR
-            ).count()
-            if textarea_count == 0:
+            if state is not None and state.single and state.note_field == "none":
                 # Reveal the note textarea via the secondary action.
                 # Two layouts are now in the wild and both place "Add a
                 # note" at index ``btn_count - 2``:
@@ -712,23 +1070,14 @@ class ConnectionActions:
                 # no-note layout, the click below misroutes to dismiss;
                 # the textarea-presence recheck via _fill_dialog_textarea
                 # then fails and the caller returns connect_unavailable
-                # without sending — the same outcome as today.
-                buttons = self._session.page.locator(
-                    f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-                )
-                btn_count = await buttons.count()
-                if btn_count >= 2:
-                    await buttons.nth(btn_count - 2).click()
-                    textarea_appeared = True
-                    try:
-                        await self._session.page.wait_for_selector(
-                            _DIALOG_TEXTAREA_SELECTOR,
-                            state="visible",
-                            timeout=3000,
-                        )
-                    except PlaywrightTimeoutError:
+                # without sending — the same outcome as today. The click
+                # resolves the dialog again, so it is never the primary of
+                # whatever dialog is open by then.
+                if state.buttons >= 2:
+                    await self._click_invite_dialog_button(1)
+                    textarea_appeared = await self._wait_for_invite_note_field()
+                    if not textarea_appeared:
                         logger.debug("Note textarea did not appear")
-                        textarea_appeared = False
                     # ponytail: LinkedIn now renders a persistent Premium
                     # nudge banner on this step even when quota is NOT
                     # exhausted (observed: "3 personalized invitations
@@ -751,18 +1100,14 @@ class ConnectionActions:
             if not note_filled:
                 # Same gate as the reveal step: the Premium nudge banner sits
                 # beside a live textarea, so a failed fill is a quota block
-                # only once no visible textarea is left. A count that fails
-                # proves no absence, so it claims no block either: a false
-                # block invites the caller to resend without the note.
-                try:
-                    textarea_visible = (
-                        await self._session.page.locator(
-                            f"{_DIALOG_TEXTAREA_SELECTOR} >> visible=true"
-                        ).count()
-                        > 0
-                    )
-                except Exception:
-                    textarea_visible = True
+                # only once no visible textarea is left. A read that fails,
+                # or that finds a second dialog, proves no absence, so it
+                # claims no block either: a false block invites the caller to
+                # resend without the note.
+                after = await self._invite_dialog_state()
+                textarea_visible = (
+                    after is None or after.dialogs > 1 or after.note_field == "visible"
+                )
                 if textarea_visible:
                     logger.info(
                         "Invite note fill failed without evidence of a quota block"
@@ -777,22 +1122,29 @@ class ConnectionActions:
                 await self._dismiss_dialog()
                 return False, False, None
 
+            # A field shorter than the note keeps its first ``maxlength``
+            # characters and drops the rest without a sound (measured: 250
+            # typed into LinkedIn's 200-character field left 200), and the
+            # member would receive the cut note. Read it back before Send.
+            kept = await self._invite_dialog_state()
+            if kept is None or not kept.single or not _note_kept(note, kept.note_value):
+                refusal = _note_refusal(note, kept)
+                logger.info("Invite note not kept whole: %s", refusal.status)
+                await self._dismiss_dialog()
+                raise refusal
+        elif await self._send_waits_for_a_note():
+            logger.info("Invite dialog keeps Send disabled until a note is typed")
+            await self._dismiss_dialog()
+            raise InviteNotSent(
+                "note_required",
+                "LinkedIn only takes an invitation with a note for this profile: "
+                "the invite dialog kept Send disabled while its note field was "
+                "empty. Nothing was sent; call again with a note.",
+            )
+
         sent = await self._click_dialog_primary_button()
         if not sent:
-            # Fallback: focus the primary button positionally so a subsequent
-            # Enter targets it instead of a focused textarea (where Enter
-            # would just insert a newline).
-            buttons = self._session.page.locator(
-                f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-            )
-            btn_count = await buttons.count()
-            if btn_count > 0:
-                try:
-                    await buttons.nth(btn_count - 1).focus()
-                    await self._session.page.keyboard.press("Enter")
-                    sent = not await self._dialog_is_open(timeout=2000)
-                except Exception:
-                    logger.debug("Keyboard submit fallback failed", exc_info=True)
+            sent = await self._press_enter_on_primary()
             if not sent:
                 # The Send click can also fail because LinkedIn swapped the
                 # invite dialog for the Premium upsell at submit time — the
@@ -815,7 +1167,7 @@ class ConnectionActions:
         dialog_closed = True
         try:
             await self._session.page.wait_for_selector(
-                _DIALOG_SELECTOR, state="hidden", timeout=5000
+                _VISIBLE_DIALOG_SELECTOR, state="hidden", timeout=5000
             )
         except PlaywrightTimeoutError:
             logger.debug("Invite dialog did not close after submit")
@@ -850,7 +1202,8 @@ class ConnectionActions:
         follow-only/unavailable profiles. Therefore this helper never clicks
         the primary Send button: it returns the raw LinkedIn Premium dialog
         text if LinkedIn shows it while opening the note editor, then
-        dismisses the dialog.
+        dismisses the dialog. The one click it may make is resolved against
+        the one open invite dialog, and never as its last button.
         """
         if not await self._dialog_is_open(timeout=5000):
             return None
@@ -859,35 +1212,15 @@ class ConnectionActions:
             await self._dismiss_dialog()
             return note_limit_message
 
-        try:
-            textarea_count = await self._session.page.locator(
-                _DIALOG_TEXTAREA_SELECTOR
-            ).count()
-        except Exception:
-            textarea_count = 0
-        if textarea_count > 0:
+        state = await self._invite_dialog_state()
+        if state is None or not state.single or state.note_field != "none":
             await self._dismiss_dialog()
             return None
 
-        buttons = self._session.page.locator(
-            f"{_DIALOG_SELECTOR} button, {_DIALOG_SELECTOR} [role='button']"
-        )
-        try:
-            btn_count = await buttons.count()
-        except Exception:
-            btn_count = 0
-        if btn_count >= 3:
-            try:
-                await buttons.nth(btn_count - 2).click()
-            except Exception:
-                logger.debug("Could not open invite note editor", exc_info=True)
-            try:
-                await self._session.page.wait_for_selector(
-                    _DIALOG_TEXTAREA_SELECTOR,
-                    state="visible",
-                    timeout=3000,
-                )
-            except PlaywrightTimeoutError:
+        if state.buttons >= 3:
+            if not await self._click_invite_dialog_button(1):
+                logger.debug("Could not open invite note editor")
+            if not await self._wait_for_invite_note_field():
                 logger.debug("Note textarea did not appear during quota probe")
 
         note_limit_message = await self._get_premium_upsell_message()
@@ -916,9 +1249,25 @@ class ConnectionActions:
         or buried under the More menu. An incoming-request row is only
         accepted after its own More menu has been opened and shown no invite
         anchor, since a creator-mode top card has the same shape (#629).
+
+        A note no account could send (over ``MAX_INVITE_NOTE_LENGTH``) is
+        refused as ``note_too_long`` before any page is opened. The dialog
+        itself can still refuse a shorter one (``note_too_long`` with the
+        field's ``note_limit``) or ask for a note that was not given
+        (``note_required``); nothing is sent in any of these.
         """
         username = normalize_person_identifier(username)
         url = person_profile_url(username, "/")
+
+        if note and _note_length(note) > MAX_INVITE_NOTE_LENGTH:
+            return _connection_result(
+                url,
+                "note_too_long",
+                f"The note is {_note_length(note)} characters and LinkedIn takes "
+                f"at most {MAX_INVITE_NOTE_LENGTH} (200 without Premium), so no "
+                "page was opened and nothing was sent. Shorten the note and "
+                "call again.",
+            )
 
         profile = await self._read_main_profile(username)
         page_text = profile.get("sections", {}).get("main_profile", "")
@@ -1103,9 +1452,18 @@ class ConnectionActions:
 
         await self._navigator._navigate_to_page(invite_url)
 
-        submitted, note_sent, note_limit_message = await self._submit_invite_dialog(
-            note
-        )
+        try:
+            submitted, note_sent, note_limit_message = await self._submit_invite_dialog(
+                note
+            )
+        except InviteNotSent as refusal:
+            return _connection_result(
+                url,
+                refusal.status,
+                refusal.message,
+                note_limit=refusal.note_limit,
+                profile=page_text,
+            )
         if note_limit_message is not None:
             return _connection_result(
                 url,

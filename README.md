@@ -58,7 +58,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 | `get_person_profile` | Read profile sections such as experience, education, skills, projects and posts. |
 | `get_my_profile` | Read your own profile using the same selectable sections. |
 | `get_my_analytics` | Read your own analytics dashboards: content, audience, top posts, profile views and search appearances, with an optional time range. |
-| `connect_with_person` | Send or accept a connection request, with an optional note. |
+| `connect_with_person` | Send or accept a connection request, with an optional note. A note the invite dialog cannot hold whole (200 characters without Premium, 300 with) returns `note_too_long` with the limit, and a profile that only accepts an invitation with a note returns `note_required`; nothing is sent in either case. |
 | `get_sidebar_profiles` | Find recommended profile links in a person's sidebar. |
 | `get_pending_invitations` | List pending received or sent connection invitations, with full invitation notes. |
 | `withdraw_invitation` | Withdraw a sent connection request, only after a fresh read shows it pending. |

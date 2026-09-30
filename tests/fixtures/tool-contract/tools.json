@@ -54,7 +54,7 @@
             }
           ],
           "default": null,
-          "description": "Optional note to include with the invitation"
+          "description": "Optional note to include with the invitation. LinkedIn takes at most 200 characters without Premium and 300 with it (an emoji counts as two); a longer note is refused as note_too_long and nothing is sent."
         }
       },
       "required": [

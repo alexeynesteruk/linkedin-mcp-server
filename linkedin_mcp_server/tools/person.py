@@ -285,14 +285,16 @@ def register_person_tools(
         Args:
             linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates"). A full profile URL is accepted too and is reduced to the username.
             ctx: FastMCP context for progress reporting
-            note: Optional note to include with the invitation
+            note: Optional note to include with the invitation. LinkedIn takes at most 200 characters without Premium and 300 with it (an emoji counts as two); a longer note is refused as note_too_long and nothing is sent.
 
         Returns:
-            Dict with url, status, message, and note_sent.
+            Dict with url, status, message, and note_sent, plus note_limit
+            when the invite dialog said how long a note it takes.
             Statuses: pending, already_connected, follow_only,
             connect_unavailable, unavailable, send_failed,
-            note_not_supported, custom_note_limit_reached,
-            incoming_request_ambiguous, connected, or accepted.
+            note_not_supported, custom_note_limit_reached, note_required,
+            note_too_long, incoming_request_ambiguous, connected, or
+            accepted.
 
             ``connected`` means this call submitted the invitation and the
             re-read profile no longer exposes Connect; it does not mean a
@@ -305,6 +307,19 @@ def register_person_tools(
             personalized invite notes because the free note quota for the
             account is exhausted. The ``message`` is the raw Premium dialog
             text read from LinkedIn.
+
+            ``note_required`` means LinkedIn only takes an invitation with a
+            note for this profile: the invite dialog kept Send disabled while
+            its note field was empty. Nothing was sent; call again with a
+            note.
+
+            ``note_too_long`` means the note did not fit. Over 300 characters
+            it is refused before any page is opened. Otherwise the invite
+            dialog's note field kept only part of it (LinkedIn cuts a note
+            to the account's limit without a sound), so the dialog was
+            closed without sending and ``note_limit`` gives the limit to
+            shorten to. ``note_sent`` is only ever True for a note the field
+            held whole.
 
             ``incoming_request_ambiguous`` means the profile looks like an
             incoming request but a note was given. Accept takes no note, and

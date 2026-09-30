@@ -602,6 +602,8 @@ def semantic_program_id(program: str) -> str:
         ("expandable-text-button", "invitation_expand_notes"),
         ("if (line) labels[path] = line", "invitation_card_labels"),
         ("invitation-manager/received/ALL", "invitation_received_zero"),
+        ("inviteDialogs: 1,", "invite_dialog_state"),
+        ("target.part === 'note'", "invite_dialog_element"),
         ("anchors.length !== 1", "withdraw_anchor_click"),
         ("querySelectorAll('button').length : -1", "confirm_dialog_button_count"),
         ("function findConfirmDialog", "confirm_dialog_primary_click"),
