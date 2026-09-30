@@ -45,7 +45,10 @@ from linkedin_mcp_server.scraping.connection import (
 )
 from linkedin_mcp_server.scraping.connection_actions import (
     ACTION_SIGNALS_JS,
+    CLICK_CONFIRM_DIALOG_PRIMARY_JS,
     CLICK_INCOMING_ACCEPT_JS,
+    CLICK_WITHDRAW_ANCHOR_JS,
+    CONFIRM_DIALOG_BUTTON_COUNT_JS,
     OPEN_MORE_BUTTON_JS,
     ConnectionActions,
 )
@@ -89,6 +92,10 @@ class Labels:
     show_all: str
     like: str
     comment: str
+    dismiss: str
+    cancel: str
+    withdraw: str
+    upsell: str
 
 
 ENGLISH = Labels(
@@ -109,6 +116,10 @@ ENGLISH = Labels(
     show_all="Show all",
     like="Like",
     comment="Comment",
+    dismiss="Dismiss",
+    cancel="Cancel",
+    withdraw="Withdraw",
+    upsell="Try Premium for free",
 )
 
 GERMAN = Labels(
@@ -129,6 +140,10 @@ GERMAN = Labels(
     show_all="Mehr anzeigen",
     like="Gefällt mir",
     comment="Kommentieren",
+    dismiss="Verwerfen",
+    cancel="Abbrechen",
+    withdraw="Zurückziehen",
+    upsell="Premium gratis testen",
 )
 
 # No verb anywhere, in any language: these labels are identifiers. Whatever
@@ -152,6 +167,10 @@ OPAQUE = Labels(
     show_all="b8f2c9",
     like="c6d0a3",
     comment="d4e8b7",
+    dismiss="e1b6c4",
+    cancel="f5d9a2",
+    withdraw="a3c8e0",
+    upsell="b7e1f5",
 )
 
 # Attribute presence and attribute truthiness are different contracts. This
@@ -175,6 +194,10 @@ EMPTY_ARIA = Labels(
     show_all="",
     like="",
     comment="",
+    dismiss="",
+    cancel="",
+    withdraw="",
+    upsell="",
 )
 
 LOCALES = (ENGLISH, GERMAN, OPAQUE, EMPTY_ARIA)
@@ -591,4 +614,216 @@ class TestActionChoiceIsStructural:
             self_top_card,
             (False, None),
             lambda page, html: _click(page, html, OPEN_MORE_BUTTON_JS),
+        )
+
+
+# Withdraw. The Pending control and the confirmation dialog it opens are the
+# two things a withdrawal clicks; every other control in these fixtures records
+# a click too, so a wrong pick shows up as the wrong name rather than as a
+# silent pass.
+
+
+def pending_top_card_clickable(labels: Labels) -> str:
+    """Pending, with every control recording what a click would have hit."""
+    return f"""
+<section class="topcard">
+  <h1>Florian</h1>
+  <div class="actions">
+    <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3ADDD"
+      onclick="event.preventDefault();
+        document.body.setAttribute('data-clicked','message')"
+      >{labels.message}</a>
+    <a href="https://www.linkedin.com/in/florian/" aria-label="{labels.pending}"
+      onclick="event.preventDefault();
+        document.body.setAttribute('data-clicked','pending')"
+      >{labels.pending}</a>
+    <button type="button" aria-expanded="false"
+      onclick="document.body.setAttribute('data-clicked','more')"
+      >{labels.more}</button>
+  </div>
+</section>
+"""
+
+
+def two_labeled_anchors_top_card(labels: Labels) -> str:
+    """Two labeled anchors in the action root: which one is Pending is a guess."""
+    return f"""
+<section class="topcard">
+  <h1>Florian</h1>
+  <div class="actions">
+    <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3ADDD"
+      >{labels.message}</a>
+    <a href="https://www.linkedin.com/in/florian/" aria-label="{labels.pending}"
+      onclick="event.preventDefault();
+        document.body.setAttribute('data-clicked','pending')"
+      >{labels.pending}</a>
+    <a href="https://www.linkedin.com/in/florian/follow/" aria-label="{labels.follow}"
+      onclick="event.preventDefault();
+        document.body.setAttribute('data-clicked','other-labeled')"
+      >{labels.follow}</a>
+    <button type="button" aria-expanded="false">{labels.more}</button>
+  </div>
+</section>
+"""
+
+
+def withdraw_dialog(labels: Labels, *, native: bool = True, extra: str = "") -> str:
+    """The confirmation: Dismiss first, then Cancel, then the primary Withdraw."""
+    buttons = f"""
+    <button type="button" aria-label="{labels.dismiss}"
+      onclick="document.body.setAttribute('data-clicked','dismiss')">X</button>
+    <button type="button"
+      onclick="document.body.setAttribute('data-clicked','cancel')"
+      >{labels.cancel}</button>
+    <button type="button" aria-label="{labels.withdraw}"
+      onclick="document.body.setAttribute('data-clicked','withdraw')"
+      >{labels.withdraw}</button>
+"""
+    if native:
+        return f'<dialog open id="withdraw" {extra}>{buttons}</dialog>'
+    return f'<div role="dialog" id="withdraw" {extra}>{buttons}</div>'
+
+
+def spinner_dialog(labels: Labels) -> str:
+    """What the withdraw dialog shows before its actions mount: Dismiss only."""
+    return f"""
+<dialog open><div class="spinner"></div>
+  <button type="button" aria-label="{labels.dismiss}">X</button>
+</dialog>
+"""
+
+
+def chat_overlay(labels: Labels) -> str:
+    """The conversation LinkedIn keeps open across pages: a dialog with a composer."""
+    return f"""
+<div role="dialog" class="chat">
+  <form>
+    <div role="textbox" contenteditable="true"
+      style="display:block;width:200px;height:30px"></div>
+    <button type="submit" disabled>{labels.message}</button>
+    <button type="button"
+      onclick="document.body.setAttribute('data-clicked','chat')"
+      >{labels.more}</button>
+  </form>
+</div>
+"""
+
+
+def hidden_preloaded_dialog(labels: Labels) -> str:
+    """A preloaded container: hidden, with a disabled submit as its last button."""
+    return f"""
+<div role="dialog" style="display:none">
+  <button type="submit" disabled
+    onclick="document.body.setAttribute('data-clicked','decoy')"
+    >{labels.withdraw}</button>
+</div>
+"""
+
+
+def _body(*parts: str) -> str:
+    return f"<html><body>{''.join(parts)}</body></html>"
+
+
+async def _confirm(page, html: str) -> tuple[int, bool, str | None]:
+    """The count the settle wait reads, then the confirm click and what it hit."""
+    await page.set_content(html)
+    count = await page.evaluate(CONFIRM_DIALOG_BUTTON_COUNT_JS)
+    clicked = bool(await page.evaluate(CLICK_CONFIRM_DIALOG_PRIMARY_JS))
+    recorded = await page.evaluate("document.body.getAttribute('data-clicked')")
+    return (count, clicked, recorded)
+
+
+class TestWithdrawAnchorIsStructural:
+    """The Pending click, in all four label sets."""
+
+    async def test_the_clickable_fixture_is_a_pending_profile(self, dom_page):
+        await _in_every_locale(dom_page, pending_top_card_clickable, "pending", _state)
+
+    async def test_withdraw_clicks_the_pending_anchor_only(self, dom_page):
+        # Message is an anchor as well and sits first; More is the other
+        # control in the row. Only the labeled anchor is Pending.
+        await _in_every_locale(
+            dom_page,
+            pending_top_card_clickable,
+            (True, "pending"),
+            lambda page, html: _click(page, html, CLICK_WITHDRAW_ANCHOR_JS),
+        )
+
+    async def test_two_labeled_anchors_are_not_guessed_between(self, dom_page):
+        await _in_every_locale(
+            dom_page,
+            two_labeled_anchors_top_card,
+            (False, None),
+            lambda page, html: _click(page, html, CLICK_WITHDRAW_ANCHOR_JS),
+        )
+
+    @pytest.mark.parametrize(
+        "build",
+        [connected_top_card, follow_only_top_card, self_top_card, restricted_top_card],
+        ids=["connected", "follow-only", "own-profile", "restricted"],
+    )
+    async def test_nothing_is_clicked_without_a_pending_anchor(self, dom_page, build):
+        await _in_every_locale(
+            dom_page,
+            build,
+            (False, None),
+            lambda page, html: _click(page, html, CLICK_WITHDRAW_ANCHOR_JS),
+        )
+
+
+class TestConfirmDialogChoice:
+    """Which dialog the withdraw confirmation counts and clicks.
+
+    The primary action is the last button of the one open dialog. Everything
+    else a LinkedIn page can hold at the same time is in these fixtures: a
+    conversation overlay with a composer, and hidden preloaded containers whose
+    last button is disabled.
+    """
+
+    @pytest.mark.parametrize(
+        "native", [True, False], ids=["native-dialog", "role-dialog"]
+    )
+    @pytest.mark.parametrize("decoy_first", [False, True], ids=["after", "before"])
+    async def test_the_open_dialog_wins_over_a_hidden_preloaded_one(
+        self, dom_page, native, decoy_first
+    ):
+        def build(labels: Labels) -> str:
+            parts = [
+                withdraw_dialog(labels, native=native),
+                hidden_preloaded_dialog(labels),
+            ]
+            return _body(*(reversed(parts) if decoy_first else parts))
+
+        await _in_every_locale(dom_page, build, (3, True, "withdraw"), _confirm)
+
+    @pytest.mark.parametrize("chat_first", [False, True], ids=["after", "before"])
+    async def test_a_chat_overlay_is_never_the_confirmation(self, dom_page, chat_first):
+        def build(labels: Labels) -> str:
+            parts = [withdraw_dialog(labels, native=False), chat_overlay(labels)]
+            return _body(*(reversed(parts) if chat_first else parts))
+
+        await _in_every_locale(dom_page, build, (3, True, "withdraw"), _confirm)
+
+    @pytest.mark.parametrize(
+        "build",
+        [chat_overlay, hidden_preloaded_dialog, lambda _labels: ""],
+        ids=["chat-overlay-alone", "hidden-dialog-alone", "no-dialog"],
+    )
+    async def test_nothing_is_confirmed_without_an_open_dialog(self, dom_page, build):
+        await _in_every_locale(
+            dom_page,
+            lambda labels: _body(build(labels)),
+            (-1, False, None),
+            _confirm,
+        )
+
+    async def test_the_spinner_state_reads_as_one_button(self, dom_page):
+        # The settle wait holds the click until a second button mounts; this
+        # is the count it waits past.
+        async def count(page, html: str) -> int:
+            await page.set_content(html)
+            return await page.evaluate(CONFIRM_DIALOG_BUTTON_COUNT_JS)
+
+        await _in_every_locale(
+            dom_page, lambda labels: _body(spinner_dialog(labels)), 1, count
         )
