@@ -12,6 +12,7 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 import pytest
 
 from linkedin_mcp_server.core.exceptions import InvalidReferenceError
+from linkedin_mcp_server.scraping import contracts
 from linkedin_mcp_server.scraping import message_sender as message_sender_module
 from linkedin_mcp_server.scraping.message_sender import (
     MessageSender,
@@ -229,8 +230,8 @@ class TestSendMessage:
 
     @pytest.mark.parametrize(
         "message",
-        ["First\nSecond", "First\rSecond", "First\tSecond", "First\x7fSecond"],
-        ids=["newline", "carriage-return", "tab", "del"],
+        ["First\rSecond", "First\tSecond", "First\x00Second", "First\x7fSecond"],
+        ids=["carriage-return", "tab", "nul", "del"],
     )
     async def test_control_message_is_rejected_before_browser_interaction(
         self, mock_page, message
@@ -244,9 +245,7 @@ class TestSendMessage:
             result = await sender.send_message("testuser", message, confirm_send=True)
 
         assert result["status"] == "invalid_message"
-        assert result["message"] == (
-            "Message must not contain control characters or line breaks."
-        )
+        assert result["message"] == contracts.INVALID_MESSAGE_CONTROL_REASON
         assert result["retry_safe"] is True
         navigate.assert_not_awaited()
         mock_page.evaluate.assert_not_awaited()
@@ -1572,7 +1571,7 @@ class TestSendInThread:
 
         mocks["navigate"].assert_not_awaited()
 
-    @pytest.mark.parametrize("message", ["  ", "line\nbreak"], ids=["blank", "c0"])
+    @pytest.mark.parametrize("message", ["  ", "line\tbreak"], ids=["blank", "c0"])
     async def test_invalid_message_is_refused_against_the_thread(
         self, mock_page, message
     ):
@@ -1912,3 +1911,147 @@ class TestThreadWaits:
         assert clock["now"] == pytest.approx(
             message_sender_module._THREAD_SUBMIT_READY_TIMEOUT_MS / 1_000
         )
+
+
+class TestMultilineMessages:
+    """A line break is part of a message, typed as the text it is (#441)."""
+
+    RAW = "\r\nHi Ada,  \r\n\r\nThanks!\r\nBob\r\n\r\n"
+    TYPED = "Hi Ada,\n\nThanks!\nBob"
+
+    @staticmethod
+    def _recording(steps: list[tuple[str, str]], name: str, value):
+        async def record(message, **_kwargs):
+            steps.append((name, message))
+            return value
+
+        return record
+
+    def _record_every_step(self, sender, stack, steps):
+        return [
+            stack.enter_context(
+                patch.object(
+                    sender,
+                    method,
+                    new_callable=AsyncMock,
+                    side_effect=self._recording(steps, name, value),
+                )
+            )
+            for method, name, value in (
+                ("_write_verified_message", "write", "written"),
+                ("_prepare_message_confirmation", "prepare", "confirmation-token"),
+                ("_submit_verified_message", "submit", "clicked"),
+                ("_message_send_confirmed", "confirm", True),
+            )
+        ]
+
+    async def test_a_profile_send_types_and_confirms_the_normalized_text(
+        self, mock_page
+    ):
+        sender = _sender(mock_page)
+        patches = TestSendMessage._patch_to_composer(sender, mock_page)
+        steps: list[tuple[str, str]] = []
+        with ExitStack() as stack:
+            for index in (1, 2, 3, 4, 5, 8):
+                stack.enter_context(patches[index])
+            self._record_every_step(sender, stack, steps)
+            result = await sender.send_message("testuser", self.RAW, confirm_send=True)
+
+        assert result["status"] == "sent"
+        assert steps == [
+            ("write", self.TYPED),
+            ("prepare", self.TYPED),
+            ("submit", self.TYPED),
+            ("confirm", self.TYPED),
+        ]
+
+    async def test_a_thread_reply_types_and_confirms_the_normalized_text(
+        self, mock_page
+    ):
+        sender = _sender(mock_page)
+        steps: list[tuple[str, str]] = []
+        with ExitStack() as stack:
+            patches = TestSendInThread._patches(sender, mock_page)
+            for name in ("write", "prepare", "submit", "confirmed"):
+                patches.pop(name)
+            TestSendInThread._enter(stack, patches)
+            self._record_every_step(sender, stack, steps)
+            result = await sender.send_message(
+                "testuser", self.RAW, confirm_send=True, thread_id=THREAD_ID
+            )
+
+        assert result["status"] == "sent"
+        assert [message for _, message in steps] == [self.TYPED] * 4
+
+    @pytest.mark.parametrize("path", ["profile", "thread"])
+    async def test_an_entry_answered_as_a_send_is_never_retry_safe(
+        self, mock_page, path
+    ):
+        """The page reacted to the typing as to a send: something may have left.
+
+        Checked before the route, which the same reaction may have moved, and
+        nothing is cleaned up or clicked afterwards.
+        """
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            if path == "profile":
+                patches = TestSendMessage._patch_to_composer(
+                    sender, mock_page, write_result="interrupted"
+                )
+                mocks = {
+                    "submit": stack.enter_context(patches[7]),
+                    "prepare": stack.enter_context(patches[9]),
+                }
+                for index in (1, 2, 3, 4, 5, 6, 8, 10):
+                    stack.enter_context(patches[index])
+                call = sender.send_message("testuser", self.TYPED, confirm_send=True)
+            else:
+                mocks = TestSendInThread._enter(
+                    stack,
+                    TestSendInThread._patches(
+                        sender, mock_page, write_result="interrupted"
+                    ),
+                )
+                call = sender.send_message(
+                    "testuser", self.TYPED, confirm_send=True, thread_id=THREAD_ID
+                )
+            cleanup = stack.enter_context(
+                patch.object(sender, "_cleanup_owned_message", new_callable=AsyncMock)
+            )
+            stack.enter_context(
+                patch.object(
+                    message_sender_module, "_route_is_safe", return_value=False
+                )
+            )
+            result = await call
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert result["recipient_selected"] is True
+        assert "may already have been submitted" in result["message"]
+        mocks["prepare"].assert_not_awaited()
+        mocks["submit"].assert_not_awaited()
+        cleanup.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("page_result", "expected"),
+        [
+            ("interrupted", "interrupted"),
+            ("written", "written"),
+            ("unsupported", "unsupported"),
+            ("sent", "invalid"),
+            (None, "invalid"),
+        ],
+    )
+    async def test_write_results_pass_through_only_when_known(
+        self, mock_page, page_result, expected
+    ):
+        owner = MagicMock(evaluate=AsyncMock(return_value=page_result))
+
+        result = await _sender(mock_page)._write_verified_message(
+            self.TYPED, target=TestSendMessage._target(), owner=owner
+        )
+
+        assert result == expected
+        assert owner.evaluate.await_args.args[1]["message"] == self.TYPED

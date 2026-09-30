@@ -11,9 +11,16 @@ from linkedin_mcp_server.scraping.contracts import (
     ExtractedSection,
     FilterValidationError,
     message_action_result,
+    normalize_message,
     rate_limited_section_error,
     refuse_an_invalid_message,
     refuse_an_invalid_thread_message,
+)
+
+CONTROL_REASON = (
+    "Message must not contain control characters other than line breaks "
+    "(LF or CRLF). Tabs, a lone CR, DEL and every other C0 character are "
+    "refused."
 )
 
 
@@ -86,12 +93,54 @@ class TestMessageActionResult:
 
 
 class TestRefuseAnInvalidMessage:
-    @pytest.mark.parametrize("message", ["line\nbreak", "before\tafter", "text\x7f"])
-    def test_every_c0_or_del_character_is_refused(self, message: str):
+    @pytest.mark.parametrize(
+        "message",
+        [
+            f"First{chr(codepoint)}Second"
+            for codepoint in (*range(32), 127)
+            if codepoint != 10
+        ],
+        ids=[
+            f"U+{codepoint:04X}" for codepoint in (*range(32), 127) if codepoint != 10
+        ],
+    )
+    def test_every_c0_or_del_character_but_lf_is_refused(self, message: str):
         assert refuse_an_invalid_message("alice", message) == message_action_result(
             "https://www.linkedin.com/in/alice/",
             "invalid_message",
-            "Message must not contain control characters or line breaks.",
+            CONTROL_REASON,
+        )
+
+    def test_the_control_refusal_names_what_is_allowed(self):
+        # Pinned as a literal: the caller reads this to correct its input.
+        assert refuse_an_invalid_message("alice", "a\tb")["message"] == (
+            "Message must not contain control characters other than line "
+            "breaks (LF or CRLF). Tabs, a lone CR, DEL and every other C0 "
+            "character are refused."
+        )
+
+    @pytest.mark.parametrize(
+        "message",
+        ["Hi Ada,\n\nThanks!\nBest,\nBob", "Hi Ada,\r\n\r\nThanks!", "a\n"],
+        ids=["lf", "crlf", "trailing-lf"],
+    )
+    def test_line_breaks_are_accepted(self, message: str):
+        assert refuse_an_invalid_message("alice", message) is None
+
+    @pytest.mark.parametrize(
+        "message",
+        ["a\r", "a\rb", "a\n\rb", "a\r\rb"],
+        ids=["trailing", "inner", "after-lf", "double"],
+    )
+    def test_a_carriage_return_outside_crlf_is_refused(self, message: str):
+        assert refuse_an_invalid_message("alice", message)["message"] == (
+            CONTROL_REASON
+        )
+
+    @pytest.mark.parametrize("message", ["\n", "\r\n\r\n", " \n \n "])
+    def test_line_breaks_alone_are_blank(self, message: str):
+        assert refuse_an_invalid_message("alice", message)["message"] == (
+            "Message must contain non-whitespace characters."
         )
 
     def test_whitespace_is_refused_before_normal_message_text(self):
@@ -131,9 +180,10 @@ class TestRefuseAnInvalidThreadMessage:
         ("message", "reason"),
         [
             ("  ", "Message must contain non-whitespace characters."),
-            ("a\tb", "Message must not contain control characters or line breaks."),
+            ("a\tb", CONTROL_REASON),
+            ("a\rb", CONTROL_REASON),
         ],
-        ids=["blank", "control"],
+        ids=["blank", "tab", "lone-cr"],
     )
     def test_it_refuses_like_a_profile_send_but_names_the_thread(self, message, reason):
         assert refuse_an_invalid_thread_message(self.THREAD_ID, message) == {
@@ -146,5 +196,42 @@ class TestRefuseAnInvalidThreadMessage:
         }
         assert refuse_an_invalid_message("alice", message)["message"] == reason
 
-    def test_a_usable_message_is_not_refused(self):
-        assert refuse_an_invalid_thread_message(self.THREAD_ID, "Hello!") is None
+    @pytest.mark.parametrize("message", ["Hello!", "Hello,\n\nBob"])
+    def test_a_usable_message_is_not_refused(self, message):
+        assert refuse_an_invalid_thread_message(self.THREAD_ID, message) is None
+
+
+class TestNormalizeMessage:
+    """The exact text a send types and then looks for (#441)."""
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("Hello!", "Hello!"),
+            ("Hi Ada,\r\n\r\nThanks!\r\nBob", "Hi Ada,\n\nThanks!\nBob"),
+            ("Hi Ada,\n\n\nThanks!", "Hi Ada,\n\n\nThanks!"),
+            ("\n \nHi Ada,\nBob\n\n", "Hi Ada,\nBob"),
+            ("Hi Ada,   \nBob ", "Hi Ada,\nBob"),
+            ("Hi Ada,\n  - Monday\n  - Tuesday", "Hi Ada,\n  - Monday\n  - Tuesday"),
+            ("  Hello", "  Hello"),
+            ("Hi\n   \nBob", "Hi\n\nBob"),
+        ],
+        ids=[
+            "single-line",
+            "crlf",
+            "paragraph-breaks-kept",
+            "edge-blank-lines",
+            "trailing-spaces",
+            "indentation-kept",
+            "leading-space-kept",
+            "space-only-line-is-blank",
+        ],
+    )
+    def test_normalization(self, message, expected):
+        assert normalize_message(message) == expected
+
+    def test_a_normalized_message_is_still_accepted_and_stable(self):
+        message = normalize_message("Hi Ada, \r\n\r\nThanks!\r\n")
+
+        assert refuse_an_invalid_message("alice", message) is None
+        assert normalize_message(message) == message

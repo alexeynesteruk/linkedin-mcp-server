@@ -311,11 +311,20 @@ def register_messaging_tools(
         closed. No Voyager or other private API is used. This is a write
         operation when confirm_send is True.
 
+        A message may span several lines and paragraphs: write real line
+        breaks, not escape sequences. Each line break is entered with the
+        composer's line-break command, the one Shift+Enter runs, and never as a
+        key press, so it cannot trigger an Enter-to-send and the whole message
+        is sent as one message. A blank line between paragraphs is kept.
+
         Args:
             linkedin_username: LinkedIn username of the recipient; a full
                 profile URL is accepted too. Ignored when thread_id is given.
-            message: Single-line message text to send. C0 control characters and
-                DEL are rejected, including CR, LF, and tab.
+            message: Message text to send. Line breaks (LF or CRLF) are kept, so
+                a multi-paragraph message is sent whole; blank lines before the
+                first line or after the last, and spaces at the end of a line,
+                are dropped. Every other C0 control character, including tab
+                and a CR outside CRLF, and DEL are rejected.
             confirm_send: Must be True to send the message
             ctx: FastMCP context for progress reporting
             profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against

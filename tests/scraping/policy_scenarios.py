@@ -1339,7 +1339,8 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "message-sent.json": await _messaging_submission_scenario("sent"),
         "message-cancelled.json": await _messaging_cancellation_scenario(),
         "message-blank.json": await _invalid_message_scenario("   ", "blank"),
-        "message-c0.json": await _invalid_message_scenario("line\nbreak", "c0"),
+        # A line break is message text since #441; a tab is still refused.
+        "message-c0.json": await _invalid_message_scenario("before\tafter", "c0"),
         "message-del.json": await _invalid_message_scenario("text\x7f", "del"),
         "message-thread-dry-run.json": await _thread_reply_scenario("dry_run"),
         "message-thread-sent.json": await _thread_reply_scenario("sent"),

@@ -665,3 +665,216 @@ class TestThreadReplyTargetDom:
         assert result["status"] == "enter_to_send_enabled"
         assert result["retry_safe"] is True
         assert await composer_text(dom_page) == ""
+
+
+# A multi-paragraph recruiter reply (#441): paragraph breaks and plain line
+# breaks, so an entry that turns either into the other changes its lines.
+MULTILINE = "Hi,\n\nThanks for thinking of me.\nI would be glad to talk.\n\nBest,\nAlex"
+
+# Ways a sent multi-line message can render; see the profile-send DOM tests.
+MULTILINE_RENDER_JS = """
+  function fillUnit(unit, text, mode) {
+    unit.textContent = '';
+    if (mode === 'pre-wrap') {
+      unit.style.whiteSpace = 'pre-wrap';
+      unit.textContent = text;
+    } else if (mode === 'br') {
+      text.split('\\n').forEach((line, index) => {
+        if (index) unit.appendChild(document.createElement('br'));
+        unit.appendChild(document.createTextNode(line));
+      });
+    } else if (mode === 'paragraphs') {
+      for (const paragraph of text.split(/\\n{2,}/)) {
+        const p = document.createElement('p');
+        fillUnit(p, paragraph, 'br');
+        unit.appendChild(p);
+      }
+    } else if (mode === 'line-paragraphs') {
+      for (const line of text.split('\\n').filter(Boolean)) {
+        const p = document.createElement('p');
+        p.textContent = line;
+        unit.appendChild(p);
+      }
+    } else if (mode === 'joined') {
+      unit.textContent = text.split(/\\n+/).join(' ');
+    }
+  }
+  function renderedItem(text, eventUrn, sender, mode) {
+    const entry = messageItem('', eventUrn, sender);
+    const unit = document.createElement('div');
+    unit.className = 'message-unit';
+    entry.querySelector('.message-unit').replaceWith(unit);
+    fillUnit(unit, text, mode);
+    return entry;
+  }
+"""
+
+# The thread's composer sends on Enter through every key path at once, and
+# every send renders the measured sequence: placeholder, then server node.
+ENTER_SENDS_JS = (
+    MULTILINE_RENDER_JS
+    + """
+  const composer = document.getElementById('composer');
+  document.body.dataset.sends = '';
+  document.body.dataset.keyEvents = '0';
+  function sendComposer(source) {
+    document.body.dataset.sends += `${source};`;
+    document.body.dataset.sentHtml = composer.innerHTML;
+    const text = composer.innerText;
+    const placeholder = renderedItem(text, 'client-uuid', undefined, RENDER_MODE);
+    document.getElementById('thread').appendChild(placeholder);
+    composer.textContent = '';
+    setTimeout(() => {
+      document.getElementById('thread').appendChild(renderedItem(
+        text, 'urn:li:msg_message:(self,server-new)', SELF_URN, RENDER_MODE));
+      placeholder.remove();
+    }, 50);
+  }
+  for (const type of ['keydown', 'keypress', 'keyup', 'beforeinput', 'textInput']) {
+    composer.addEventListener(type, () => {
+      document.body.dataset.keyEvents = String(
+        Number(document.body.dataset.keyEvents) + 1);
+    });
+  }
+  for (const type of ['keydown', 'keypress']) {
+    composer.addEventListener(type, event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        sendComposer(`enter-${type}`);
+      }
+    });
+  }
+  composer.addEventListener('beforeinput', event => {
+    if (['insertLineBreak', 'insertParagraph'].includes(event.inputType)) {
+      event.preventDefault();
+      sendComposer('beforeinput');
+    }
+  });
+  onSend(() => sendComposer('button'));
+"""
+)
+
+
+def enter_sends_thread(mode: str = "br", *, extra_js: str = "") -> str:
+    return thread_page(f"const RENDER_MODE = '{mode}';" + ENTER_SENDS_JS + extra_js)
+
+
+async def sends(page) -> str:
+    return await page.evaluate("document.body.dataset.sends")
+
+
+class TestThreadReplyMultilineDom:
+    """A multi-line reply goes out whole, in its thread (#441)."""
+
+    async def test_line_breaks_are_entered_without_a_key_even_where_enter_sends(
+        self, dom_page
+    ):
+        result = await reply(dom_page, enter_sends_thread(), message=MULTILINE)
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        assert result["url"] == THREAD_URL
+        assert await sends(dom_page) == "button;"
+        assert await dom_page.evaluate("document.body.dataset.keyEvents") == "0"
+        sent_html = await dom_page.evaluate("document.body.dataset.sentHtml")
+        assert sent_html.count("<br>") == MULTILINE.count("\n")
+        assert "<div" not in sent_html and "<p" not in sent_html
+        entries = dom_page.locator("#thread .msg")
+        assert await entries.count() == 2
+        assert await entries.last.locator(".message-unit").inner_text() == MULTILINE
+
+    @pytest.mark.parametrize(
+        "mode", ["br", "pre-wrap", "paragraphs", "line-paragraphs"]
+    )
+    async def test_confirmation_matches_the_lines_however_they_render(
+        self, dom_page, mode
+    ):
+        result = await reply(dom_page, enter_sends_thread(mode), message=MULTILINE)
+
+        assert result["status"] == "sent"
+        assert result["retry_safe"] is False
+
+    async def test_the_same_words_on_one_line_are_not_this_reply(self, dom_page):
+        result = await reply(dom_page, enter_sends_thread("joined"), message=MULTILINE)
+
+        assert await sends(dom_page) == "button;"
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+
+    async def test_the_recruiter_sending_the_same_lines_is_not_this_reply(
+        self, dom_page
+    ):
+        # The placeholder came and went, but the node that arrived is the
+        # recruiter's, carrying the same lines.
+        html = thread_page(
+            MULTILINE_RENDER_JS
+            + """
+          onSend((text, composer) => {
+            const placeholder = renderedItem(text, 'client-uuid', undefined, 'br');
+            document.getElementById('thread').appendChild(placeholder);
+            composer.textContent = '';
+            setTimeout(() => {
+              document.getElementById('thread').appendChild(renderedItem(
+                text, 'urn:li:msg_message:(self,recruiter-2)', RECRUITER_URN,
+                'paragraphs'));
+              placeholder.remove();
+            }, 50);
+          });
+        """
+        )
+
+        result = await reply(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+
+    async def test_disabled_submit_cleans_every_entered_line(self, dom_page):
+        html = enter_sends_thread().replace(
+            '<button id="send" type="submit">Send</button>',
+            '<button id="send" type="submit" disabled>Send</button>',
+        )
+
+        result = await reply(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "send_unavailable"
+        assert result["retry_safe"] is True
+        assert await sends(dom_page) == ""
+        assert await dom_page.locator("#composer").inner_text() == ""
+
+    async def test_route_change_mid_entry_cleans_the_lines_entered(self, dom_page):
+        html = enter_sends_thread(
+            extra_js=f"""
+          composer.addEventListener('input', event => {{
+            if (event.inputType === 'insertLineBreak') {{
+              history.replaceState({{}}, '', '{OTHER_THREAD_PATH}');
+            }}
+          }});
+        """
+        )
+
+        result = await reply(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "recipient_resolution_failed"
+        assert result["retry_safe"] is True
+        assert await sends(dom_page) == ""
+        # The first line and the break after it were entered before the
+        # route moved; both are removed.
+        assert await dom_page.locator("#composer").inner_text() == ""
+
+    async def test_a_composer_sending_on_a_line_break_input_stops_the_entry(
+        self, dom_page
+    ):
+        html = enter_sends_thread(
+            extra_js="""
+          composer.addEventListener('input', event => {
+            if (event.inputType === 'insertLineBreak') sendComposer('input');
+          });
+        """
+        )
+
+        result = await reply(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+        assert await sends(dom_page) == "input;"
+        assert await dom_page.locator("#composer").inner_text() == ""

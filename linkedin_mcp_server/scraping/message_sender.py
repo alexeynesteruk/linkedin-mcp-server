@@ -198,6 +198,56 @@ _MESSAGE_THREAD_IDENTITY_JS = r"""
         urns.every(urn => urn !== null && header.has(urn));
 """
 
+# How a message's text is read back from the page (#441). innerText renders a
+# line break as "\n", but how many a paragraph break gets depends on markup
+# this tool does not control: <br><br>, two <p>s and pre-wrap text all show
+# the same message, as two newlines or more. Chromium's editor also stores a
+# space it has to keep visible, as at the edge of a line, as U+00A0, and
+# innerText collapses a run of spaces that CSS collapses. So a line reads as
+# its characters with each run of spaces as one space and its edges ignored;
+# every other character, and the line it sits on, counts.
+#
+# editorHolds compares the composer with what this tool entered, blank lines
+# included, because that text came from editing commands with known output.
+# editorHoldsLines is the same check for an entry that ends in a line break:
+# Chromium keeps an empty last line visible with a second <br>, which innerText
+# reports as one more newline, so blank lines at the end do not count there.
+# showsMessage compares a rendered message, where blank lines do not count, so
+# a message split across other lines, or joined onto one, never matches.
+# holdsCharacters is only for a node already taken out of the page: it has no
+# layout, so its innerText is its textContent, which keeps no <br>, and only
+# the characters can be compared.
+_MESSAGE_TEXT_JS = r"""
+    const messageLines = value => String(value ?? '')
+        .split('\n')
+        .map(line => line.replace(/[ \u00a0]+/g, ' ').replace(/^ | $/g, ''));
+    const sameLines = (actual, expected) =>
+        actual.length === expected.length &&
+        actual.every((line, index) => line === expected[index]);
+    const editorHolds = (editor, expected) => sameLines(
+        messageLines(editor?.innerText || editor?.textContent || ''),
+        messageLines(expected)
+    );
+    const withoutTrailingBlankLines = lines => {
+        const kept = [...lines];
+        while (kept.length && !kept[kept.length - 1]) kept.pop();
+        return kept;
+    };
+    const editorHoldsLines = (editor, expected) => sameLines(
+        withoutTrailingBlankLines(
+            messageLines(editor?.innerText || editor?.textContent || '')
+        ),
+        withoutTrailingBlankLines(messageLines(expected))
+    );
+    const showsMessage = (text, expected) => sameLines(
+        messageLines(text).filter(Boolean),
+        messageLines(expected).filter(Boolean)
+    );
+    const holdsCharacters = (text, expected) =>
+        String(text ?? '').replace(/\s+/g, '') ===
+        String(expected ?? '').replace(/\s+/g, '');
+"""
+
 # Narrow exception to the generic-selector rule for #1107: enterToSend uses
 # the send-toggle class only when the verified composer has no Send button.
 # If the class changes, confirmed sends remain unavailable.
@@ -450,6 +500,7 @@ _MESSAGE_COMPOSER_OWNER_JS = (
 _MESSAGE_CONFIRMATION_PREPARE_JS = (
     "(arg) => {"
     + _MESSAGE_COMPOSER_INSPECT_JS
+    + _MESSAGE_TEXT_JS
     + r"""
         const composer = inspect(arg);
         const pinned = arg.owner?.__linkedinMcpComposer;
@@ -476,7 +527,7 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
             !arg.owner.contains(pinned.editor) ||
             document.activeElement !== pinned.editor ||
             pinned.ownedMessage !== arg.expected ||
-            (pinned.editor.innerText || pinned.editor.textContent || '') !== arg.expected
+            !editorHolds(pinned.editor, arg.expected)
         ) {
             return null;
         }
@@ -499,13 +550,16 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
             candidates: new Map(),
             invalid: false,
         };
+        // A node still in the page is read as it renders. One being removed
+        // has no rendering left, so there only its characters can match.
         const exactUnit = (node, requireVisible) => {
             if (requireVisible && !visible(node)) return false;
             const elements = [node, ...node.querySelectorAll('*')].filter(
                 element => !requireVisible || visible(element)
             );
-            const matches = elements.filter(
-                element => (element.innerText || '') === state.expected
+            const matches = elements.filter(element => requireVisible
+                ? showsMessage(element.innerText || '', state.expected)
+                : holdsCharacters(element.textContent || '', state.expected)
             );
             const smallest = matches.filter(
                 element => !matches.some(
@@ -645,12 +699,13 @@ _MESSAGE_CONFIRMATION_PREPARE_JS = (
 _MESSAGE_CONFIRMATION_READY_JS = (
     "(arg) => {"
     + _MESSAGE_COMPOSER_INSPECT_JS
+    + _MESSAGE_TEXT_JS
     + r"""
         const exactVisibleUnit = node => {
             if (!visible(node)) return false;
             const elements = [node, ...node.querySelectorAll('*')].filter(visible);
             const matches = elements.filter(
-                element => (element.innerText || '') === arg.expected
+                element => showsMessage(element.innerText || '', arg.expected)
             );
             return matches.filter(
                 element => !matches.some(
@@ -1091,42 +1146,136 @@ _MESSAGE_COMPOSER_PINNED_JS = (
         return pinned;
     };
 """
+    + _MESSAGE_TEXT_JS
 )
 
+# A line break is entered with insertLineBreak, the editing command Chromium
+# runs for Shift+Enter: the same <br> and the same input event (measured), and
+# none of the keydown, keypress, beforeinput or textInput events a key press
+# brings. Sending on Enter has to cancel the newline, so it can only listen to
+# one of those cancelable events, and this program fires none of them. That is
+# why no key is ever pressed here, Shift+Enter included (fork commit 2d8b06b
+# typed it): a handler that ignores the modifier, or a modifier the page does
+# not see held, would send the first line alone. insertText is never handed a
+# line break either: Chromium enters one as a paragraph split, which is Enter's
+# own command, and so is insertParagraph by name.
+#
+# Nothing else runs while this program does, so a click on the pinned submit,
+# a form submission, or an editor emptied of what was entered can only be the
+# page answering an input event this program fired, as a send. Entry stops at
+# the first such sign and says so, which keeps the rest from leaving as a
+# second message (the split upstream #720 fixed) and tells the caller that a
+# message may already have left. A page that sends from an input event without
+# clicking, submitting or emptying anything would go unseen, but it would have
+# to act on an event that cannot cancel the newline it reports.
 _MESSAGE_COMPOSER_WRITE_JS = (
     "(owner, arg) => {"
     + _MESSAGE_COMPOSER_PINNED_JS
     + r"""
         let pinned = validatePinned(arg, false);
         if (!pinned) return 'invalid';
-        const {editor} = pinned;
-        if ((editor.innerText || '').replace(/\s+/g, ' ').trim()) {
+        const composer = pinned;
+        const {editor, button} = composer;
+        const holdsText = () => !!(editor.innerText || '').replace(/\s+/g, ' ').trim();
+        if (holdsText()) {
             return 'occupied';
         }
         editor.focus();
         pinned = validatePinned(arg, false);
         if (!pinned || document.activeElement !== editor) return 'invalid';
-        if ((editor.innerText || '').replace(/\s+/g, ' ').trim()) {
+        if (holdsText()) {
             return 'occupied';
         }
+        const lines = arg.message.split('\n');
         if (
             typeof document.queryCommandSupported !== 'function' ||
             !document.queryCommandSupported('insertText') ||
+            (lines.length > 1 && !document.queryCommandSupported('insertLineBreak')) ||
             typeof document.execCommand !== 'function'
         ) {
             return 'unsupported';
         }
-        const inserted = document.execCommand('insertText', false, arg.message);
-        if ((editor.innerText || editor.textContent || '') === arg.message) {
-            pinned.ownedMessage = arg.message;
+        // Every command must land in the pinned editor. The page can move the
+        // focus or the caret in answer to the input event the previous command
+        // fired, and the next command would edit wherever they went.
+        const caretInEditor = () => {
+            if (!validatePinned(arg, false) || document.activeElement !== editor) {
+                return false;
+            }
+            const selection = document.getSelection();
+            return !!selection &&
+                selection.rangeCount === 1 &&
+                editor.contains(selection.anchorNode) &&
+                editor.contains(selection.focusNode);
+        };
+        let submitted = false;
+        const onClick = event => {
+            if (event.target instanceof Node && button.contains(event.target)) {
+                submitted = true;
+            }
+        };
+        const onSubmit = () => {
+            submitted = true;
+        };
+        window.addEventListener('click', onClick, true);
+        window.addEventListener('submit', onSubmit, true);
+        let written = '';
+        let outcome = 'written';
+        try {
+            for (const [index, line] of lines.entries()) {
+                if (index > 0) {
+                    if (!caretInEditor()) {
+                        outcome = 'invalid';
+                        break;
+                    }
+                    const broken = document.execCommand('insertLineBreak');
+                    if (submitted) break;
+                    if (broken !== true) {
+                        outcome = 'unsupported';
+                        break;
+                    }
+                    written += '\n';
+                    if (!editorHoldsLines(editor, written)) {
+                        outcome = holdsText() ? 'invalid' : 'interrupted';
+                        break;
+                    }
+                }
+                // A blank line is two line breaks in a row, with nothing to enter.
+                if (!line) continue;
+                if (!caretInEditor()) {
+                    outcome = 'invalid';
+                    break;
+                }
+                const inserted = document.execCommand('insertText', false, line);
+                written += line;
+                if (submitted) break;
+                if (!editorHolds(editor, written)) {
+                    outcome = inserted !== true
+                        ? 'unsupported'
+                        : holdsText() ? 'invalid' : 'interrupted';
+                    break;
+                }
+                // Owned line by line, so cleanup can also remove what an
+                // entry stopped part way through left behind, line breaks
+                // after it included (see editorHoldsLines).
+                composer.ownedMessage = written;
+                if (inserted !== true) {
+                    outcome = 'unsupported';
+                    break;
+                }
+            }
+        } finally {
+            window.removeEventListener('click', onClick, true);
+            window.removeEventListener('submit', onSubmit, true);
         }
-        if (inserted !== true) return 'unsupported';
+        if (submitted) return 'interrupted';
+        if (outcome !== 'written') return outcome;
         pinned = validatePinned(arg, false);
         if (
             !pinned ||
             document.activeElement !== editor ||
-            pinned.ownedMessage !== arg.message ||
-            (editor.innerText || editor.textContent || '') !== arg.message
+            composer.ownedMessage !== arg.message ||
+            !editorHolds(editor, arg.message)
         ) {
             return 'invalid';
         }
@@ -1143,7 +1292,7 @@ _MESSAGE_COMPOSER_SUBMIT_READY_JS = (
             !pinned ||
             document.activeElement !== pinned.editor ||
             pinned.ownedMessage !== arg.message ||
-            (pinned.editor.innerText || pinned.editor.textContent || '') !== arg.message
+            !editorHolds(pinned.editor, arg.message)
         ) {
             return 'invalid';
         }
@@ -1154,9 +1303,17 @@ _MESSAGE_COMPOSER_SUBMIT_READY_JS = (
     }"""
 )
 
-_MESSAGE_COMPOSER_CLEANUP_JS = r"""(owner, arg) => {
+_MESSAGE_COMPOSER_CLEANUP_JS = (
+    "(owner, arg) => {"
+    + _MESSAGE_TEXT_JS
+    + r"""
     const pinned = owner?.__linkedinMcpComposer;
-    if (!pinned || pinned.ownedMessage !== arg.message) return false;
+    // What this call entered and verified: the whole message, or the lines an
+    // entry that stopped part way through got in.
+    const owned = pinned?.ownedMessage;
+    if (typeof owned !== 'string' || !owned || !arg.message.startsWith(owned)) {
+        return false;
+    }
     const {editor, ancestorChain} = pinned;
     const currentChain = [];
     let ancestor = editor?.parentElement;
@@ -1174,7 +1331,7 @@ _MESSAGE_COMPOSER_CLEANUP_JS = r"""(owner, arg) => {
         currentChain.some((scope, index) => scope !== ancestorChain[index]) ||
         !currentChain.includes(owner) ||
         !owner.contains(editor) ||
-        (editor.innerText || editor.textContent || '') !== arg.message
+        !editorHoldsLines(editor, owned)
     ) {
         return false;
     }
@@ -1188,6 +1345,7 @@ _MESSAGE_COMPOSER_CLEANUP_JS = r"""(owner, arg) => {
     }));
     return true;
 }"""
+)
 
 _MESSAGE_COMPOSER_SUBMIT_JS = (
     "(owner, arg) => {"
@@ -1198,7 +1356,7 @@ _MESSAGE_COMPOSER_SUBMIT_JS = (
             !pinned ||
             document.activeElement !== pinned.editor ||
             pinned.ownedMessage !== arg.message ||
-            (pinned.editor.innerText || pinned.editor.textContent || '') !== arg.message
+            !editorHolds(pinned.editor, arg.message)
         ) {
             return 'invalid';
         }
@@ -1544,12 +1702,21 @@ class MessageSender:
         target: _MessageTarget,
         owner: Any,
     ) -> str:
-        """Insert text synchronously into the pinned local editor."""
+        """Insert text synchronously into the pinned local editor.
+
+        ``interrupted`` means the page reacted to the entry as to a send, so
+        part of the message may already have left; see
+        ``_MESSAGE_COMPOSER_WRITE_JS``.
+        """
         result = await owner.evaluate(
             _MESSAGE_COMPOSER_WRITE_JS,
             {**self._message_target_argument(target), "message": message},
         )
-        return result if result in {"written", "occupied", "unsupported"} else "invalid"
+        return (
+            result
+            if result in {"written", "occupied", "unsupported", "interrupted"}
+            else "invalid"
+        )
 
     async def _wait_for_verified_submit(
         self,
@@ -1776,10 +1943,14 @@ class MessageSender:
         validated nor used, and ``profile_urn`` is refused because a thread
         page offers nothing to verify it against.
 
+        A line break in ``message`` is entered as a line break, never as a
+        key press, so a multi-paragraph message leaves as one message (#441);
+        ``contracts.normalize_message`` says what is typed exactly.
+
         Args:
             linkedin_username: LinkedIn username of the recipient. Ignored when
                 ``thread_id`` is given.
-            message: The message text to send.
+            message: The message text to send; LF and CRLF line breaks allowed.
             confirm_send: Must be True to actually send (False does a dry run).
             profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against
                 the recipient resolved from the loaded profile snapshot.
@@ -1795,6 +1966,7 @@ class MessageSender:
         refusal = contracts.refuse_an_invalid_message(linkedin_username, message)
         if refusal is not None:
             return refusal
+        message = contracts.normalize_message(message)
         linkedin_username = normalize_person_identifier(linkedin_username)
         if profile_urn is not None:
             profile_urn = normalize_profile_urn(profile_urn)
@@ -1877,6 +2049,7 @@ class MessageSender:
         refusal = contracts.refuse_an_invalid_thread_message(target.thread_id, message)
         if refusal is not None:
             return refusal
+        message = contracts.normalize_message(message)
 
         await self._navigator._navigate_to_page(target.thread_url)
         # Before the landing check, so a checkpoint reached instead of the
@@ -1925,8 +2098,9 @@ class MessageSender:
         Shared by both targets from the moment the route is pinned, so a thread
         reply clears every gate a profile send does: the unchanged route after
         each await, one verified composer, the dry run, an occupied draft,
-        Enter-to-send, one pinned submit, the verified write, the confirmation
-        observer, and cleanup of text nothing submitted.
+        Enter-to-send, one pinned submit, the verified write (line breaks
+        included, and stopped at any sign the page took it for a send), the
+        confirmation observer, and cleanup of text nothing submitted.
         """
         await self._session.check_rate_limit()
         if self._page.url != expected_route:
@@ -2053,6 +2227,21 @@ class MessageSender:
                     target=target,
                     owner=owner,
                 )
+                if write_result == "interrupted":
+                    # Answered before the route check: whatever else changed,
+                    # a message may have left, and nothing may be cleaned up.
+                    may_have_submitted = True
+                    return contracts.message_action_result(
+                        self._page.url,
+                        "send_unconfirmed",
+                        "The composer reacted to the text entry as if it had been "
+                        "sent, so part of the message may already have been "
+                        "submitted. Nothing more was typed or clicked. Check the "
+                        "conversation before retrying; retrying may deliver the "
+                        "message twice.",
+                        recipient_selected=recipient_selected,
+                        retry_safe=False,
+                    )
                 if not _route_is_safe(self._page.url, target):
                     return contracts.message_action_result(
                         self._page.url,

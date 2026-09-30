@@ -16,6 +16,7 @@ import anyio
 import pytest
 from patchright.async_api import async_playwright
 
+from linkedin_mcp_server.scraping.contracts import INVALID_MESSAGE_CONTROL_REASON
 from linkedin_mcp_server.scraping.message_sender import (
     MessageSender,
     _ProfileMessageTarget,
@@ -1031,8 +1032,8 @@ class TestComposerRecipientDom:
 class TestSendConfirmationDom:
     @pytest.mark.parametrize(
         "message",
-        ["First\nSecond", "First\rSecond", "First\tSecond", "First\x7fSecond"],
-        ids=["newline", "carriage-return", "tab", "del"],
+        ["First\rSecond", "First\tSecond", "First\x1bSecond", "First\x7fSecond"],
+        ids=["carriage-return", "tab", "escape", "del"],
     )
     async def test_control_characters_are_rejected_before_dom_interaction(
         self, dom_page, message
@@ -1042,9 +1043,7 @@ class TestSendConfirmationDom:
         )
 
         assert result["status"] == "invalid_message"
-        assert result["message"] == (
-            "Message must not contain control characters or line breaks."
-        )
+        assert result["message"] == INVALID_MESSAGE_CONTROL_REASON
         assert result["retry_safe"] is True
         assert await dom_page.evaluate("document.body.dataset.clicked") is None
         assert (await dom_page.locator("#composer").inner_text()).strip() == ""
@@ -1505,3 +1504,344 @@ class TestSendConfirmationDom:
         assert (await dom_page.locator("#composer").inner_text()).strip() == MESSAGE
         with pytest.raises(Exception, match="closed"):
             await captured["owner"].evaluate("owner => owner.isConnected")
+
+
+# A multi-paragraph reply, the shape #441 is about: paragraph breaks (a blank
+# line) and plain line breaks, so an entry that turns either into the other
+# changes the lines the editor shows.
+MULTILINE = (
+    "Hi Fadi,\n\nThanks for reaching out.\nI am open to a call next week.\n\n"
+    "Best,\nAlex"
+)
+
+# Ways a sent multi-line message can render. Each shows the same lines, which
+# is all the confirmation may rely on: innerText gives a paragraph break as two
+# newlines or more depending on the markup, never the same count for all.
+# "joined" puts every line on one, and is some other text.
+MULTILINE_RENDER_JS = """
+  function fillUnit(unit, text, mode) {
+    unit.textContent = '';
+    if (mode === 'pre-wrap') {
+      unit.style.whiteSpace = 'pre-wrap';
+      unit.textContent = text;
+    } else if (mode === 'br') {
+      text.split('\\n').forEach((line, index) => {
+        if (index) unit.appendChild(document.createElement('br'));
+        unit.appendChild(document.createTextNode(line));
+      });
+    } else if (mode === 'paragraphs') {
+      for (const paragraph of text.split(/\\n{2,}/)) {
+        const p = document.createElement('p');
+        fillUnit(p, paragraph, 'br');
+        unit.appendChild(p);
+      }
+    } else if (mode === 'line-paragraphs') {
+      for (const line of text.split('\\n').filter(Boolean)) {
+        const p = document.createElement('p');
+        p.textContent = line;
+        unit.appendChild(p);
+      }
+    } else if (mode === 'joined') {
+      unit.textContent = text.split(/\\n+/).join(' ');
+    }
+  }
+  function renderedItem(text, eventUrn, sender, mode) {
+    const entry = messageItem('', eventUrn, sender);
+    const unit = document.createElement('div');
+    unit.className = 'message-unit';
+    entry.querySelector('.message-unit').replaceWith(unit);
+    fillUnit(unit, text, mode);
+    return entry;
+  }
+"""
+
+# A composer whose Enter sends, wired to every key path at once: Enter with or
+# without Shift, as keydown or keypress, and a beforeinput line break or
+# paragraph each send what the editor holds and empty it, as an Enter-to-send
+# composer does. Its Send button stays, so the tool does not refuse it, and it
+# is the only path the tool may use. Every send renders the measured open-thread
+# sequence: a client placeholder, then the server node, placeholder removed.
+ENTER_SENDS_JS = (
+    MULTILINE_RENDER_JS
+    + """
+  const composer = document.getElementById('composer');
+  document.body.dataset.sends = '';
+  document.body.dataset.keyEvents = '0';
+  function sendComposer(source) {
+    document.body.dataset.sends += `${source};`;
+    document.body.dataset.sentHtml = composer.innerHTML;
+    const text = composer.innerText;
+    const placeholder = renderedItem(text, 'client-uuid', undefined, RENDER_MODE);
+    document.getElementById('thread').appendChild(placeholder);
+    composer.textContent = '';
+    setTimeout(() => {
+      document.getElementById('thread').appendChild(renderedItem(
+        text, 'urn:li:msg_message:(self,server-new)', SELF_URN, RENDER_MODE));
+      placeholder.remove();
+    }, 50);
+  }
+  for (const type of ['keydown', 'keypress', 'keyup', 'beforeinput', 'textInput']) {
+    composer.addEventListener(type, () => {
+      document.body.dataset.keyEvents = String(
+        Number(document.body.dataset.keyEvents) + 1);
+    });
+  }
+  for (const type of ['keydown', 'keypress']) {
+    composer.addEventListener(type, event => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        sendComposer(`enter-${type}`);
+      }
+    });
+  }
+  composer.addEventListener('beforeinput', event => {
+    if (['insertLineBreak', 'insertParagraph'].includes(event.inputType)) {
+      event.preventDefault();
+      sendComposer('beforeinput');
+    }
+  });
+  document.getElementById('send').addEventListener('click', event => {
+    event.preventDefault();
+    sendComposer('button');
+  });
+"""
+)
+
+
+def enter_sends_page(mode: str = "br", *, extra_js: str = "") -> str:
+    return compose_page(f"const RENDER_MODE = '{mode}';" + ENTER_SENDS_JS + extra_js)
+
+
+async def last_unit_text(page) -> str:
+    return await page.locator("#thread .msg").last.locator(".message-unit").inner_text()
+
+
+class TestMultilineMessageDom:
+    """A multi-line message goes out whole, as one message (#441)."""
+
+    async def test_line_breaks_are_entered_without_a_key_even_where_enter_sends(
+        self, dom_page
+    ):
+        result = await send(dom_page, enter_sends_page(), message=MULTILINE)
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        # One send, through the Send button: no Enter path ever fired, and
+        # no key event of any kind reached the composer.
+        assert await dom_page.evaluate("document.body.dataset.sends") == "button;"
+        assert await dom_page.evaluate("document.body.dataset.keyEvents") == "0"
+        # The editor held the lines as <br> line breaks, never a block split.
+        sent_html = await dom_page.evaluate("document.body.dataset.sentHtml")
+        assert sent_html.count("<br>") == MULTILINE.count("\n")
+        assert "<div" not in sent_html and "<p" not in sent_html
+        assert await dom_page.locator("#thread .msg").count() == 2
+        assert await last_unit_text(dom_page) == MULTILINE
+
+    async def test_crlf_and_edge_blank_lines_are_sent_normalized(self, dom_page):
+        result = await send(
+            dom_page,
+            enter_sends_page(),
+            message="\r\n" + MULTILINE.replace("\n", "   \r\n") + "\r\n\r\n",
+        )
+
+        assert result["status"] == "sent"
+        assert await dom_page.evaluate("document.body.dataset.sends") == "button;"
+        assert await last_unit_text(dom_page) == MULTILINE
+
+    @pytest.mark.parametrize(
+        "mode", ["br", "pre-wrap", "paragraphs", "line-paragraphs"]
+    )
+    async def test_confirmation_matches_the_lines_however_they_render(
+        self, dom_page, mode
+    ):
+        result = await send(dom_page, enter_sends_page(mode), message=MULTILINE)
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+        assert result["retry_safe"] is False
+
+    async def test_same_node_id_transition_confirms_a_multiline_message(self, dom_page):
+        html = compose_page(
+            MULTILINE_RENDER_JS
+            + """
+          document.getElementById('send').addEventListener('click', event => {
+            event.preventDefault();
+            document.body.dataset.clicked = 'true';
+            const composer = document.getElementById('composer');
+            const entry = renderedItem(
+              composer.innerText, 'client-opaque-id', undefined, 'paragraphs');
+            document.getElementById('thread').appendChild(entry);
+            setTimeout(() => {
+              entry.setAttribute('data-event-urn', 'server-opaque-id');
+            }, 0);
+            composer.textContent = '';
+          });
+        """
+        )
+
+        result = await send(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "sent"
+        assert result["sent"] is True
+
+    async def test_an_editor_that_drops_a_paragraph_break_is_never_submitted(
+        self, dom_page
+    ):
+        # The page folds every blank line out of the editor as text arrives,
+        # keeping the caret at the end. The lines are all there, but not the
+        # message: it is never submitted, and text the tool can no longer prove
+        # is its own is left where it is.
+        html = enter_sends_page(
+            extra_js="""
+          composer.addEventListener('input', event => {
+            if (event.inputType !== 'insertText') return;
+            const html = composer.innerHTML.replace(/(<br>){2,}/g, '<br>');
+            if (html === composer.innerHTML) return;
+            composer.innerHTML = html;
+            const range = document.createRange();
+            range.selectNodeContents(composer);
+            range.collapse(false);
+            getSelection().removeAllRanges();
+            getSelection().addRange(range);
+          });
+        """
+        )
+
+        result = await send(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "compose_interact_failed"
+        assert result["retry_safe"] is True
+        assert await dom_page.evaluate("document.body.dataset.sends") == ""
+        assert await dom_page.locator("#composer").inner_text() == (
+            "Hi Fadi,\nThanks for reaching out."
+        )
+
+    async def test_the_same_words_on_one_line_are_not_this_message(self, dom_page):
+        result = await send(dom_page, enter_sends_page("joined"), message=MULTILINE)
+
+        assert await dom_page.evaluate("document.body.dataset.sends") == "button;"
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+
+    async def test_a_message_split_into_one_per_paragraph_is_not_confirmed(
+        self, dom_page
+    ):
+        # The failure upstream #720 fixed: each paragraph left as a message of
+        # its own. No one node shows the whole text, so nothing confirms.
+        html = compose_page(
+            MULTILINE_RENDER_JS
+            + """
+          document.getElementById('send').addEventListener('click', event => {
+            event.preventDefault();
+            document.body.dataset.clicked = 'true';
+            const composer = document.getElementById('composer');
+            const paragraphs = composer.innerText.split(/\\n{2,}/);
+            composer.textContent = '';
+            paragraphs.forEach((paragraph, index) => {
+              document.getElementById('thread').appendChild(renderedItem(
+                paragraph, `urn:li:msg_message:(self,part-${index})`, SELF_URN,
+                'br'));
+            });
+          });
+        """
+        )
+
+        result = await send(dom_page, html, message=MULTILINE)
+
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "true"
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+
+    async def test_disabled_submit_cleans_every_entered_line(self, dom_page):
+        html = enter_sends_page().replace(
+            '<button id="send" type="submit">Send</button>',
+            '<button id="send" type="submit" disabled>Send</button>',
+        )
+
+        result = await send(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "send_unavailable"
+        assert result["sent"] is False
+        assert result["retry_safe"] is True
+        assert await dom_page.evaluate("document.body.dataset.sends") == ""
+        assert await dom_page.locator("#composer").inner_text() == ""
+
+    async def test_focus_moved_mid_entry_stops_and_cleans_the_lines_entered(
+        self, dom_page
+    ):
+        # The page moves focus away once the first line is in. Every later
+        # command would edit the foreign field instead, so entry stops there
+        # and the line it did enter is removed.
+        html = enter_sends_page(
+            extra_js="""
+          document.body.insertAdjacentHTML('beforeend', '<input id="foreign">');
+          composer.addEventListener('input', () => {
+            document.getElementById('foreign').focus();
+          });
+        """
+        )
+
+        result = await send(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "compose_interact_failed"
+        assert result["retry_safe"] is True
+        assert await dom_page.evaluate("document.body.dataset.sends") == ""
+        assert await dom_page.locator("#composer").inner_text() == ""
+        assert await dom_page.locator("#foreign").input_value() == ""
+
+    async def test_a_composer_sending_on_a_line_break_input_stops_the_entry(
+        self, dom_page
+    ):
+        # A composer no known editor resembles: it sends from the input event
+        # of a line break, which cannot cancel the newline. Entry stops there,
+        # so the rest never leaves as a second message, and the caller is told
+        # a message may have left.
+        html = enter_sends_page(
+            extra_js="""
+          composer.addEventListener('input', event => {
+            if (event.inputType === 'insertLineBreak') sendComposer('input');
+          });
+        """
+        )
+
+        result = await send(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["sent"] is False
+        assert result["retry_safe"] is False
+        assert await dom_page.evaluate("document.body.dataset.sends") == "input;"
+        assert await dom_page.locator("#composer").inner_text() == ""
+        assert await dom_page.locator("#thread .msg").count() == 2
+
+    async def test_a_page_click_on_send_during_entry_stops_it_unanswered(
+        self, dom_page
+    ):
+        # Here the page clicks Send itself on a line break, and that click
+        # sends nothing visible. The tool must not type on and click again.
+        html = compose_page(
+            """
+          const composer = document.getElementById('composer');
+          composer.addEventListener('input', event => {
+            if (event.inputType === 'insertLineBreak') {
+              document.getElementById('send').click();
+            }
+          });
+          document.getElementById('send').addEventListener('click', event => {
+            event.preventDefault();
+            document.body.dataset.clicked = String(
+              Number(document.body.dataset.clicked || 0) + 1);
+          });
+        """
+        )
+
+        result = await send(dom_page, html, message=MULTILINE)
+
+        assert result["status"] == "send_unconfirmed"
+        assert result["retry_safe"] is False
+        assert await dom_page.evaluate("document.body.dataset.clicked") == "1"
+        # Nothing past the first line break was entered, and what was is left
+        # alone: it may be on its way.
+        assert (await dom_page.locator("#composer").inner_text()).strip() == (
+            "Hi Fadi,"
+        )

@@ -103,16 +103,54 @@ def message_action_result(
     }
 
 
+INVALID_MESSAGE_CONTROL_REASON = (
+    "Message must not contain control characters other than line breaks "
+    "(LF or CRLF). Tabs, a lone CR, DEL and every other C0 character are "
+    "refused."
+)
+
+
+def _unify_line_breaks(message: str) -> str:
+    return message.replace("\r\n", "\n")
+
+
 def _invalid_message_reason(message: str) -> str | None:
     """Why a message may not reach the composer, or ``None`` when it may."""
-    if not message.strip():
+    text = _unify_line_breaks(message)
+    if not text.strip():
         return "Message must contain non-whitespace characters."
-    if any(ord(character) < 32 or ord(character) == 127 for character in message):
-        # Keep the browser-side insertion contract to plain message text.
-        # Reject every C0 control and DEL before a session is acquired so no
-        # control input can reach the contenteditable surface.
-        return "Message must not contain control characters or line breaks."
+    if any(
+        (ord(character) < 32 and character != "\n") or ord(character) == 127
+        for character in text
+    ):
+        # A line break is the one control a message may carry (#441), and the
+        # page JS enters it as the editor's line-break command, never as a key
+        # (see message_sender._MESSAGE_COMPOSER_WRITE_JS). Every other C0
+        # control and DEL is refused before a session is acquired, so no
+        # control input can reach the contenteditable surface. A lone CR is
+        # refused too: it is a line break only on a platform nobody sends
+        # from, and it could hide a line from anyone reading the text.
+        return INVALID_MESSAGE_CONTROL_REASON
     return None
+
+
+def normalize_message(message: str) -> str:
+    """The exact text a send enters and confirms, for a message that passed.
+
+    CRLF becomes LF. Spaces at the end of a line are dropped: no rendering
+    shows them, and Chromium's editor would store each as U+00A0, which is not
+    the character the caller wrote. Blank lines before the first line of text
+    and after the last are dropped, because LinkedIn does not render them and
+    a trailing one would leave the caret on an empty line. A blank line between
+    two lines of text is a paragraph break and is kept, as are the leading
+    spaces of a line.
+    """
+    lines = [line.rstrip(" ") for line in _unify_line_breaks(message).split("\n")]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
 
 
 def refuse_an_invalid_message(

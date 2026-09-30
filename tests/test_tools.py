@@ -10,6 +10,7 @@ from fastmcp.tools import FunctionTool
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.scraping.contracts import (
+    INVALID_MESSAGE_CONTROL_REASON,
     RATE_LIMITED_SECTION_TEXT,
     SEND_INTERRUPTED_WARNING,
 )
@@ -2026,7 +2027,7 @@ class TestMessagingTools:
             "connection request is accepted."
         ) in description
 
-    async def test_send_message_schema_explains_single_line_controls(self):
+    async def test_send_message_schema_explains_line_breaks_and_controls(self):
         from linkedin_mcp_server.tools.messaging import register_messaging_tools
 
         mcp = FastMCP("test")
@@ -2036,9 +2037,43 @@ class TestMessagingTools:
         assert tool is not None
         message_schema = tool.parameters["properties"]["message"]
         assert " ".join(message_schema["description"].split()) == (
-            "Single-line message text to send. C0 control characters and DEL are "
-            "rejected, including CR, LF, and tab."
+            "Message text to send. Line breaks (LF or CRLF) are kept, so a "
+            "multi-paragraph message is sent whole; blank lines before the first "
+            "line or after the last, and spaces at the end of a line, are "
+            "dropped. Every other C0 control character, including tab and a CR "
+            "outside CRLF, and DEL are rejected."
         )
+        description = " ".join(tool.description.split())
+        assert (
+            "Each line break is entered with the composer's line-break command, "
+            "the one Shift+Enter runs, and never as a key press, so it cannot "
+            "trigger an Enter-to-send and the whole message is sent as one "
+            "message."
+        ) in description
+
+    @pytest.mark.parametrize(
+        "thread_id", [None, "2-cmVjcnVpdGVyLXRocmVhZA=="], ids=["profile", "thread"]
+    )
+    async def test_send_message_passes_a_multiline_message_through(
+        self, mock_context, serve_extractor, thread_id
+    ):
+        message = "Hi Ada,\r\n\r\nThanks!\nBob"
+        mock_extractor = _make_mock_extractor({"status": "sent", "sent": True})
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "send_message")
+        result = await tool_fn(
+            "testuser", message, True, mock_context, thread_id=thread_id
+        )
+
+        assert result["status"] == "sent"
+        mock_extractor.send_message.assert_awaited_once()
+        assert mock_extractor.send_message.await_args.args[1] == message
 
     @pytest.mark.parametrize("message", ["", "   \t\n"], ids=["empty", "whitespace"])
     async def test_send_message_refuses_blank_before_a_session(
@@ -2072,8 +2107,14 @@ class TestMessagingTools:
 
     @pytest.mark.parametrize(
         "message",
-        [f"First{chr(codepoint)}Second" for codepoint in (*range(32), 127)],
-        ids=[f"U+{codepoint:04X}" for codepoint in (*range(32), 127)],
+        [
+            f"First{chr(codepoint)}Second"
+            for codepoint in (*range(32), 127)
+            if codepoint != 10
+        ],
+        ids=[
+            f"U+{codepoint:04X}" for codepoint in (*range(32), 127) if codepoint != 10
+        ],
     )
     async def test_send_message_refuses_controls_before_a_session(
         self, mock_context, message
@@ -2092,9 +2133,7 @@ class TestMessagingTools:
 
         ready.assert_not_awaited()
         assert result["status"] == "invalid_message"
-        assert result["message"] == (
-            "Message must not contain control characters or line breaks."
-        )
+        assert result["message"] == INVALID_MESSAGE_CONTROL_REASON
         assert result["retry_safe"] is True
 
     @pytest.mark.parametrize(
@@ -2314,7 +2353,9 @@ class TestMessagingTools:
             username, "Hello!", confirm_send=True, thread_id=self._THREAD_ID
         )
 
-    @pytest.mark.parametrize("message", ["", "a\nb"], ids=["blank", "newline"])
+    @pytest.mark.parametrize(
+        "message", ["", "\n\n", "a\tb", "a\rb"], ids=["blank", "lf-only", "tab", "cr"]
+    )
     async def test_thread_reply_refuses_an_invalid_message_before_a_session(
         self, mock_context, message
     ):

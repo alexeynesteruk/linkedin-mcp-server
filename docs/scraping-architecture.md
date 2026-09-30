@@ -23,7 +23,7 @@ a page-owning collaborator.
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_CONFIRM_DIALOG_PRIMARY_JS`, `CLICK_INCOMING_ACCEPT_JS`, `CLICK_WITHDRAW_ANCHOR_JS`, `CONFIRM_DIALOG_BUTTON_COUNT_JS`, `ConnectionActions`, `OPEN_INCOMING_ROW_MORE_JS`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile`, `WITHDRAW_SETTLE_SECONDS` | `page-owning` |
 | `content` | `PageContentReader` | `page-owning` |
-| `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `THREAD_REPLY_PROFILE_URN_REFUSAL`, `message_action_result()`, `rate_limited_section_error()`, `refuse_an_invalid_message()`, `refuse_an_invalid_thread_message()` | `browser-free` |
+| `contracts` | `ExtractedSection`, `FilterValidationError`, `INVALID_MESSAGE_CONTROL_REASON`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `THREAD_REPLY_PROFILE_URN_REFUSAL`, `message_action_result()`, `normalize_message()`, `rate_limited_section_error()`, `refuse_an_invalid_message()`, `refuse_an_invalid_thread_message()` | `browser-free` |
 | `conversations` | `ConversationReader`, `INBOX_FILTERS`, `INBOX_FILTER_LABELS`, `strip_select_conversation_prefix()` | `page-owning` |
 | `extractor` | `LinkedInExtractor` | `page-owning` |
 | `feed` | `FeedScraper` | `page-owning` |

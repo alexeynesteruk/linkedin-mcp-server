@@ -982,7 +982,7 @@
               "type": "string"
             },
             "message": {
-              "description": "Single-line message text to send. C0 control characters and\nDEL are rejected, including CR, LF, and tab.",
+              "description": "Message text to send. Line breaks (LF or CRLF) are kept, so\na multi-paragraph message is sent whole; blank lines before the\nfirst line or after the last, and spaces at the end of a line,\nare dropped. Every other C0 control character, including tab\nand a CR outside CRLF, and DEL are rejected.",
               "type": "string"
             },
             "profile_urn": {
