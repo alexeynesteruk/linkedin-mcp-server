@@ -2037,3 +2037,46 @@ class TestSearchPeopleFacetsAndPages:
             "/in/b/",
             "/in/c/",
         ]
+
+
+class TestSearchPeopleBudget:
+    async def test_a_page_that_would_not_fit_the_budget_is_not_started(self, mock_page):
+        scraper = _scraper(mock_page)
+        pages = [
+            extracted("Page one", _people("a")),
+            extracted("Page two", _people("b")),
+            extracted("never read", _people("c")),
+        ]
+        # Each capture takes 40s of a 100s budget (0.8 * 125): page one ends at
+        # 40s, page two at 82s, and a third (82 + 2 + 40) would not fit.
+        clock = iter([0.0, 0.0, 40.0, 40.0, 42.0, 82.0, 82.0])
+        with (
+            patch.object(
+                scraper._capture, "capture", new_callable=AsyncMock, side_effect=pages
+            ) as capture,
+            patch.object(
+                type(scraper._session),
+                "monotonic",
+                side_effect=lambda _self: next(clock),
+                autospec=True,
+            ),
+            patch("linkedin_mcp_server.scraping.person.asyncio.sleep", AsyncMock()),
+        ):
+            result = await scraper.search_people(
+                "engineer", max_pages=3, tool_timeout=125.0
+            )
+
+        assert capture.await_count == 2
+        assert result["sections"]["search_results"] == "Page one\n---\nPage two"
+
+    async def test_the_first_page_is_always_read(self, mock_page):
+        scraper = _scraper(mock_page)
+        with patch.object(
+            scraper._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("Page one", _people("a")),
+        ) as capture:
+            await scraper.search_people("engineer", tool_timeout=0.001)
+
+        assert capture.await_count == 1

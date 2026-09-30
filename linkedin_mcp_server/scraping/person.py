@@ -11,6 +11,7 @@ import re
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.scraping.capture import (
@@ -180,6 +181,10 @@ _SIDEBAR_EXPANDED_PROFILES_JS = """() => {
 
 #: Between the pages of a multi-page people search.
 PAGE_SEPARATOR = "\n---\n"
+
+#: Share of the tool timeout a multi-page people search may spend, leaving room
+#: to return what it read. The same fraction search_jobs measured for its walk.
+SEARCH_BUDGET_FRACTION = 0.8
 
 
 class PersonScraper:
@@ -478,6 +483,7 @@ class PersonScraper:
         current_company: str | None = None,
         geo_urn: list[str] | None = None,
         max_pages: int = 1,
+        tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Search for people and extract the results page(s).
 
@@ -503,6 +509,10 @@ class PersonScraper:
             max_pages: Result pages to load through ``&page=N`` (default 1).
                 A later page that adds no new ``person`` reference is past the
                 last result, so the walk stops there.
+            tool_timeout: The calling tool's budget. A later page is not
+                started when the slowest page so far would not fit in
+                ``SEARCH_BUDGET_FRACTION`` of it, because a cancelled tool
+                returns nothing and every page already read would be lost.
 
         Returns:
             {url, sections: {search_results: text}} where ``url`` is the
@@ -523,15 +533,29 @@ class PersonScraper:
         page_references: list[Reference] = []
         seen_people: set[str] = set()
         section_errors: dict[str, dict[str, Any]] = {}
+        started = self._session.monotonic()
+        budget = tool_timeout * SEARCH_BUDGET_FRACTION
+        slowest_page = 0.0
         for page_num in range(max(1, max_pages)):
             if page_num > 0:
+                elapsed = self._session.monotonic() - started
+                if elapsed + NAV_DELAY + slowest_page > budget:
+                    logger.debug(
+                        "People search stopping before page %d: %.1fs of %.1fs used",
+                        page_num + 1,
+                        elapsed,
+                        budget,
+                    )
+                    break
                 await asyncio.sleep(NAV_DELAY)
             page_url = url if page_num == 0 else f"{url}&page={page_num + 1}"
+            page_started = self._session.monotonic()
             extracted = await self._capture.capture(
                 page_url,
                 section_name="search_results",
                 plan=CapturePlan(CaptureMode.SEARCH_RESULTS),
             )
+            slowest_page = max(slowest_page, self._session.monotonic() - page_started)
             if extracted.text == RATE_LIMITED_SECTION_TEXT:
                 section_errors["search_results"] = rate_limited_section_error()
                 break

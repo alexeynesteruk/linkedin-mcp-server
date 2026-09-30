@@ -94,7 +94,7 @@
       },
       "search_people": {
         "coroutine": true,
-        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None, geo_urn: 'list[str] | None' = None, max_pages: 'int' = 1) -> 'dict[str, Any]'"
+        "signature": "(self, keywords: 'str', location: 'str | None' = None, network: 'list[str] | None' = None, current_company: 'str | None' = None, geo_urn: 'list[str] | None' = None, max_pages: 'int' = 1, tool_timeout: 'float' = 180.0) -> 'dict[str, Any]'"
       },
       "search_posts": {
         "coroutine": true,

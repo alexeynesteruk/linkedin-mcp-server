@@ -220,6 +220,7 @@ class LinkedInExtractor:
         current_company: str | None = None,
         geo_urn: list[str] | None = None,
         max_pages: int = 1,
+        tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     ) -> dict[str, Any]:
         """Search for people and extract the results page(s)."""
         return await self._person.search_people(
@@ -229,6 +230,7 @@ class LinkedInExtractor:
             current_company=current_company,
             geo_urn=geo_urn,
             max_pages=max_pages,
+            tool_timeout=tool_timeout,
         )
 
     async def search_companies(self, keywords: str) -> dict[str, Any]:

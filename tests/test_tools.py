@@ -8,6 +8,7 @@ from fastmcp import FastMCP
 from fastmcp.tools import FunctionTool
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
+from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
     SEND_INTERRUPTED_WARNING,
@@ -607,6 +608,7 @@ class TestPersonTool:
             current_company=None,
             geo_urn=None,
             max_pages=1,
+            tool_timeout=DEFAULT_TOOL_TIMEOUT_SECONDS,
         )
 
     async def test_search_people_with_network_and_company_filters(
@@ -645,6 +647,7 @@ class TestPersonTool:
             current_company="1115",
             geo_urn=None,
             max_pages=1,
+            tool_timeout=DEFAULT_TOOL_TIMEOUT_SECONDS,
         )
 
     @pytest.mark.parametrize(
@@ -709,6 +712,7 @@ class TestPersonTool:
             current_company=None,
             geo_urn=None,
             max_pages=1,
+            tool_timeout=DEFAULT_TOOL_TIMEOUT_SECONDS,
         )
 
     async def test_search_people_forwards_geo_urn_and_pages(self, monkeypatch):
@@ -741,6 +745,7 @@ class TestPersonTool:
             current_company=None,
             geo_urn=["103644278"],
             max_pages=2,
+            tool_timeout=DEFAULT_TOOL_TIMEOUT_SECONDS,
         )
 
     async def test_search_people_refuses_a_bad_geo_urn_without_a_browser(

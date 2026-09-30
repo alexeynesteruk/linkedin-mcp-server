@@ -227,6 +227,7 @@ def register_person_tools(
                     current_company=current_company,
                     geo_urn=geo_urn,
                     max_pages=max_pages,
+                    tool_timeout=tool_timeout,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface

@@ -37,7 +37,7 @@ a page-owning collaborator.
 | `link_metadata` | `JOB_PATH_RE`, `RawReference`, `Reference`, `ReferenceKind`, `build_references()`, `choose_reference_text()`, `classify_link()`, `clean_heading()`, `clean_label()`, `dedupe_references()`, `derive_context()`, `normalize_reference()`, `normalize_url()` | `browser-free` |
 | `message_sender` | `MessageSender` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
-| `person` | `PAGE_SEPARATOR`, `PersonScraper` | `page-owning` |
+| `person` | `PAGE_SEPARATOR`, `PersonScraper`, `SEARCH_BUDGET_FRACTION` | `page-owning` |
 | `post_comments` | `PostComments` | `browser-free` |
 | `posts` | `PostSearch` | `browser-free` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
