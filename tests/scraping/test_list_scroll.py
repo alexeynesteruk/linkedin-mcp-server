@@ -1,120 +1,183 @@
-"""Unit tests for the lazy-list scroll loop (browser behavior is in the DOM test)."""
+"""Unit tests for the virtualized-list scroll and merge (browser side is the DOM test)."""
 
 from __future__ import annotations
 
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from linkedin_mcp_server.scraping.comment_thread import MAIN_TEXT_LENGTH_JS
 from linkedin_mcp_server.scraping.list_scroll import (
     DEFAULT_LIST_ROUNDS,
-    SCROLL_LIST_JS,
-    scroll_list_until_stable,
+    SCROLL_LIST_STEP_JS,
+    merge_root_snapshots,
+    scroll_list_collecting,
+    weave_lines,
 )
 from linkedin_mcp_server.scraping.session import ScrapingSession
 
+HEADER = ["Skills", "All", "Tools & Technologies"]
+SIDEBAR = ["Who your viewers also viewed", "Private to you", "View"]
 
-def _page(lengths: list[int], *, probe_fails: bool = False) -> MagicMock:
-    answers = iter(lengths)
+
+def _items(start: int, stop: int) -> list[str]:
+    return [f"Skill {i}" for i in range(start, stop)]
+
+
+class TestWeaveLines:
+    def test_sliding_windows_merge_into_the_whole_list_in_order(self):
+        reads = [
+            HEADER + _items(0, 10) + SIDEBAR,
+            HEADER + _items(6, 18) + SIDEBAR,
+            HEADER + _items(15, 30) + SIDEBAR,
+        ]
+        merged: list[str] = []
+        for read in reads:
+            merged = weave_lines(merged, read)
+
+        assert merged == HEADER + _items(0, 30) + SIDEBAR
+
+    def test_a_window_that_skipped_ahead_still_lands_before_the_sidebar(self):
+        merged = weave_lines(
+            HEADER + _items(0, 5) + SIDEBAR, HEADER + _items(9, 12) + SIDEBAR
+        )
+
+        assert merged == HEADER + _items(0, 5) + _items(9, 12) + SIDEBAR
+
+    def test_lines_repeated_across_items_do_not_scramble_the_order(self):
+        items: list[str] = []
+        for i in range(20):
+            items += [f"Skill {i}", "8 endorsements" if i % 2 else "Endorsed by 5"]
+        merged: list[str] = []
+        for read in (items[0:14], items[10:30], items[26:40]):
+            merged = weave_lines(merged, HEADER + read + SIDEBAR)
+
+        assert merged == HEADER + items + SIDEBAR
+
+    def test_the_same_read_twice_changes_nothing(self):
+        read = HEADER + _items(0, 8) + SIDEBAR
+
+        assert weave_lines(read, read) == read
+
+
+def test_references_keep_their_first_seen_order_once_each():
+    merged = merge_root_snapshots(
+        [
+            {"source": "root", "text": "a", "references": [{"href": "/in/a/"}]},
+            {
+                "source": "root",
+                "text": "b",
+                "references": [{"href": "/in/b/"}, {"href": "/in/a/"}],
+            },
+        ]
+    )
+
+    assert [r["href"] for r in merged["references"]] == ["/in/a/", "/in/b/"]
+    assert merged["source"] == "root"
+
+
+def _page(*, moves: int = 0) -> MagicMock:
+    """A page whose scroller moves on the first *moves* steps, then sits still."""
     page = MagicMock()
     page.viewport_size = {"width": 1000, "height": 600}
     page.mouse.move = AsyncMock()
     page.mouse.wheel = AsyncMock()
+    steps = iter([True] * moves)
 
     async def evaluate(script: str, *args: Any) -> Any:
-        if script == MAIN_TEXT_LENGTH_JS:
-            if probe_fails:
-                raise RuntimeError("context destroyed")
-            return next(answers, lengths[-1])
-        assert script == SCROLL_LIST_JS
-        return True
+        assert script == SCROLL_LIST_STEP_JS
+        return next(steps, False)
 
     page.evaluate = AsyncMock(side_effect=evaluate)
     return page
 
 
-def _scrolls(page: MagicMock) -> int:
-    return sum(
-        1 for call in page.evaluate.await_args_list if call.args[0] == SCROLL_LIST_JS
-    )
+def _reads(*windows: tuple[int, int]) -> AsyncMock:
+    """One root read per scroll position; the last one repeats."""
+    answers = [
+        {
+            "source": "root",
+            "text": "\n".join(HEADER + _items(*w) + SIDEBAR),
+            "references": [],
+        }
+        for w in windows
+    ]
+
+    async def read() -> dict[str, Any]:
+        return answers.pop(0) if len(answers) > 1 else answers[0]
+
+    return AsyncMock(side_effect=read)
 
 
-async def _run(page: MagicMock, rounds: int | None = None) -> None:
+async def _run(page: MagicMock, read: AsyncMock, rounds: int | None = None) -> dict:
     with patch.object(ScrapingSession, "delay", new_callable=AsyncMock):
-        await scroll_list_until_stable(ScrapingSession(page), rounds)
+        return await scroll_list_collecting(ScrapingSession(page), read, rounds)
 
 
-async def test_every_round_scrolls_the_element_and_wheels_the_viewport_centre():
-    page = _page([10, 20, 30])
+async def test_a_virtualized_list_is_collected_whole():
+    page = _page()
 
-    await _run(page, 3)
+    merged = await _run(page, _reads((0, 10), (6, 18), (15, 30), (25, 30)))
 
-    assert _scrolls(page) == 3
-    assert page.mouse.wheel.await_count == 3
+    assert merged["text"].split("\n") == HEADER + _items(0, 30) + SIDEBAR
     page.mouse.move.assert_awaited_once_with(500, 300)
 
 
-async def test_three_rounds_without_growth_end_the_loop():
-    page = _page([10, 20, 20, 20, 20, 20, 20])
+async def test_three_reads_that_add_nothing_end_the_loop():
+    page = _page()
+    read = _reads((0, 10), (0, 12))
 
-    await _run(page, 25)
+    await _run(page, read, 25)
 
-    # grow, then three flat probes: the scroll after the third flat probe is
-    # never issued.
-    assert _scrolls(page) == 4
-
-
-async def test_growth_resets_the_stale_count():
-    page = _page([10, 10, 10, 20, 20, 20, 20])
-
-    await _run(page, 25)
-
-    assert _scrolls(page) == 6
+    # The first read, one that grew, then three flat ones.
+    assert read.await_count == 5
 
 
 async def test_the_round_budget_bounds_a_list_that_keeps_growing():
-    page = _page(list(range(1, 200)))
+    windows = [(i, i + 5) for i in range(0, 400, 3)]
+    read = _reads(*windows)
 
-    await _run(page, 7)
-    assert _scrolls(page) == 7
+    await _run(_page(), read, 7)
+    assert read.await_count == 8
 
-    page = _page(list(range(1, 200)))
-    await _run(page)
-    assert _scrolls(page) == DEFAULT_LIST_ROUNDS
-
-
-async def test_a_zero_budget_does_nothing():
-    page = _page([1])
-
-    await _run(page, 0)
-
-    page.evaluate.assert_not_awaited()
-    page.mouse.move.assert_not_awaited()
+    read = _reads(*windows)
+    await _run(_page(), read)
+    assert read.await_count == DEFAULT_LIST_ROUNDS + 1
 
 
-async def test_a_failed_length_probe_stops_without_scrolling():
-    page = _page([1], probe_fails=True)
+async def test_a_failed_scroll_keeps_what_was_read():
+    page = _page()
+    page.evaluate = AsyncMock(side_effect=RuntimeError("context destroyed"))
 
-    await _run(page, 5)
+    merged = await _run(page, _reads((0, 4)), 5)
 
-    assert _scrolls(page) == 0
+    assert merged["text"].split("\n") == HEADER + _items(0, 4) + SIDEBAR
 
 
 async def test_a_dead_mouse_still_scrolls_the_element():
-    page = _page([1, 2, 3])
+    page = _page()
     page.mouse.move = AsyncMock(side_effect=RuntimeError("closed"))
 
-    await _run(page, 3)
+    await _run(page, _reads((0, 3), (0, 6), (0, 9)), 2)
 
-    assert _scrolls(page) == 3
+    assert page.evaluate.await_count == 2
     page.mouse.wheel.assert_not_awaited()
 
 
-async def test_a_failing_wheel_is_dropped_but_the_loop_continues():
-    page = _page([1, 2, 3])
-    page.mouse.wheel = AsyncMock(side_effect=RuntimeError("closed"))
+async def test_steps_that_still_move_the_scroller_do_not_count_as_stale():
+    # A plain (not virtualized) list already fully in the DOM adds no line
+    # while it is travelled; only once the scroller stops do flat reads count.
+    page = _page(moves=5)
+    read = _reads((0, 10))
 
-    await _run(page, 3)
+    await _run(page, read, 25)
 
-    assert _scrolls(page) == 3
-    assert page.mouse.wheel.await_count == 1
+    # Five moving steps, then three still ones, plus the first read.
+    assert read.await_count == 9
+
+
+async def test_the_wheel_steps_about_a_screen_and_only_once_the_scroller_is_still():
+    page = _page(moves=2)
+
+    await _run(page, _reads((0, 3)), 3)
+
+    # Two steps moved the element, so only the third fell back to the wheel.
+    page.mouse.wheel.assert_awaited_once_with(0, 480)

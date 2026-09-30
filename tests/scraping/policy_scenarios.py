@@ -291,12 +291,15 @@ async def _person_sections_scenario() -> dict[str, Any]:
         }
         for index in range(13)
     ]
+    # Skills reads its list once and again after every step: a page that
+    # never moves and never grows ends after three still steps, four reads.
     roots = [
         _root(
             f"{section} content",
             overflowing if section == "experience" else None,
         )
         for section in PERSON_SECTIONS
+        for _ in range(4 if section == "skills" else 1)
     ]
     page.script("evaluate:root_content", *roots)
     _script_profile_target(page)
@@ -309,9 +312,8 @@ async def _person_sections_scenario() -> dict[str, Any]:
     # Skills scrolls its list instead of looking for a button, so seven of the
     # eight detail pages probe it.
     page.script("show_more.filtered.count", *([0] * 7))
-    # The skills list grows once and then stays flat for the stale limit.
-    page.script("evaluate:comment_thread_length", 10, 20, 20, 20, 20)
-    page.script("evaluate:scroll_main_region", *([True] * 4))
+    # Three steps that move nothing end the skills walk.
+    page.script("evaluate:scroll_main_region", *([False] * 3))
     extractor = _extractor(page)
     callbacks = TraceCallbacks(recorder)
     async with boundaries(recorder, clock):

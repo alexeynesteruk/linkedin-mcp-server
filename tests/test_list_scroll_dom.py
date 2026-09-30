@@ -1,10 +1,11 @@
-"""Browser-DOM tests for the lazy-list scroll used by the skills page.
+"""Browser-DOM tests for the list scroll used by the skills page.
 
-``page.evaluate`` is a mock in the unit suite, so ``SCROLL_LIST_JS`` never
-executes there. These run ``scroll_list_until_stable`` against synthetic lists
-that append their next batch when the real scroller nears its end, for each
-place LinkedIn has been seen to put that scroller: a container inside
-``<main>`` and the document itself.
+``page.evaluate`` is a mock in the unit suite, so ``SCROLL_LIST_JS`` and the
+root read never execute there. These run ``scroll_list_collecting`` against
+synthetic lists that append their next batch when the real scroller nears its
+end, for each place LinkedIn has been seen to put that scroller (a container
+inside ``<main>`` and the document itself), and against a virtualized list that
+unmounts the rows scrolled past, as the live skills page does.
 
 Skipped automatically when chromium is not installed.
 """
@@ -16,7 +17,8 @@ from unittest.mock import patch
 import pytest
 from patchright.async_api import async_playwright
 
-from linkedin_mcp_server.scraping.list_scroll import scroll_list_until_stable
+from linkedin_mcp_server.scraping.content import PageContentReader
+from linkedin_mcp_server.scraping.list_scroll import scroll_list_collecting
 from linkedin_mcp_server.scraping.session import ScrapingSession
 
 pytestmark = [
@@ -108,10 +110,18 @@ async def _real_delay(_self: ScrapingSession, seconds: float) -> None:
     await asyncio.sleep(min(seconds, 0.15))
 
 
-async def _run(page, rounds: int | None = None) -> int:
+async def _collect(page, rounds: int | None = None) -> list[str]:
+    session = ScrapingSession(page)
+    content = PageContentReader(session)
     with patch.object(ScrapingSession, "delay", _real_delay):
-        await scroll_list_until_stable(ScrapingSession(page), rounds)
-    return await page.evaluate("document.querySelectorAll('li').length")
+        merged = await scroll_list_collecting(
+            session, lambda: content._extract_root_content(["main"]), rounds
+        )
+    return [line for line in merged["text"].split("\n") if line.startswith("Skill ")]
+
+
+async def _run(page, rounds: int | None = None) -> int:
+    return len(await _collect(page, rounds))
 
 
 @pytest.mark.parametrize(
@@ -140,3 +150,46 @@ async def test_scrolling_never_clicks_a_button(dom_page):
     await _run(dom_page)
 
     assert await dom_page.evaluate("document.body.dataset.clicked") is None
+
+
+# Keeps only WINDOW rows mounted: scrolling drops the rows above and mounts the
+# next ones, under the same header and above the same sidebar, like the live
+# skills page (2026-09-30). One read after scrolling holds only the last window.
+WINDOW = 8
+_VIRTUAL = f"""
+<style>
+  body {{ margin: 0; }}
+  main {{ display:block; height:400px; overflow-y:auto; }}
+  #spacer {{ height: {TOTAL * 100}px; position: relative; }}
+  li {{ height: 100px; margin: 0; position: absolute; left: 0; }}
+</style>
+<main><h2>Skills</h2><div id="spacer"><ul id="list"></ul></div>
+  <aside><h3>Who your viewers also viewed</h3><p>Someone at Example</p></aside></main>
+<script>
+  const main = document.querySelector('main');
+  const list = document.getElementById('list');
+  function render() {{
+    const first = Math.min({TOTAL} - {WINDOW}, Math.floor(main.scrollTop / 100));
+    list.innerHTML = '';
+    for (let i = first; i < first + {WINDOW}; i++) {{
+      const li = document.createElement('li');
+      li.style.top = (i * 100) + 'px';
+      li.textContent = 'Skill ' + i;
+      list.appendChild(li);
+    }}
+  }}
+  render();
+  main.addEventListener('scroll', render);
+</script>
+"""
+
+
+async def test_a_virtualized_list_is_collected_whole_and_in_order(dom_page):
+    await dom_page.set_content(_VIRTUAL)
+
+    collected = await _collect(dom_page, 40)
+
+    assert collected == [f"Skill {i}" for i in range(TOTAL)]
+    # What a single read after scrolling would have returned instead.
+    visible = await dom_page.evaluate("document.querySelectorAll('li').length")
+    assert visible == WINDOW

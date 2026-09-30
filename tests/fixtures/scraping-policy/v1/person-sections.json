@@ -955,21 +955,26 @@
       "y": 360
     },
     {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
       "call": "scrape_person",
       "kind": "evaluate",
-      "operation": "comment_thread_length",
-      "program_digest": "f0cf704d82eb"
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "scroll_main_region",
-      "program_digest": "a9ee35f8dcc7"
+      "program_digest": "8127326497d8"
     },
     {
       "call": "scrape_person",
       "delta_x": 0,
-      "delta_y": 2500,
+      "delta_y": 576,
       "kind": "mouse.wheel"
     },
     {
@@ -979,21 +984,26 @@
       "seconds": 1.3
     },
     {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
       "call": "scrape_person",
       "kind": "evaluate",
-      "operation": "comment_thread_length",
-      "program_digest": "f0cf704d82eb"
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "scroll_main_region",
-      "program_digest": "a9ee35f8dcc7"
+      "program_digest": "8127326497d8"
     },
     {
       "call": "scrape_person",
       "delta_x": 0,
-      "delta_y": 2500,
+      "delta_y": 576,
       "kind": "mouse.wheel"
     },
     {
@@ -1003,21 +1013,26 @@
       "seconds": 1.3
     },
     {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
       "call": "scrape_person",
       "kind": "evaluate",
-      "operation": "comment_thread_length",
-      "program_digest": "f0cf704d82eb"
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
     },
     {
       "call": "scrape_person",
       "kind": "evaluate",
       "operation": "scroll_main_region",
-      "program_digest": "a9ee35f8dcc7"
+      "program_digest": "8127326497d8"
     },
     {
       "call": "scrape_person",
       "delta_x": 0,
-      "delta_y": 2500,
+      "delta_y": 576,
       "kind": "mouse.wheel"
     },
     {
@@ -1025,36 +1040,6 @@
       "kind": "sleep",
       "reason": "sleep",
       "seconds": 1.3
-    },
-    {
-      "call": "scrape_person",
-      "kind": "evaluate",
-      "operation": "comment_thread_length",
-      "program_digest": "f0cf704d82eb"
-    },
-    {
-      "call": "scrape_person",
-      "kind": "evaluate",
-      "operation": "scroll_main_region",
-      "program_digest": "a9ee35f8dcc7"
-    },
-    {
-      "call": "scrape_person",
-      "delta_x": 0,
-      "delta_y": 2500,
-      "kind": "mouse.wheel"
-    },
-    {
-      "call": "scrape_person",
-      "kind": "sleep",
-      "reason": "sleep",
-      "seconds": 1.3
-    },
-    {
-      "call": "scrape_person",
-      "kind": "evaluate",
-      "operation": "comment_thread_length",
-      "program_digest": "f0cf704d82eb"
     },
     {
       "arg": {

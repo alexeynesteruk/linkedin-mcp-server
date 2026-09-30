@@ -33,7 +33,7 @@ from linkedin_mcp_server.scraping.feed_payload import (
     permalink_paths_from_payload,
 )
 from linkedin_mcp_server.scraping.link_metadata import build_references
-from linkedin_mcp_server.scraping.list_scroll import scroll_list_until_stable
+from linkedin_mcp_server.scraping.list_scroll import scroll_list_collecting
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.text import (
@@ -478,8 +478,13 @@ class SectionCapture:
                 logger.debug("Comment composer did not appear on %s", url)
             await expand_comment_thread(self._session, plan.max_scrolls)
 
+        collected: dict[str, Any] | None = None
         if CaptureMode.SKILLS in plan.mode:
-            await scroll_list_until_stable(self._session, plan.max_scrolls)
+            collected = await scroll_list_collecting(
+                self._session,
+                lambda: self._content._extract_root_content(["main"]),
+                plan.max_scrolls,
+            )
         elif CaptureMode.ACTIVITY in plan.mode:
             scrolls = plan.max_scrolls if plan.max_scrolls is not None else 10
             await self._session.scroll_body(pause_time=1.0, max_scrolls=scrolls)
@@ -487,7 +492,11 @@ class SectionCapture:
             scrolls = plan.max_scrolls if plan.max_scrolls is not None else 5
             await self._session.scroll_body(pause_time=0.5, max_scrolls=scrolls)
 
-        raw_result = await self._content._extract_root_content(["main"])
+        raw_result = (
+            collected
+            if collected is not None
+            else await self._content._extract_root_content(["main"])
+        )
         raw = raw_result["text"]
 
         if not raw:

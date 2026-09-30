@@ -35,7 +35,7 @@ a page-owning collaborator.
 | `job_policy` | `JOB_SEARCH_PATHS`, `RESULTS_PER_LINKEDIN_PAGE`, `SAVED_JOBS_PAGE_SIZE`, `SAVED_JOBS_PATHS`, `SAVED_JOBS_URL`, `SCROLL_BUDGET_TOTAL`, `SCROLL_DEADLINE_MAX`, `SEARCH_TIMEOUT_FRACTION`, `dropped_filters_section_error()`, `dropped_offset_section_error()`, `label_similar_jobs()`, `lost_keywords_section_error()`, `missing_description_section_error()`, `no_matching_jobs_section_error()`, `reconcile_search_references()`, `route()`, `same_job_search()` | `browser-free` |
 | `jobs` | `JobScraper` | `browser-free` |
 | `link_metadata` | `JOB_PATH_RE`, `RawReference`, `Reference`, `ReferenceKind`, `build_references()`, `choose_reference_text()`, `classify_link()`, `clean_heading()`, `clean_label()`, `dedupe_references()`, `derive_context()`, `normalize_reference()`, `normalize_url()` | `browser-free` |
-| `list_scroll` | `DEFAULT_LIST_ROUNDS`, `SCROLL_LIST_JS`, `scroll_list_until_stable()` | `page-owning` |
+| `list_scroll` | `DEFAULT_LIST_ROUNDS`, `RootRead`, `SCROLL_LIST_JS`, `SCROLL_LIST_STEP_JS`, `merge_root_snapshots()`, `scroll_list_collecting()`, `weave_lines()` | `page-owning` |
 | `message_sender` | `MessageSender` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PAGE_SEPARATOR`, `PersonScraper`, `SEARCH_BUDGET_FRACTION` | `page-owning` |
@@ -68,7 +68,7 @@ a page-owning collaborator.
 - `job_policy` -> `link_metadata`
 - `jobs` -> `capture`, `contracts`, `identifiers`, `job_pages`, `job_policy`, `link_metadata`, `navigation`, `search_urls`, `session`, `text`
 - `link_metadata` -> _(none)_
-- `list_scroll` -> `comment_thread`, `session`
+- `list_scroll` -> `session`
 - `message_sender` -> `contracts`, `identifiers`, `navigation`, `session`
 - `navigation` -> `session`
 - `person` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_urls`, `session`, `text`

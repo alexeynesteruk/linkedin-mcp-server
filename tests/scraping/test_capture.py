@@ -776,8 +776,13 @@ class TestActivityFeedExtraction:
 
         with (
             patch(
-                "linkedin_mcp_server.scraping.capture.scroll_list_until_stable",
+                "linkedin_mcp_server.scraping.capture.scroll_list_collecting",
                 new_callable=AsyncMock,
+                return_value={
+                    "source": "root",
+                    "text": "Skills\nAI Agents\nLangGraph",
+                    "references": [],
+                },
             ) as mock_list_scroll,
             patch(
                 "linkedin_mcp_server.scraping.session.scroll_to_bottom",
@@ -793,7 +798,7 @@ class TestActivityFeedExtraction:
                 return_value=False,
             ),
         ):
-            await capture._capture_once(
+            section = await capture._capture_once(
                 "https://www.linkedin.com/in/billgates/details/skills/",
                 section_name="skills",
                 plan=CapturePlan(
@@ -802,8 +807,10 @@ class TestActivityFeedExtraction:
             )
 
         mock_list_scroll.assert_awaited_once()
-        assert mock_list_scroll.await_args.args[1] == 7
+        assert mock_list_scroll.await_args.args[2] == 7
         mock_body_scroll.assert_not_awaited()
+        # The merged read of the whole list is what gets extracted.
+        assert "LangGraph" in section.text
 
     async def test_details_page_show_more_respects_max_scrolls_budget(self, mock_page):
         """When 'Show more' never disappears, loop exits after max_scrolls clicks."""
