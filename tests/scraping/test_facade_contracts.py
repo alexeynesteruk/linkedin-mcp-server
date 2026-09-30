@@ -58,6 +58,7 @@ TOOL_DELEGATES = {
     "get_my_profile": "get_my_profile",
     "get_pending_invitations": "get_pending_invitations",
     "get_person_profile": "scrape_person",
+    "get_post_comments": "get_post_comments",
     "get_saved_jobs": "get_saved_jobs",
     "get_sidebar_profiles": "get_sidebar_profiles",
     "search_companies": "search_companies",
@@ -106,6 +107,7 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
         "_jobs",
         "_message_sender",
         "_person",
+        "_post_comments",
         "_posts",
     }
     assert set(vars(extractor)) == expected_state

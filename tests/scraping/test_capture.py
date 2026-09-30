@@ -1996,6 +1996,86 @@ class TestMissingOverlayRoot:
             )
 
 
+class TestCommentThreadCapture:
+    async def _run(self, mock_page, *, composer_times_out: bool = False):
+        from patchright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        events: list[str] = []
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "Post\nComment", "references": []}
+        )
+
+        async def wait_for_function(*args, **kwargs):
+            events.append("post_text")
+
+        async def wait_for_selector(selector, **kwargs):
+            if selector == "main":
+                return
+            events.append("composer")
+            assert kwargs["timeout"] == 7000
+            if composer_times_out:
+                raise PlaywrightTimeoutError("no composer")
+
+        async def expand(session, rounds):
+            events.append(f"expand:{rounds}")
+
+        async def scroll(**kwargs):
+            events.append(f"scroll:{kwargs['max_scrolls']}")
+
+        mock_page.wait_for_function = AsyncMock(side_effect=wait_for_function)
+        mock_page.wait_for_selector = AsyncMock(side_effect=wait_for_selector)
+        capture = _capture(mock_page)
+        with (
+            patch.object(capture_module, "expand_comment_thread", expand),
+            patch.object(ScrapingSession, "scroll_body", side_effect=scroll),
+            patch.object(ScrapingSession, "delay", new_callable=AsyncMock),
+            patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+            patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock),
+        ):
+            result = await capture._extract_loaded_section(
+                "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                "post",
+                CapturePlan(CaptureMode.COMMENT_THREAD, 3),
+            )
+        return events, result
+
+    async def test_the_thread_is_expanded_after_it_hydrates_and_before_reading(
+        self, mock_page
+    ):
+        events, result = await self._run(mock_page)
+
+        assert events == ["post_text", "composer", "expand:3", "scroll:3"]
+        assert "Comment" in result.text
+
+    async def test_a_post_without_a_composer_is_still_expanded_and_read(
+        self, mock_page
+    ):
+        # Comments disabled: the composer never renders, and the wait is a
+        # timeout the read tolerates.
+        events, result = await self._run(mock_page, composer_times_out=True)
+
+        assert events == ["post_text", "composer", "expand:3", "scroll:3"]
+        assert result.text
+
+    async def test_other_modes_never_expand_a_thread(self, mock_page):
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "x", "references": []}
+        )
+        capture = _capture(mock_page)
+        expand = AsyncMock()
+        with (
+            patch.object(capture_module, "expand_comment_thread", expand),
+            patch.object(ScrapingSession, "scroll_body", new_callable=AsyncMock),
+            patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+            patch.object(ScrapingSession, "dismiss_modal", new_callable=AsyncMock),
+        ):
+            await capture._extract_loaded_section(
+                "https://www.linkedin.com/in/ada/", "main_profile", CapturePlan()
+            )
+
+        expand.assert_not_awaited()
+
+
 class TestCapturePlans:
     @pytest.mark.parametrize(
         ("url", "mode"),

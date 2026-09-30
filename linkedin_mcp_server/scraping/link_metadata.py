@@ -96,6 +96,7 @@ _SECTION_CONTEXTS = {
     "top_posts": "top posts",
     "profile_views": "profile views",
     "search_appearances": "search appearances",
+    "post": "post thread",
 }
 
 _DEFAULT_REFERENCE_CAP = 12
@@ -128,6 +129,9 @@ _REFERENCE_CAPS = {
     # Headroom for get_pending_invitations' limit ceiling (Field(ge=1, le=100));
     # the reader slices to the requested limit itself.
     "invitations": 100,
+    # A permalink page lists the author, every loaded commenter and any posts
+    # they link to; get_post_comments paginates to at most 50 rounds.
+    "post": 30,
 }
 
 # A label must carry at least one letter or digit in any script, so the class is

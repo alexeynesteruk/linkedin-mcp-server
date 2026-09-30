@@ -21,6 +21,7 @@ from linkedin_mcp_server.scraping.identifiers import (
     normalize_job_id,
     normalize_opaque_id,
     normalize_person_identifier,
+    normalize_post_url,
     normalize_profile_urn,
     normalize_thread_id,
     person_profile_url,
@@ -581,3 +582,91 @@ class TestIdentifierAllowlist:
     )
     def test_a_real_one_passes(self, value: str):
         assert normalize_person_identifier(value) == value
+
+
+class TestNormalizePostUrl:
+    URN = "urn:li:activity:7203847123456789012"
+    UPDATE = f"https://www.linkedin.com/feed/update/{URN}/"
+    SLUG = "alice_hello-world-activity-7203847123456789012-AbCd"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            URN,
+            f"  {URN}  ",
+            f"https://www.linkedin.com/feed/update/{URN}/",
+            f"https://www.linkedin.com/feed/update/{URN}",
+            f"/feed/update/{URN}/",
+            f"linkedin.com/feed/update/{URN}/?utm_source=share#x",
+            f"http://de.linkedin.com/feed/update/{URN}/",
+            "https://www.linkedin.com/feed/update/urn%3Ali%3Aactivity%3A7203847123456789012/",
+        ],
+    )
+    def test_reduces_every_update_form_to_the_canonical_permalink(self, value: str):
+        assert normalize_post_url(value) == self.UPDATE
+
+    @pytest.mark.parametrize("kind", ["ugcPost", "share"])
+    def test_accepts_the_other_urn_kinds(self, kind: str):
+        assert (
+            normalize_post_url(f"urn:li:{kind}:1234")
+            == f"https://www.linkedin.com/feed/update/urn:li:{kind}:1234/"
+        )
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            f"https://www.linkedin.com/posts/{SLUG}",
+            f"/posts/{SLUG}/",
+            f"https://www.linkedin.com/posts/{SLUG}?utm_source=share&utm_medium=member",
+        ],
+    )
+    def test_accepts_the_slug_form(self, value: str):
+        assert (
+            normalize_post_url(value) == f"https://www.linkedin.com/posts/{self.SLUG}/"
+        )
+
+    def test_is_idempotent(self):
+        once = normalize_post_url(f"/posts/{self.SLUG}")
+        assert normalize_post_url(once) == once
+        assert normalize_post_url(self.UPDATE) == self.UPDATE
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "   ",
+            "https://www.linkedin.com/in/alice/",
+            "https://www.linkedin.com/feed/",
+            "https://www.linkedin.com/company/microsoft/posts/",
+            "https://www.linkedin.com/search/results/content/?keywords=x",
+            "https://www.linkedin.com/posts/alice/",
+            "https://www.linkedin.com/posts/alice_recent-activity",
+            "https://www.linkedin.com/feed/update/urn:li:person:123/",
+            "https://www.linkedin.com/feed/update/urn:li:activity:abc/",
+            "https://www.linkedin.com/feed/update/",
+            f"https://www.linkedin.com/feed/update/{URN}/extra/",
+            f"https://www.linkedin.com/feed/update/{URN}/../../../in/bob/",
+            f"https://www.linkedin.com/posts/{SLUG}/../../in/bob",
+            f"https://evil.example/feed/update/{URN}/",
+            f"https://www.linkedin.com.evil.example/feed/update/{URN}/",
+            f"https://notlinkedin.com/feed/update/{URN}/",
+            f"https://www.linkedin.com:444/feed/update/{URN}/",
+            f"ftp://www.linkedin.com/feed/update/{URN}/",
+            f"javascript:alert(1)//linkedin.com/feed/update/{URN}/",
+            f"https://www.linkedin.com\\evil.example/feed/update/{URN}/",
+            f"https://www.linkedin.com/feed/update/{URN}%2F..%2F..%2Fin%2Fbob/",
+            "https://www.linkedin.com/feed/update/urn:li:activity:1%253A2/",
+            "urn:li:activity:1\nurn:li:activity:2",
+            "urn:li:activity:",
+            "linkedin",
+        ],
+    )
+    def test_refuses_anything_that_is_not_a_post_permalink(self, value: str):
+        with pytest.raises(
+            InvalidReferenceError, match="not a LinkedIn post permalink"
+        ):
+            normalize_post_url(value)
+
+    def test_a_short_link_gets_the_redirect_explanation(self):
+        with pytest.raises(InvalidReferenceError, match="shortened LinkedIn link"):
+            normalize_post_url("https://lnkd.in/abc123")

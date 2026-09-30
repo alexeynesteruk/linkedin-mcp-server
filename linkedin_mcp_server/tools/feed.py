@@ -20,6 +20,7 @@ from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_er
 from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
 from linkedin_mcp_server.scraping.contracts import rate_limited_section_error
+from linkedin_mcp_server.scraping.identifiers import normalize_post_url
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
@@ -102,3 +103,61 @@ def register_feed_tools(
                 raise_tool_error(relogin_exc, "get_feed")
         except Exception as e:
             raise_tool_error(e, "get_feed")
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Get Post Comments",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"feed", "scraping"},
+    )
+    async def get_post_comments(
+        post_url: str,
+        ctx: Context,
+        max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Get a single LinkedIn post with its full comment thread.
+
+        Use this to read the comments (and nested replies) other people left on
+        a post, for example on the authenticated user's own posts. Obtain post
+        URLs from references["feed"] (get_feed), the posts sections of
+        get_person_profile / get_my_profile, or get_company_posts. Read-only:
+        nothing is liked, replied to or posted.
+
+        Args:
+            post_url: Post permalink: a full or relative URL in either
+                /feed/update/<urn>/ or /posts/<slug> form, or a bare
+                urn:li:activity:<id>. Any other address is refused.
+            ctx: FastMCP context for progress reporting
+            max_scrolls: Maximum comment pagination rounds (1-50, default 5).
+                Increase for posts with long comment threads.
+
+        Returns:
+            Dict with url and sections["post"] holding the post body and comment
+            thread as raw text, plus optional references["post"] (commenter
+            profiles and linked posts) and section_errors when the page is
+            rate-limited or extraction fails. The LLM should parse the raw
+            text; the comment thread follows the post body.
+        """
+        try:
+            # Before the browser: a value that names no post costs nothing.
+            post_url = normalize_post_url(post_url)
+            extractor = await get_ready_extractor(ctx, tool_name="get_post_comments")
+            logger.info("Scraping post comments: %s", post_url)
+
+            await ctx.report_progress(
+                progress=0, total=100, message="Loading post and comments"
+            )
+
+            result = await extractor.get_post_comments(post_url, max_scrolls)
+
+            await ctx.report_progress(progress=100, total=100, message="Complete")
+            return result
+
+        except AuthenticationError as e:
+            try:
+                await handle_auth_error(e, ctx)
+            except Exception as relogin_exc:
+                raise_tool_error(relogin_exc, "get_post_comments")
+        except Exception as e:
+            raise_tool_error(e, "get_post_comments")

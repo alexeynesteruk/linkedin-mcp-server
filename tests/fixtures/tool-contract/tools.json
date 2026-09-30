@@ -592,6 +592,54 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "feed",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get a single LinkedIn post with its full comment thread.\n\nUse this to read the comments (and nested replies) other people left on\na post, for example on the authenticated user's own posts. Obtain post\nURLs from references[\"feed\"] (get_feed), the posts sections of\nget_person_profile / get_my_profile, or get_company_posts. Read-only:\nnothing is liked, replied to or posted.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_scrolls": {
+          "anyOf": [
+            {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum comment pagination rounds (1-50, default 5).\nIncrease for posts with long comment threads."
+        },
+        "post_url": {
+          "description": "Post permalink: a full or relative URL in either\n/feed/update/<urn>/ or /posts/<slug> form, or a bare\nurn:li:activity:<id>. Any other address is refused.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "post_url"
+      ],
+      "type": "object"
+    },
+    "name": "get_post_comments",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get Post Comments"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "job",
           "scraping"
         ]

@@ -25,6 +25,7 @@ from linkedin_mcp_server.scraping.jobs import JobScraper
 from linkedin_mcp_server.scraping.message_sender import MessageSender
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.person import PersonScraper
+from linkedin_mcp_server.scraping.post_comments import PostComments
 from linkedin_mcp_server.scraping.posts import PostSearch
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
 from linkedin_mcp_server.scraping.session import ScrapingSession
@@ -67,6 +68,7 @@ class LinkedInExtractor:
         job_pages = JobPageReader(session, navigator, content)
         self._jobs = JobScraper(navigator, capture, job_pages)
         self._posts = PostSearch(capture)
+        self._post_comments = PostComments(capture)
         self._conversations = ConversationReader(
             session, navigator, content, profile_page
         )
@@ -88,6 +90,12 @@ class LinkedInExtractor:
     async def extract_feed(self, num_posts: int = 10) -> ExtractedSection:
         """Scrape the LinkedIn home feed, scrolling until enough posts load."""
         return await self._feed.extract_feed(num_posts)
+
+    async def get_post_comments(
+        self, post_url: str, max_scrolls: int | None = None
+    ) -> dict[str, Any]:
+        """Read one post permalink with its paginated comment thread."""
+        return await self._post_comments.get_post_comments(post_url, max_scrolls)
 
     async def extract_page(
         self,

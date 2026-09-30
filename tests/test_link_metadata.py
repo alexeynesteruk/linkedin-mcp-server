@@ -433,6 +433,21 @@ class TestBuildReferences:
         assert references[0]["url"] == "/company/test-0/"
         assert references[-1]["url"] == "/company/test-11/"
 
+    def test_a_post_thread_keeps_thirty_commenters_and_guesses_no_role(self):
+        raw: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/in/commenter-{idx}/",
+                "text": f"Commenter {idx}",
+            }
+            for idx in range(40)
+        ]
+
+        references = build_references(raw, "post")
+
+        assert len(references) == 30
+        assert references[-1]["url"] == "/in/commenter-29/"
+        assert {reference["context"] for reference in references} == {"post thread"}
+
     def test_search_results_cap_can_be_disabled(self):
         raw: list[RawReference] = [
             {

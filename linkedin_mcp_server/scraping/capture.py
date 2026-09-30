@@ -17,6 +17,10 @@ from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
+from linkedin_mcp_server.scraping.comment_thread import (
+    COMPOSER_SELECTOR,
+    expand_comment_thread,
+)
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
@@ -63,6 +67,7 @@ class CaptureMode(Flag):
     OVERLAY = auto()
     POST_PERMALINKS = auto()
     JOB_POSTING = auto()
+    COMMENT_THREAD = auto()
 
 
 @dataclass(frozen=True)
@@ -433,6 +438,32 @@ class SectionCapture:
                 )
             except PlaywrightTimeoutError:
                 logger.debug("Job description did not appear on %s", url)
+
+        # The comment block (composer plus thread) hydrates well after the post
+        # body; reading straight away captures only the counts. The composer is
+        # the structural signal that the block attached, and posts with
+        # comments disabled never render it, so a timeout is tolerated.
+        if CaptureMode.COMMENT_THREAD in plan.mode:
+            try:
+                await self._session.page.wait_for_function(
+                    """() => {
+                        const main = document.querySelector('main');
+                        if (!main) return false;
+                        return main.innerText.length > 200;
+                    }""",
+                    timeout=10000,
+                )
+            except PlaywrightTimeoutError:
+                logger.debug("Post content did not appear on %s", url)
+            try:
+                await self._session.page.wait_for_selector(
+                    COMPOSER_SELECTOR, timeout=7000
+                )
+                # Give the first batch of comments a beat to attach below it.
+                await self._session.delay(1.0)
+            except PlaywrightTimeoutError:
+                logger.debug("Comment composer did not appear on %s", url)
+            await expand_comment_thread(self._session, plan.max_scrolls)
 
         if CaptureMode.ACTIVITY in plan.mode:
             scrolls = plan.max_scrolls if plan.max_scrolls is not None else 10

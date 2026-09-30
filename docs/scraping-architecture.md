@@ -18,6 +18,7 @@ a page-owning collaborator.
 | `__init__` | _(no public definitions)_ | `browser-free` |
 | `analytics` | `ANALYTICS_BASE_URL`, `AnalyticsScraper` | `browser-free` |
 | `capture` | `CaptureMode`, `CapturePlan`, `OverlayRootNotFoundError`, `RATE_LIMIT_RETRY_DELAY`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
+| `comment_thread` | `CLICK_MORE_COMMENTS_JS`, `COMPOSER_SELECTOR`, `MAIN_TEXT_LENGTH_JS`, `expand_comment_thread()` | `page-owning` |
 | `company` | `CompanyScraper` | `browser-free` |
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_CONFIRM_DIALOG_PRIMARY_JS`, `CLICK_INCOMING_ACCEPT_JS`, `CLICK_WITHDRAW_ANCHOR_JS`, `CONFIRM_DIALOG_BUTTON_COUNT_JS`, `ConnectionActions`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile`, `WITHDRAW_SETTLE_SECONDS` | `page-owning` |
@@ -28,7 +29,7 @@ a page-owning collaborator.
 | `feed` | `FeedScraper` | `page-owning` |
 | `feed_payload` | `POST_SLUG_URL_RE`, `append_permalink_references()`, `build_feed_references()`, `is_feed_payload_response()`, `is_permalink_payload_response()`, `permalink_paths_from_payload()` | `browser-free` |
 | `fields` | `ANALYTICS_SECTIONS`, `ANALYTICS_TIME_RANGE_SECTIONS`, `COMPANY_SECTIONS`, `PERSON_SECTIONS`, `normalize_analytics_time_range()`, `parse_analytics_sections()`, `parse_company_sections()`, `parse_person_sections()` | `browser-free` |
-| `identifiers` | `company_page_url()`, `job_view_url()`, `messaging_thread_url()`, `normalize_company_identifier()`, `normalize_job_id()`, `normalize_opaque_id()`, `normalize_person_identifier()`, `normalize_profile_urn()`, `normalize_thread_id()`, `person_profile_url()` | `browser-free` |
+| `identifiers` | `company_page_url()`, `job_view_url()`, `messaging_thread_url()`, `normalize_company_identifier()`, `normalize_job_id()`, `normalize_opaque_id()`, `normalize_person_identifier()`, `normalize_post_url()`, `normalize_profile_urn()`, `normalize_thread_id()`, `person_profile_url()` | `browser-free` |
 | `invitations` | `EXPAND_NOTES_JS`, `INVITATION_KINDS`, `InvitationKind`, `InvitationReader`, `RECEIVED_COUNT_IS_ZERO_JS`, `invitations_url()`, `trim_to_limit()` | `page-owning` |
 | `job_pages` | `JOB_IDS_JS`, `JobPageCapture`, `JobPageReader`, `PROMOTED_JOB_IDS_JS` | `page-owning` |
 | `job_policy` | `JOB_SEARCH_PATHS`, `RESULTS_PER_LINKEDIN_PAGE`, `SAVED_JOBS_PAGE_SIZE`, `SAVED_JOBS_PATHS`, `SAVED_JOBS_URL`, `SCROLL_BUDGET_TOTAL`, `SCROLL_DEADLINE_MAX`, `SEARCH_TIMEOUT_FRACTION`, `dropped_filters_section_error()`, `dropped_offset_section_error()`, `label_similar_jobs()`, `lost_keywords_section_error()`, `missing_description_section_error()`, `no_matching_jobs_section_error()`, `reconcile_search_references()`, `route()`, `same_job_search()` | `browser-free` |
@@ -37,6 +38,7 @@ a page-owning collaborator.
 | `message_sender` | `MessageSender` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PAGE_SEPARATOR`, `PersonScraper` | `page-owning` |
+| `post_comments` | `PostComments` | `browser-free` |
 | `posts` | `PostSearch` | `browser-free` |
 | `profile_page` | `MessageTarget`, `MessageTargetResolution`, `ProfilePageReader`, `ReadMessageTarget` | `page-owning` |
 | `search_urls` | `CONTENT_DATE_POSTED_MAP`, `EXPERIENCE_LEVEL_MAP`, `JOB_DATE_POSTED_MAP`, `JOB_TYPE_MAP`, `NETWORK_TOKENS`, `SORT_BY_MAP`, `WORK_TYPE_MAP`, `build_company_search_url()`, `build_content_search_url()`, `build_job_search_url()`, `build_people_search_url()` | `browser-free` |
@@ -47,14 +49,15 @@ a page-owning collaborator.
 
 - `__init__` -> `extractor`, `fields`
 - `analytics` -> `capture`, `contracts`, `fields`, `link_metadata`, `session`
-- `capture` -> `content`, `contracts`, `feed_payload`, `link_metadata`, `navigation`, `session`, `text`
+- `capture` -> `comment_thread`, `content`, `contracts`, `feed_payload`, `link_metadata`, `navigation`, `session`, `text`
+- `comment_thread` -> `session`
 - `company` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `search_urls`, `session`
 - `connection` -> _(none)_
 - `connection_actions` -> `connection`, `identifiers`, `navigation`, `session`
 - `content` -> `session`, `text`
 - `contracts` -> `identifiers`, `link_metadata`
 - `conversations` -> `content`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `session`, `text`
-- `extractor` -> `analytics`, `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `invitations`, `job_pages`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
+- `extractor` -> `analytics`, `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `invitations`, `job_pages`, `jobs`, `message_sender`, `navigation`, `person`, `post_comments`, `posts`, `profile_page`, `session`, `text`
 - `feed` -> `content`, `contracts`, `feed_payload`, `navigation`, `session`, `text`
 - `feed_payload` -> `link_metadata`
 - `fields` -> `capture`, `contracts`
@@ -67,6 +70,7 @@ a page-owning collaborator.
 - `message_sender` -> `contracts`, `identifiers`, `navigation`, `session`
 - `navigation` -> `session`
 - `person` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_urls`, `session`, `text`
+- `post_comments` -> `capture`, `contracts`, `identifiers`, `link_metadata`
 - `posts` -> `capture`, `contracts`, `link_metadata`, `search_urls`
 - `profile_page` -> `session`
 - `search_urls` -> `contracts`
@@ -86,6 +90,7 @@ a page-owning collaborator.
 - `get_my_profile`
 - `get_page_text`
 - `get_pending_invitations`
+- `get_post_comments`
 - `get_saved_jobs`
 - `get_sidebar_profiles`
 - `scrape_company`
@@ -112,6 +117,7 @@ a page-owning collaborator.
 - `_jobs`
 - `_message_sender`
 - `_person`
+- `_post_comments`
 - `_posts`
 
 ## Dependency-direction violations

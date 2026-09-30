@@ -56,6 +56,10 @@
         "coroutine": true,
         "signature": "(self, limit: 'int' = 20, kind: 'InvitationKind' = 'received') -> 'dict[str, Any]'"
       },
+      "get_post_comments": {
+        "coroutine": true,
+        "signature": "(self, post_url: 'str', max_scrolls: 'int | None' = None) -> 'dict[str, Any]'"
+      },
       "get_saved_jobs": {
         "coroutine": true,
         "signature": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'"
@@ -115,6 +119,7 @@
       "get_my_analytics",
       "get_my_profile",
       "get_pending_invitations",
+      "get_post_comments",
       "get_saved_jobs",
       "get_sidebar_profiles",
       "scrape_company",
@@ -518,6 +523,39 @@
           },
           "required": [
             "linkedin_username"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "get_post_comments": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {
+            "max_scrolls": {
+              "anyOf": [
+                {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Maximum comment pagination rounds (1-50, default 5).\nIncrease for posts with long comment threads."
+            },
+            "post_url": {
+              "description": "Post permalink: a full or relative URL in either\n/feed/update/<urn>/ or /posts/<slug> form, or a bare\nurn:li:activity:<id>. Any other address is refused.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "post_url"
           ],
           "type": "object"
         },

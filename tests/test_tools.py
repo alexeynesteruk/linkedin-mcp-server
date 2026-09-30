@@ -44,6 +44,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.get_my_analytics = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
+    mock.get_post_comments = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
@@ -134,6 +135,18 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             "job_id is not a LinkedIn id",
         ),
         (
+            "feed",
+            "get_post_comments",
+            {"post_url": "https://www.linkedin.com/in/alice/"},
+            "not a LinkedIn post permalink",
+        ),
+        (
+            "feed",
+            "get_post_comments",
+            {"post_url": "https://evil.example/feed/update/urn:li:activity:1/"},
+            "not a LinkedIn post permalink",
+        ),
+        (
             "messaging",
             "get_conversation",
             {"linkedin_username": "/feed/"},
@@ -202,11 +215,13 @@ async def test_invalid_reference_is_rejected_before_extractor(
     from fastmcp.exceptions import ToolError
 
     from linkedin_mcp_server.tools.company import register_company_tools
+    from linkedin_mcp_server.tools.feed import register_feed_tools
     from linkedin_mcp_server.tools.job import register_job_tools
     from linkedin_mcp_server.tools.messaging import register_messaging_tools
     from linkedin_mcp_server.tools.person import register_person_tools
 
     register_by_module = {
+        "feed": register_feed_tools,
         "company": register_company_tools,
         "job": register_job_tools,
         "messaging": register_messaging_tools,
@@ -247,6 +262,11 @@ async def test_invalid_reference_is_rejected_before_extractor(
             {"linkedin_username": "alice", "message": "Hello", "confirm_send": False},
         ),
         ("feed", "get_feed", {}),
+        (
+            "feed",
+            "get_post_comments",
+            {"post_url": "urn:li:activity:7203847123456789012"},
+        ),
         ("post", "search_posts", {"keywords": "python"}),
     ],
 )
@@ -2141,6 +2161,47 @@ class TestGetCompanyEmployeesTool:
         tool_fn = await get_tool_fn(mcp, "get_company_employees")
         with pytest.raises(ToolError, match="Session expired"):
             await tool_fn("anthropic", mock_context)
+
+
+class TestGetPostCommentsTool:
+    async def test_the_owner_result_is_returned_and_the_url_is_canonical(
+        self, mock_context, serve_extractor
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/feed/update/urn:li:activity:7203847123456789012/",
+            "sections": {"post": "Post body\nComment one"},
+        }
+        extractor = _make_mock_extractor(expected)
+        serve_extractor(extractor)
+
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_post_comments")
+        result = await tool_fn(
+            "linkedin.com/feed/update/urn:li:activity:7203847123456789012/?utm=x",
+            mock_context,
+            max_scrolls=7,
+        )
+
+        assert result == expected
+        extractor.get_post_comments.assert_awaited_once_with(
+            "https://www.linkedin.com/feed/update/urn:li:activity:7203847123456789012/",
+            7,
+        )
+
+    async def test_it_is_registered_read_only(self):
+        from linkedin_mcp_server.tools.feed import register_feed_tools
+
+        mcp = FastMCP("test")
+        register_feed_tools(mcp)
+        tool = await mcp.get_tool("get_post_comments")
+
+        assert tool is not None
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is True
+        assert not tool.annotations.destructive_hint
 
 
 class TestFeedTools:

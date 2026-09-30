@@ -1044,6 +1044,39 @@ async def _my_analytics_scenario() -> dict[str, Any]:
     )
 
 
+async def _post_comments_scenario() -> dict[str, Any]:
+    """A permalink read: a click, then two wheel scrolls, then extraction."""
+    name = "get_post_comments__baseline"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder)
+    page.script("evaluate:comment_thread_more", True, False, False)
+    page.script("evaluate:comment_thread_length", 500, 900, 900)
+    page.script(
+        "evaluate:root_content",
+        _root(
+            "Ada Lovelace\nNotes on the engine\nBob\nGreat post",
+            [
+                {"href": "https://www.linkedin.com/in/ada-lovelace/", "text": "Ada"},
+                {"href": "https://www.linkedin.com/in/bob/", "text": "Bob"},
+            ],
+        ),
+    )
+    extractor = _extractor(page)
+    arguments = {
+        "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/?utm=x",
+        "max_scrolls": 3,
+    }
+    async with boundaries(recorder, clock):
+        with recorder.context("get_post_comments", "post"):
+            result = await extractor.get_post_comments(**arguments)
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "get_post_comments", "arguments": arguments},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
 async def _sidebar_scenario() -> dict[str, Any]:
     name = "get_sidebar_profiles__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1175,6 +1208,7 @@ TOOL_FACADE_METHODS = {
     "get_inbox",
     "get_my_profile",
     "get_pending_invitations",
+    "get_post_comments",
     "get_saved_jobs",
     "get_sidebar_profiles",
     "scrape_company",
@@ -1250,6 +1284,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "withdraw-invitation.json": await _withdraw_scenario(),
         "pending-invitations.json": await _pending_invitations_scenario(),
         "my-analytics.json": await _my_analytics_scenario(),
+        "post-comments.json": await _post_comments_scenario(),
         "get-my-profile.json": await _get_my_profile_scenario(),
         "sidebar-profiles.json": await _sidebar_scenario(),
         "company-employees.json": await _single_capture_facade_scenario(

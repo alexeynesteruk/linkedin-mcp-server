@@ -1,0 +1,246 @@
+{
+  "call": {
+    "arguments": {
+      "max_scrolls": 3,
+      "post_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/?utm=x"
+    },
+    "method": "get_post_comments"
+  },
+  "events": [
+    {
+      "call": "get_post_comments",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+      "requested_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+      "section": "post",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_post_comments",
+      "description": "goto https://www.linkedin.com/feed/update/urn:li:activity:1/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "extra": {
+        "target_url": "https://www.linkedin.com/feed/update/urn:li:activity:1/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "boundary.rate_limit",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "post",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_post_comments",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "post"
+    },
+    {
+      "arg": null,
+      "call": "get_post_comments",
+      "kind": "wait_for_function",
+      "operation": "main_text_200",
+      "program_digest": "24943facf9de",
+      "section": "post",
+      "timeout_ms": 10000
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "wait_for_selector",
+      "operation": "post_comment_composer",
+      "section": "post",
+      "selector": "main [role=\"textbox\"][contenteditable=\"true\"]",
+      "state": "visible",
+      "timeout_ms": 7000
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "mouse.move",
+      "section": "post",
+      "x": 640,
+      "y": 360
+    },
+    {
+      "arg": false,
+      "call": "get_post_comments",
+      "kind": "evaluate",
+      "operation": "comment_thread_more",
+      "program_digest": "680b302db5b2",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "evaluate",
+      "operation": "comment_thread_length",
+      "program_digest": "f0cf704d82eb",
+      "section": "post"
+    },
+    {
+      "arg": true,
+      "call": "get_post_comments",
+      "kind": "evaluate",
+      "operation": "comment_thread_more",
+      "program_digest": "680b302db5b2",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "delta_x": 0,
+      "delta_y": 2000,
+      "kind": "mouse.wheel",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "evaluate",
+      "operation": "comment_thread_length",
+      "program_digest": "f0cf704d82eb",
+      "section": "post"
+    },
+    {
+      "arg": true,
+      "call": "get_post_comments",
+      "kind": "evaluate",
+      "operation": "comment_thread_more",
+      "program_digest": "680b302db5b2",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "delta_x": 0,
+      "delta_y": 2000,
+      "kind": "mouse.wheel",
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.0,
+      "section": "post"
+    },
+    {
+      "call": "get_post_comments",
+      "kind": "evaluate",
+      "operation": "comment_thread_length",
+      "program_digest": "f0cf704d82eb",
+      "section": "post"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "get_post_comments",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 3,
+      "pause_time": 0.5,
+      "section": "post"
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_post_comments",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5",
+      "section": "post"
+    }
+  ],
+  "result": {
+    "references": {
+      "post": [
+        {
+          "context": "post thread",
+          "kind": "person",
+          "text": "Ada",
+          "url": "/in/ada-lovelace/"
+        },
+        {
+          "context": "post thread",
+          "kind": "person",
+          "text": "Bob",
+          "url": "/in/bob/"
+        }
+      ]
+    },
+    "section_names": [
+      "post"
+    ],
+    "sections": {
+      "post": "Ada Lovelace\nNotes on the engine\nBob\nGreat post"
+    },
+    "url": "https://www.linkedin.com/feed/update/urn:li:activity:1/"
+  },
+  "scenario": "get_post_comments__baseline",
+  "schema_version": 1
+}

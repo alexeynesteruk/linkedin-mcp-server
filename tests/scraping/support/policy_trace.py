@@ -559,6 +559,7 @@ def semantic_selector_id(selector: str) -> str:
         "main": "main",
         "[role='menu']": "profile_more_menu",
         "main li label[aria-label]": "conversation_rows",
+        'main [role="textbox"][contenteditable="true"]': "post_comment_composer",
     }
     if selector in selectors:
         return selectors[selector]
@@ -596,6 +597,8 @@ def semantic_program_id(program: str) -> str:
     compact = " ".join(program.split())
     checks = (
         ("performance.timeOrigin", "document_origin"),
+        ("linkedinMcpMore", "comment_thread_more"),
+        ("innerText.length || 0", "comment_thread_length"),
         ("expandable-text-button", "invitation_expand_notes"),
         ("invitation-manager/received/ALL", "invitation_received_zero"),
         ("anchors.length !== 1", "withdraw_anchor_click"),

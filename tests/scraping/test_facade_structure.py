@@ -41,6 +41,7 @@ PUBLIC_SIGNATURES = {
     "get_my_profile": "(self, sections: 'set[str] | None' = None, callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None) -> 'dict[str, Any]'",
     "get_pending_invitations": "(self, limit: 'int' = 20, kind: 'InvitationKind' = 'received') -> 'dict[str, Any]'",
     "get_page_text": "(self) -> 'str'",
+    "get_post_comments": "(self, post_url: 'str', max_scrolls: 'int | None' = None) -> 'dict[str, Any]'",
     "get_saved_jobs": "(self, max_pages: 'int' = 3) -> 'dict[str, Any]'",
     "get_sidebar_profiles": "(self, username: 'str') -> 'dict[str, Any]'",
     "scrape_company": "(self, company_name: 'str', requested: 'set[str]', callbacks: 'ProgressCallback | None' = None) -> 'dict[str, Any]'",
@@ -67,6 +68,7 @@ DELEGATES = {
     "get_my_profile": ("_person", "get_my_profile"),
     "get_pending_invitations": ("_invitations", "get_pending_invitations"),
     "get_page_text": ("_content", "get_page_text"),
+    "get_post_comments": ("_post_comments", "get_post_comments"),
     "get_saved_jobs": ("_jobs", "get_saved_jobs"),
     "get_sidebar_profiles": ("_person", "get_sidebar_profiles"),
     "scrape_company": ("_company", "scrape_company"),
@@ -93,6 +95,7 @@ DELEGATE_CALLS = {
     "get_my_profile": "self._person.get_my_profile(sections, callbacks, max_scrolls)",
     "get_pending_invitations": "self._invitations.get_pending_invitations(limit=limit, kind=kind)",
     "get_page_text": "self._content.get_page_text()",
+    "get_post_comments": "self._post_comments.get_post_comments(post_url, max_scrolls)",
     "get_saved_jobs": "self._jobs.get_saved_jobs(max_pages)",
     "get_sidebar_profiles": "self._person.get_sidebar_profiles(username)",
     "scrape_company": "self._company.scrape_company(company_name, requested, callbacks)",
@@ -119,6 +122,7 @@ FACADE_STATE = {
     "_jobs",
     "_message_sender",
     "_person",
+    "_post_comments",
     "_posts",
 }
 
