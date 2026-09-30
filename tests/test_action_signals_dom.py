@@ -1059,3 +1059,20 @@ class TestWithdrawFlow:
         assert await dom_page.evaluate("document.body.dataset.withdrawn") == "yes"
         assert result["status"] == "withdrawn"
         assert "connectable" in result["message"]
+
+    async def test_a_popup_open_beside_the_modal_stops_the_withdrawal(self, dom_page):
+        # A popup of LinkedIn's own was already open when Pending was clicked.
+        # Two open dialogs, and the withdrawal cannot tell which one it opened.
+        popup = (
+            '<dialog open id="popup"><button type="button">X</button>'
+            '<button type="button" onclick="document.body.dataset.popup = \'yes\'">'
+            "Try Premium</button></dialog>"
+        )
+        await dom_page.set_content(_WITHDRAW_FLOW.replace("<main>", popup + "<main>"))
+
+        result = await _actions_reading(dom_page, "Florian").withdraw_invitation(USER)
+
+        assert result["status"] == "withdraw_failed"
+        assert "not the only dialog" in result["message"]
+        assert await dom_page.evaluate("document.body.dataset.popup") is None
+        assert await dom_page.evaluate("document.body.dataset.withdrawn") is None

@@ -1165,7 +1165,8 @@ class ConnectionActions:
             return _withdraw_result(
                 url,
                 "withdraw_failed",
-                "The withdrawal dialog never finished rendering its buttons.",
+                "The withdrawal dialog never finished rendering its buttons, or "
+                "it was not the only dialog open. Nothing was confirmed.",
                 profile=page_text,
             )
 
