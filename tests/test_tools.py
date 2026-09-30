@@ -46,6 +46,8 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.search_posts = AsyncMock(return_value=scrape_result)
     mock.get_post_comments = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
+    mock.get_pending_invitations = AsyncMock(return_value=scrape_result)
+    mock.withdraw_invitation = AsyncMock(return_value=scrape_result)
     mock.extract_page = AsyncMock(
         return_value=ExtractedSection(text="some text", references=[])
     )
@@ -58,6 +60,7 @@ _TOOL_MODULES = (
     "company",
     "job",
     "messaging",
+    "network",
     "feed",
     "post",
     "analytics",
@@ -147,6 +150,18 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             "not a LinkedIn post permalink",
         ),
         (
+            "network",
+            "withdraw_invitation",
+            {"linkedin_username": "/feed/"},
+            "not a personal profile",
+        ),
+        (
+            "network",
+            "withdraw_invitation",
+            {"linkedin_username": "me"},
+            "alias for the signed-in member",
+        ),
+        (
             "messaging",
             "get_conversation",
             {"linkedin_username": "/feed/"},
@@ -218,6 +233,7 @@ async def test_invalid_reference_is_rejected_before_extractor(
     from linkedin_mcp_server.tools.feed import register_feed_tools
     from linkedin_mcp_server.tools.job import register_job_tools
     from linkedin_mcp_server.tools.messaging import register_messaging_tools
+    from linkedin_mcp_server.tools.network import register_network_tools
     from linkedin_mcp_server.tools.person import register_person_tools
 
     register_by_module = {
@@ -225,6 +241,7 @@ async def test_invalid_reference_is_rejected_before_extractor(
         "company": register_company_tools,
         "job": register_job_tools,
         "messaging": register_messaging_tools,
+        "network": register_network_tools,
         "person": register_person_tools,
     }
     mcp = FastMCP("test")
@@ -261,6 +278,8 @@ async def test_invalid_reference_is_rejected_before_extractor(
             "send_message",
             {"linkedin_username": "alice", "message": "Hello", "confirm_send": False},
         ),
+        ("network", "get_pending_invitations", {}),
+        ("network", "withdraw_invitation", {"linkedin_username": "alice"}),
         ("feed", "get_feed", {}),
         (
             "feed",
@@ -2721,6 +2740,214 @@ class TestGetMyAnalyticsTool:
             await tool_fn(mock_context)
 
 
+def _network_mcp() -> FastMCP:
+    from linkedin_mcp_server.tools.network import register_network_tools
+
+    mcp = FastMCP("test")
+    register_network_tools(mcp)
+    return mcp
+
+
+def _session_expires_on_the_readiness_call(monkeypatch) -> None:
+    """The DI layer finds the session dead and opens a login window."""
+    from linkedin_mcp_server.core.exceptions import AuthenticationError
+    from linkedin_mcp_server.exceptions import AuthenticationStartedError
+
+    browser = MagicMock()
+    browser.page = MagicMock()
+    for name, value in (
+        ("ensure_tool_ready_or_raise", AsyncMock(return_value=None)),
+        ("get_or_create_browser", AsyncMock(return_value=browser)),
+        (
+            "ensure_authenticated",
+            AsyncMock(side_effect=AuthenticationError("Session expired or invalid.")),
+        ),
+        ("close_browser", AsyncMock(return_value=None)),
+        (
+            "invalidate_auth_and_trigger_relogin",
+            AsyncMock(
+                side_effect=AuthenticationStartedError(
+                    "Session expired. A login browser window has been opened."
+                )
+            ),
+        ),
+    ):
+        monkeypatch.setattr(f"linkedin_mcp_server.dependencies.{name}", value)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.dependencies.get_runtime_policy", lambda: "managed"
+    )
+
+
+class TestNetworkTools:
+    async def test_pending_invitations_default_to_twenty_received(
+        self, serve_extractor
+    ):
+        extractor = _make_mock_extractor(
+            {"url": "https://www.linkedin.com/mynetwork/", "sections": {}}
+        )
+        serve_extractor(extractor)
+
+        await _network_mcp().call_tool("get_pending_invitations", {})
+
+        extractor.get_pending_invitations.assert_awaited_once_with(
+            limit=20, kind="received"
+        )
+
+    async def test_pending_invitations_forward_kind_and_limit(self, serve_extractor):
+        expected = {
+            "url": "https://www.linkedin.com/mynetwork/invitation-manager/sent/",
+            "sections": {"invitations": "Ada Lovelace\nSent 2 days ago"},
+        }
+        extractor = _make_mock_extractor(expected)
+        serve_extractor(extractor)
+
+        result = await _network_mcp().call_tool(
+            "get_pending_invitations", {"kind": "sent", "limit": 100}
+        )
+
+        assert result.structured_content == expected
+        extractor.get_pending_invitations.assert_awaited_once_with(
+            limit=100, kind="sent"
+        )
+
+    @pytest.mark.parametrize(
+        ("arguments", "field"),
+        [
+            ({"kind": "accepted"}, "kind"),
+            ({"kind": "RECEIVED"}, "kind"),
+            ({"limit": 0}, "limit"),
+            ({"limit": 101}, "limit"),
+            ({"limit": "many"}, "limit"),
+        ],
+        ids=["unknown-kind", "kind-case", "limit-zero", "limit-over", "limit-text"],
+    )
+    async def test_pending_invitations_refuse_bad_input_before_the_browser(
+        self, serve_extractor, arguments, field
+    ):
+        from fastmcp.exceptions import ValidationError
+
+        ready = serve_extractor(_make_mock_extractor({}))
+
+        with pytest.raises(ValidationError, match=field):
+            await _network_mcp().call_tool("get_pending_invitations", arguments)
+
+        ready.assert_not_awaited()
+
+    async def test_withdraw_reduces_a_profile_url_to_the_username(
+        self, serve_extractor
+    ):
+        expected = {
+            "url": "https://www.linkedin.com/in/test-user/",
+            "status": "withdrawn",
+            "message": "Invitation withdrawn. State after withdrawal: connectable.",
+        }
+        extractor = _make_mock_extractor(expected)
+        serve_extractor(extractor)
+
+        result = await _network_mcp().call_tool(
+            "withdraw_invitation",
+            {"linkedin_username": "https://de.linkedin.com/in/test-user/?trk=x"},
+        )
+
+        assert result.structured_content == expected
+        extractor.withdraw_invitation.assert_awaited_once_with("test-user")
+
+    async def test_withdraw_needs_a_username(self, serve_extractor):
+        from fastmcp.exceptions import ValidationError
+
+        ready = serve_extractor(_make_mock_extractor({}))
+
+        with pytest.raises(ValidationError, match="linkedin_username"):
+            await _network_mcp().call_tool("withdraw_invitation", {})
+
+        ready.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("tool", "arguments"),
+        [
+            ("get_pending_invitations", {}),
+            ("withdraw_invitation", {"linkedin_username": "test-user"}),
+        ],
+    )
+    async def test_an_expired_session_opens_a_login_and_says_so(
+        self, monkeypatch, tool, arguments
+    ):
+        from fastmcp.exceptions import ToolError
+
+        _session_expires_on_the_readiness_call(monkeypatch)
+
+        with pytest.raises(ToolError, match="Session expired"):
+            await _network_mcp().call_tool(tool, arguments)
+
+    @pytest.mark.parametrize(
+        ("tool", "method", "arguments"),
+        [
+            ("get_pending_invitations", "get_pending_invitations", {}),
+            (
+                "withdraw_invitation",
+                "withdraw_invitation",
+                {"linkedin_username": "test-user"},
+            ),
+        ],
+    )
+    async def test_a_session_lost_mid_call_signs_in_without_offering_a_replay(
+        self, monkeypatch, serve_extractor, tool, method, arguments
+    ):
+        # The body may already have clicked. Only the readiness call may tell a
+        # client that nothing ran and a replay after sign-in is safe.
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.core.exceptions import AuthenticationError
+        from linkedin_mcp_server.exceptions import AuthenticationStartedError
+
+        extractor = MagicMock()
+        setattr(
+            extractor,
+            method,
+            AsyncMock(side_effect=AuthenticationError("Session expired or invalid.")),
+        )
+        serve_extractor(extractor)
+        relogin = AsyncMock(
+            side_effect=AuthenticationStartedError("A login window has been opened.")
+        )
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.network.handle_auth_error", relogin
+        )
+
+        with pytest.raises(ToolError, match="login window"):
+            await _network_mcp().call_tool(tool, arguments)
+
+        relogin.assert_awaited_once()
+        assert not relogin.await_args.kwargs.get("nothing_ran_yet", False)
+
+    async def test_only_the_listing_is_read_only(self):
+        from linkedin_mcp_server.daemon_auth import a_repeat_could_change_something
+
+        mcp = _network_mcp()
+        listing = await mcp.get_tool("get_pending_invitations")
+        withdraw = await mcp.get_tool("withdraw_invitation")
+        assert listing is not None and withdraw is not None
+
+        assert listing.annotations is not None
+        assert listing.annotations.read_only_hint is True
+        assert listing.annotations.destructive_hint is not True
+        assert withdraw.annotations is not None
+        assert withdraw.annotations.destructive_hint is True
+        assert withdraw.annotations.read_only_hint is not True
+
+        # The rule the daemon applies before repeating a call for a client.
+        def context(name: str) -> Any:
+            ctx = MagicMock()
+            ctx.message.name = name
+            ctx.fastmcp_context.fastmcp = mcp
+            return ctx
+
+        assert await a_repeat_could_change_something(context("withdraw_invitation"))
+        assert not await a_repeat_could_change_something(
+            context("get_pending_invitations")
+        )
+
+
 class TestToolTimeouts:
     async def test_all_tools_have_global_timeout(self):
         from linkedin_mcp_server.server import create_mcp_server
@@ -2742,6 +2969,8 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "get_pending_invitations",
+            "withdraw_invitation",
             "get_feed",
             "search_posts",
             "close_session",
@@ -2775,6 +3004,8 @@ class TestToolTimeouts:
             "get_conversation",
             "search_conversations",
             "send_message",
+            "get_pending_invitations",
+            "withdraw_invitation",
             "get_feed",
             "search_posts",
             "close_session",
