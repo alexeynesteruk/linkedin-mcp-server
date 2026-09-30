@@ -386,6 +386,18 @@ def _withdraw_result(
     return result
 
 
+def _shows_withdrawn(text: str, state: str) -> bool:
+    """Whether a re-read after a withdrawal is evidence the invitation is gone.
+
+    Only a page that was read and classified counts. An empty read and an
+    action area the probe could not locate (``unavailable``) are "not
+    pending" as well, and neither says anything about the invitation:
+    reporting ``withdrawn`` from one reports a write that may never have
+    happened.
+    """
+    return bool(text) and state not in ("pending", "unavailable")
+
+
 def _connection_result(
     url: str,
     status: str,
@@ -1094,7 +1106,8 @@ class ConnectionActions:
         ``connect_with_person``. Every other state (not pending, connected,
         own profile, unreadable) is reported without touching the page, so a
         stale idea of who is pending can never withdraw the wrong invite.
-        Success is declared only when a re-read no longer shows pending.
+        Success is declared only when a re-read that was read and classified
+        no longer shows pending.
         """
         username = normalize_person_identifier(username)
         url = person_profile_url(username, "/")
@@ -1130,18 +1143,21 @@ class ConnectionActions:
         if not await self._dialog_is_open(timeout=3000):
             # A flow without a confirmation step is possible; the page decides.
             verified_text, verified_state = await self._read_state(username)
-            if verified_state != "pending":
+            if _shows_withdrawn(verified_text, verified_state):
                 return _withdraw_result(
                     url,
                     "withdrawn",
                     f"Invitation withdrawn. State after withdrawal: {verified_state}.",
                     profile=verified_text or page_text,
                 )
+            message = "LinkedIn did not open a confirmation dialog for withdrawal."
+            if not (verified_text and verified_state == "pending"):
+                message += (
+                    " The profile could not be read back to check that nothing"
+                    " was withdrawn without one."
+                )
             return _withdraw_result(
-                url,
-                "withdraw_unavailable",
-                "LinkedIn did not open a confirmation dialog for withdrawal.",
-                profile=page_text,
+                url, "withdraw_unavailable", message, profile=page_text
             )
 
         if not await self._wait_for_confirm_buttons():
@@ -1175,20 +1191,27 @@ class ConnectionActions:
             if attempt:
                 await asyncio.sleep(WITHDRAW_SETTLE_SECONDS)
             verified_text, verified_state = await self._read_state(username)
-            if verified_state != "pending":
-                break
+            if _shows_withdrawn(verified_text, verified_state):
+                return _withdraw_result(
+                    url,
+                    "withdrawn",
+                    f"Invitation withdrawn. State after withdrawal: {verified_state}.",
+                    profile=verified_text,
+                )
 
-        if verified_state == "pending":
+        if verified_text and verified_state == "pending":
             return _withdraw_result(
                 url,
                 "withdraw_failed",
                 "Confirmed the dialog, but the profile still shows a pending "
                 "invitation.",
-                profile=verified_text or page_text,
+                profile=verified_text,
             )
         return _withdraw_result(
             url,
-            "withdrawn",
-            f"Invitation withdrawn. State after withdrawal: {verified_state}.",
+            "withdraw_failed",
+            "Confirmed the dialog, but the profile could not be read back "
+            f"(state: {verified_state}), so the withdrawal is unverified. Check "
+            "the profile before calling again.",
             profile=verified_text or page_text,
         )

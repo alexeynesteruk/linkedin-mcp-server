@@ -13,6 +13,7 @@ a mock, so the JS never executes and the signals are supplied directly.
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1583,3 +1584,99 @@ class TestWithdrawInvitation:
             result = await actions.withdraw_invitation("testuser")
 
         assert result["status"] == "withdrawn"
+
+
+@contextmanager
+def _confirmed_withdrawal(actions: ConnectionActions, signals: list[ActionSignals]):
+    """Drive a withdrawal through a confirmed dialog; the reads are the test's."""
+    with ExitStack() as stack:
+        stack.enter_context(
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=signals,
+            )
+        )
+        for name in (
+            "_click_withdraw_anchor",
+            "_dialog_is_open",
+            "_wait_for_confirm_buttons",
+            "_click_confirm_dialog_primary",
+        ):
+            stack.enter_context(
+                patch.object(actions, name, new_callable=AsyncMock, return_value=True)
+            )
+        stack.enter_context(
+            patch(
+                "linkedin_mcp_server.scraping.connection_actions.asyncio.sleep",
+                new_callable=AsyncMock,
+            )
+        )
+        yield
+
+
+class TestWithdrawVerification:
+    """``withdrawn`` needs a re-read that was read and classified.
+
+    An empty read (a navigation that failed, a page that never rendered) and
+    an action area the probe could not locate (``unavailable``) both come back
+    "not pending", and neither says anything about the invitation.
+    """
+
+    @pytest.mark.parametrize(
+        ("texts", "after"),
+        [
+            (("", ""), _signals()),
+            ((_CONNECT_TEXT, _CONNECT_TEXT), _signals()),
+            # A re-read whose navigation failed leaves the page as the click
+            # left it, and an optimistic Connect there is not LinkedIn's word.
+            (("", ""), _signals(invite=True)),
+        ],
+        ids=["empty-read", "no-action-area", "empty-read-over-a-stale-page"],
+    )
+    async def test_a_re_read_that_shows_nothing_is_not_a_withdrawal(
+        self, mock_page, texts, after
+    ):
+        actions = _actions(mock_page, _reads(_PENDING_TEXT, *texts))
+        with _confirmed_withdrawal(actions, [_PENDING, after, after]):
+            result = await actions.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdraw_failed"
+        assert "unverified" in result["message"]
+
+    async def test_an_unreadable_first_re_read_still_gets_the_settle_retry(
+        self, mock_page
+    ):
+        actions = _actions(mock_page, _reads(_PENDING_TEXT, "", _CONNECT_TEXT))
+        signals = [_PENDING, _signals(), _signals(invite=True)]
+        with _confirmed_withdrawal(actions, signals):
+            result = await actions.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdrawn"
+        assert "connectable" in result["message"]
+
+    async def test_no_dialog_and_an_unreadable_re_read_is_not_a_withdrawal(
+        self, mock_page
+    ):
+        actions = _actions(mock_page, _reads(_PENDING_TEXT, ""))
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[_PENDING, _signals()],
+            ),
+            patch.object(
+                actions,
+                "_click_withdraw_anchor",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                actions, "_dialog_is_open", new_callable=AsyncMock, return_value=False
+            ),
+        ):
+            result = await actions.withdraw_invitation("testuser")
+
+        assert result["status"] == "withdraw_unavailable"

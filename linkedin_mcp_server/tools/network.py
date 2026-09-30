@@ -108,8 +108,10 @@ def register_network_tools(
             Dict with url, status, message, and optional profile.
             Statuses: withdrawn, not_pending, self_profile, unavailable,
             withdraw_unavailable, withdraw_failed. ``withdrawn`` means a
-            re-read no longer shows the request as pending; the message names
-            the state read after the withdrawal.
+            re-read of the profile no longer shows the request as pending; the
+            message names the state read after the withdrawal. A confirmed
+            dialog whose re-read could not be read is ``withdraw_failed`` with
+            a message saying the withdrawal is unverified.
 
             A status of ``outcome_unknown`` comes from the transport rather
             than the page: the browser process went away with the call in
