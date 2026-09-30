@@ -1213,6 +1213,145 @@ class TestJobTools:
         assert "search_results" in result["sections"]
         assert "pages_visited" not in result
 
+    async def test_get_job_details_file_mode_writes_and_confirms(
+        self, mock_context, serve_extractor, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        expected = {
+            "url": "https://www.linkedin.com/jobs/view/12345/",
+            "sections": {"job_posting": "Software Engineer"},
+        }
+        serve_extractor(_make_mock_extractor(expected))
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_job_details")
+
+        result = await tool_fn(
+            "12345", mock_context, output_path="job.json", output_mode="file"
+        )
+
+        target = tmp_path.resolve() / ".linkedin-mcp" / "exports" / "job.json"
+        assert result == {
+            "saved_path": str(target),
+            "url": expected["url"],
+            "section_names": ["job_posting"],
+        }
+        assert target.is_file()
+
+    async def test_search_jobs_both_mode_returns_result_and_path(
+        self, mock_context, serve_extractor, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        expected = {
+            "url": "https://www.linkedin.com/jobs/search/?keywords=python",
+            "sections": {"search_results": "Job 1"},
+            "job_ids": ["1"],
+        }
+        serve_extractor(_make_mock_extractor(expected))
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "search_jobs")
+
+        result = await tool_fn(
+            "python", mock_context, output_path="s.md", output_mode="both"
+        )
+
+        target = tmp_path.resolve() / ".linkedin-mcp" / "exports" / "s.md"
+        assert result == {**expected, "saved_path": str(target)}
+        assert "JOB_IDS: 1" in target.read_text()
+
+    async def test_get_saved_jobs_file_mode_writes_and_confirms(
+        self, mock_context, serve_extractor, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        expected = {
+            "url": "https://www.linkedin.com/my-items/saved-jobs/",
+            "sections": {"saved_jobs": "Saved"},
+            "job_ids": ["111"],
+        }
+        serve_extractor(_make_mock_extractor(expected))
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_saved_jobs")
+
+        result = await tool_fn(
+            mock_context, output_path="saved.json", output_mode="file"
+        )
+
+        assert result["job_ids"] == ["111"]
+        assert result["section_names"] == ["saved_jobs"]
+        assert (tmp_path / ".linkedin-mcp" / "exports" / "saved.json").is_file()
+
+    @pytest.mark.parametrize(
+        ("tool", "args"),
+        [
+            ("get_job_details", {"job_id": "12345"}),
+            ("search_jobs", {"keywords": "python"}),
+            ("get_saved_jobs", {}),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"output_path": "../x.json", "output_mode": "file"},
+            {"output_mode": "file"},
+            {"output_path": "d/", "output_mode": "both"},
+        ],
+    )
+    async def test_a_bad_export_path_is_refused_before_the_browser(
+        self, mock_context, serve_extractor, tmp_path, monkeypatch, tool, args, kwargs
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        mock_extractor = _make_mock_extractor({"url": "u", "sections": {}})
+        ready = serve_extractor(mock_extractor)
+
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, tool)
+
+        with pytest.raises(ToolError, match="output_path"):
+            await tool_fn(**args, ctx=mock_context, **kwargs)
+
+        ready.assert_not_awaited()
+        assert not (tmp_path / ".linkedin-mcp").exists()
+
+    async def test_an_existing_export_is_kept_and_reported(
+        self, mock_context, serve_extractor, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        exports = tmp_path / ".linkedin-mcp" / "exports"
+        exports.mkdir(parents=True)
+        (exports / "job.json").write_text("precious")
+        serve_extractor(_make_mock_extractor({"url": "u", "sections": {}}))
+
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, "get_job_details")
+
+        with pytest.raises(ToolError, match="never overwritten"):
+            await tool_fn(
+                "12345", mock_context, output_path="job.json", output_mode="file"
+            )
+
+        assert (exports / "job.json").read_text() == "precious"
+
     async def test_search_jobs_is_bounded_by_the_registered_timeout(
         self, mock_context, serve_extractor
     ):

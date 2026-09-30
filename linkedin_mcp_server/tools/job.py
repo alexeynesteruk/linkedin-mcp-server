@@ -6,7 +6,7 @@ Uses innerText extraction for resilient job data capture.
 
 import logging
 import time
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
@@ -15,6 +15,7 @@ from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.result_export import apply_output_mode, check_output_target
 from linkedin_mcp_server.scraping.identifiers import normalize_job_id
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,8 @@ def register_job_tools(
     async def get_job_details(
         job_id: str,
         ctx: Context,
+        output_path: str | None = None,
+        output_mode: Literal["display", "file", "both"] = "display",
     ) -> dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn.
@@ -41,6 +44,18 @@ def register_job_tools(
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
             ctx: FastMCP context for progress reporting
+            output_path: File to write the result to when output_mode is "file"
+                or "both". Relative paths resolve under
+                ~/.linkedin-mcp/exports; absolute paths must stay inside that
+                directory ("~" is expanded first). Parent folders are created.
+                An existing file is never overwritten. A .json name receives
+                the full result; any other name receives url, sections and
+                job ids as text.
+            output_mode: "display" (default) returns the result and writes
+                nothing; "file" writes it and returns only saved_path, url,
+                job_ids, total, promoted_job_ids, section_errors and
+                section_names; "both" returns the full result plus saved_path.
+                The path is checked before the browser starts.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
@@ -53,6 +68,7 @@ def register_job_tools(
         """
         try:
             job_id = normalize_job_id(job_id)
+            check_output_target(output_path, output_mode)
             extractor = await get_ready_extractor(ctx, tool_name="get_job_details")
             logger.info("Scraping job: %s", job_id)
 
@@ -64,7 +80,7 @@ def register_job_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return apply_output_mode(result, output_path, output_mode)
 
         except AuthenticationError as e:
             try:
@@ -91,6 +107,8 @@ def register_job_tools(
         work_type: str | None = None,
         easy_apply: bool = False,
         sort_by: str | None = None,
+        output_path: str | None = None,
+        output_mode: Literal["display", "file", "both"] = "display",
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -108,6 +126,18 @@ def register_job_tools(
             work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs (default false)
             sort_by: Sort results (date, relevance)
+            output_path: File to write the result to when output_mode is "file"
+                or "both". Relative paths resolve under
+                ~/.linkedin-mcp/exports; absolute paths must stay inside that
+                directory ("~" is expanded first). Parent folders are created.
+                An existing file is never overwritten. A .json name receives
+                the full result; any other name receives url, sections and
+                job ids as text.
+            output_mode: "display" (default) returns the result and writes
+                nothing; "file" writes it and returns only saved_path, url,
+                job_ids, total, promoted_job_ids, section_errors and
+                section_names; "both" returns the full result plus saved_path.
+                The path is checked before the browser starts.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
@@ -126,6 +156,7 @@ def register_job_tools(
             # cold start that spends three of ten seconds left it planning
             # against eight it no longer had, and the call was cancelled with
             # every page it had gathered.
+            check_output_target(output_path, output_mode)
             started = time.monotonic()
             extractor = await get_ready_extractor(ctx, tool_name="search_jobs")
             logger.info(
@@ -155,7 +186,7 @@ def register_job_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return apply_output_mode(result, output_path, output_mode)
 
         except AuthenticationError as e:
             try:
@@ -174,6 +205,8 @@ def register_job_tools(
     async def get_saved_jobs(
         ctx: Context,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
+        output_path: str | None = None,
+        output_mode: Literal["display", "file", "both"] = "display",
     ) -> dict[str, Any]:
         """
         List job postings saved by the authenticated LinkedIn user.
@@ -183,12 +216,25 @@ def register_job_tools(
         Args:
             ctx: FastMCP context for progress reporting
             max_pages: Maximum number of saved-jobs pages to load (1-10, default 3)
+            output_path: File to write the result to when output_mode is "file"
+                or "both". Relative paths resolve under
+                ~/.linkedin-mcp/exports; absolute paths must stay inside that
+                directory ("~" is expanded first). Parent folders are created.
+                An existing file is never overwritten. A .json name receives
+                the full result; any other name receives url, sections and
+                job ids as text.
+            output_mode: "display" (default) returns the result and writes
+                nothing; "file" writes it and returns only saved_path, url,
+                job_ids, total, promoted_job_ids, section_errors and
+                section_names; "both" returns the full result plus saved_path.
+                The path is checked before the browser starts.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
             numeric job ID strings usable with get_job_details), and optional references.
         """
         try:
+            check_output_target(output_path, output_mode)
             extractor = await get_ready_extractor(ctx, tool_name="get_saved_jobs")
             logger.info("Fetching saved jobs (max_pages=%d)", max_pages)
 
@@ -200,7 +246,7 @@ def register_job_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return result
+            return apply_output_mode(result, output_path, output_mode)
 
         except AuthenticationError as e:
             try:

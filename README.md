@@ -70,10 +70,10 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 | `get_company_posts` | Read recent posts published on a company's LinkedIn page. |
 | `search_companies` | Find LinkedIn company profiles matching a keyword search. |
 | `get_company_employees` | List company employees, optionally filtered by keyword. |
-| `search_jobs` | Find LinkedIn job postings by keyword and location. |
-| `get_saved_jobs` | List the job postings you have saved on LinkedIn. |
+| `search_jobs` | Find LinkedIn job postings by keyword and location. Optional `output_path`/`output_mode` save the result under `~/.linkedin-mcp/exports`. |
+| `get_saved_jobs` | List the job postings you have saved on LinkedIn. Optional `output_path`/`output_mode` save the result under `~/.linkedin-mcp/exports`. |
 | `search_people` | Search by keyword, location, connection degree or company; `geo_urn` applies LinkedIn's Locations facet and `max_pages` walks up to 10 result pages. |
-| `get_job_details` | Read the details of a LinkedIn job posting by its job ID. |
+| `get_job_details` | Read the details of a LinkedIn job posting by its job ID. Optional `output_path`/`output_mode` save the result under `~/.linkedin-mcp/exports`. |
 | `get_feed` | Read recent home-feed posts, with links in `references`. |
 | `get_post_comments` | Read one post permalink with its paginated comment thread and replies. |
 | `search_posts` | Search posts by keyword with optional recency filters; `references` contains unordered candidate post links. |

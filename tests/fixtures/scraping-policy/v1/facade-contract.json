@@ -371,6 +371,28 @@
             "job_id": {
               "description": "LinkedIn job ID (e.g., \"4252026496\", \"3856789012\")",
               "type": "string"
+            },
+            "output_mode": {
+              "default": "display",
+              "description": "\"display\" (default) returns the result and writes\nnothing; \"file\" writes it and returns only saved_path, url,\njob_ids, total, promoted_job_ids, section_errors and\nsection_names; \"both\" returns the full result plus saved_path.\nThe path is checked before the browser starts.",
+              "enum": [
+                "display",
+                "file",
+                "both"
+              ],
+              "type": "string"
+            },
+            "output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "File to write the result to when output_mode is \"file\"\nor \"both\". Relative paths resolve under\n~/.linkedin-mcp/exports; absolute paths must stay inside that\ndirectory (\"~\" is expanded first). Parent folders are created.\nAn existing file is never overwritten. A .json name receives\nthe full result; any other name receives url, sections and\njob ids as text."
             }
           },
           "required": [
@@ -587,6 +609,28 @@
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
+            },
+            "output_mode": {
+              "default": "display",
+              "description": "\"display\" (default) returns the result and writes\nnothing; \"file\" writes it and returns only saved_path, url,\njob_ids, total, promoted_job_ids, section_errors and\nsection_names; \"both\" returns the full result plus saved_path.\nThe path is checked before the browser starts.",
+              "enum": [
+                "display",
+                "file",
+                "both"
+              ],
+              "type": "string"
+            },
+            "output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "File to write the result to when output_mode is \"file\"\nor \"both\". Relative paths resolve under\n~/.linkedin-mcp/exports; absolute paths must stay inside that\ndirectory (\"~\" is expanded first). Parent folders are created.\nAn existing file is never overwritten. A .json name receives\nthe full result; any other name receives url, sections and\njob ids as text."
             }
           },
           "type": "object"
@@ -749,6 +793,28 @@
               "maximum": 10,
               "minimum": 1,
               "type": "integer"
+            },
+            "output_mode": {
+              "default": "display",
+              "description": "\"display\" (default) returns the result and writes\nnothing; \"file\" writes it and returns only saved_path, url,\njob_ids, total, promoted_job_ids, section_errors and\nsection_names; \"both\" returns the full result plus saved_path.\nThe path is checked before the browser starts.",
+              "enum": [
+                "display",
+                "file",
+                "both"
+              ],
+              "type": "string"
+            },
+            "output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "File to write the result to when output_mode is \"file\"\nor \"both\". Relative paths resolve under\n~/.linkedin-mcp/exports; absolute paths must stay inside that\ndirectory (\"~\" is expanded first). Parent folders are created.\nAn existing file is never overwritten. A .json name receives\nthe full result; any other name receives url, sections and\njob ids as text."
             },
             "sort_by": {
               "anyOf": [
