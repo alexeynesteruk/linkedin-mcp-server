@@ -69,7 +69,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 | `get_company_employees` | List company employees, optionally filtered by keyword. |
 | `search_jobs` | Find LinkedIn job postings by keyword and location. |
 | `get_saved_jobs` | List the job postings you have saved on LinkedIn. |
-| `search_people` | Search by keyword, location, connection degree or company. |
+| `search_people` | Search by keyword, location, connection degree or company; `geo_urn` applies LinkedIn's Locations facet and `max_pages` walks up to 10 result pages. |
 | `get_job_details` | Read the details of a LinkedIn job posting by its job ID. |
 | `get_feed` | Read recent home-feed posts, with links in `references`. |
 | `search_posts` | Search posts by keyword with optional recency filters; `references` contains unordered candidate post links. |

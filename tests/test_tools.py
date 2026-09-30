@@ -502,6 +502,8 @@ class TestPersonTool:
             "New York",
             network=None,
             current_company=None,
+            geo_urn=None,
+            max_pages=1,
         )
 
     async def test_search_people_with_network_and_company_filters(
@@ -538,6 +540,8 @@ class TestPersonTool:
             None,
             network=["F"],
             current_company="1115",
+            geo_urn=None,
+            max_pages=1,
         )
 
     @pytest.mark.parametrize(
@@ -600,7 +604,60 @@ class TestPersonTool:
             None,
             network=["F"],
             current_company=None,
+            geo_urn=None,
+            max_pages=1,
         )
+
+    async def test_search_people_forwards_geo_urn_and_pages(self, monkeypatch):
+        import linkedin_mcp_server.tools.person as person_module
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        mock_extractor = _make_mock_extractor(
+            {"url": "https://www.linkedin.com/search/results/people/", "sections": {}}
+        )
+
+        async def _fake_get_ready_extractor(ctx, tool_name):
+            return mock_extractor
+
+        monkeypatch.setattr(
+            person_module, "get_ready_extractor", _fake_get_ready_extractor
+        )
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        # A bare string, as a client that cannot send arrays would.
+        await mcp.call_tool(
+            "search_people",
+            {"keywords": "engineer", "geo_urn": "103644278", "max_pages": 2},
+        )
+
+        mock_extractor.search_people.assert_awaited_once_with(
+            "engineer",
+            None,
+            network=None,
+            current_company=None,
+            geo_urn=["103644278"],
+            max_pages=2,
+        )
+
+    async def test_search_people_refuses_a_bad_geo_urn_without_a_browser(
+        self, monkeypatch
+    ):
+        import linkedin_mcp_server.tools.person as person_module
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        ready = AsyncMock()
+        monkeypatch.setattr(person_module, "get_ready_extractor", ready)
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(ToolError, match="geo_urn values must be numeric"):
+            await mcp.call_tool(
+                "search_people", {"keywords": "engineer", "geo_urn": ["Boston"]}
+            )
+        ready.assert_not_awaited()
 
     async def test_search_people_validation_error_surfaced_as_tool_error(
         self, mock_context, serve_extractor

@@ -149,6 +149,8 @@ def register_person_tools(
         location: str | None = None,
         network: StrList | None = None,
         current_company: str | None = None,
+        geo_urn: StrList | None = None,
+        max_pages: Annotated[int, Field(ge=1, le=10)] = 1,
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
@@ -156,7 +158,8 @@ def register_person_tools(
         Args:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
-            location: Optional location filter (e.g., "New York", "Remote")
+            location: Optional free-text location filter (e.g., "New York").
+                LinkedIn often ignores it; prefer geo_urn.
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
                 Example: ["F"] to only return 1st-degree connections. A single
@@ -170,10 +173,20 @@ def register_person_tools(
                 exposed under references["about"]. For company-wide employee
                 demographics (location/education/function breakdown) plus a
                 slug-based lookup, use get_company_employees instead.
+            geo_urn: Optional location facet: numeric LinkedIn geo URN ids,
+                e.g. ["103644278"] for the United States. This is the filter
+                LinkedIn's own Locations facet applies. Find an id by applying
+                that filter on linkedin.com and copying geoUrn from the URL. A
+                single id or a comma-separated string is also accepted.
+            max_pages: Result pages to load, about 10 people each (1-10,
+                default 1). Stops early once a page adds no new profiles.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
-            The LLM should parse the raw text to extract individual people and their profiles.
+            With several pages, search_results separates them with a line
+            holding three dashes.
+            The LLM should parse the raw text to extract individual people and
+            their profiles, and should only take profile links from references.
         """
         try:
             # The builder refuses a filter LinkedIn would ignore. Doing it here
@@ -184,6 +197,7 @@ def register_person_tools(
                 location=location,
                 network=network,
                 current_company=current_company,
+                geo_urn=geo_urn,
             )
         except FilterValidationError as e:
             raise ToolError(str(e)) from e
@@ -191,11 +205,14 @@ def register_person_tools(
         try:
             extractor = await get_ready_extractor(ctx, tool_name="search_people")
             logger.info(
-                "Searching people: keywords='%s', location='%s', network=%s, current_company='%s'",
+                "Searching people: keywords='%s', location='%s', network=%s, "
+                "current_company='%s', geo_urn=%s, max_pages=%d",
                 keywords,
                 location,
                 network,
                 current_company,
+                geo_urn,
+                max_pages,
             )
 
             await ctx.report_progress(
@@ -208,6 +225,8 @@ def register_person_tools(
                     location,
                     network=network,
                     current_company=current_company,
+                    geo_urn=geo_urn,
+                    max_pages=max_pages,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface

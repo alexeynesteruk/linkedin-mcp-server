@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
+import asyncio
 import logging
 import re
 
@@ -176,6 +177,9 @@ _SIDEBAR_EXPANDED_PROFILES_JS = """() => {
                     }
                     return links;
                 }"""
+
+#: Between the pages of a multi-page people search.
+PAGE_SEPARATOR = "\n---\n"
 
 
 class PersonScraper:
@@ -472,12 +476,15 @@ class PersonScraper:
         location: str | None = None,
         network: list[str] | None = None,
         current_company: str | None = None,
+        geo_urn: list[str] | None = None,
+        max_pages: int = 1,
     ) -> dict[str, Any]:
-        """Search for people and extract the results page.
+        """Search for people and extract the results page(s).
 
         Args:
             keywords: Free-text query ("software engineer", "recruiter at Google").
-            location: Optional location filter ("New York", "Remote").
+            location: Optional free-text location filter ("New York", "Remote").
+                LinkedIn often ignores it; ``geo_urn`` filters reliably.
             network: Optional connection-degree filter. Each element is one of
                 ``"F"`` (1st-degree), ``"S"`` (2nd-degree), ``"O"`` (3rd-degree
                 and beyond). Example: ``["F"]`` to only return 1st-degree
@@ -491,9 +498,16 @@ class PersonScraper:
                 unfiltered result set. Look up a company's URN via
                 ``get_company_profile`` -- it is exposed under
                 ``references["about"]``.
+            geo_urn: Optional numeric LinkedIn geo URN ids for the Locations
+                facet (e.g. ``["103644278"]`` for the United States).
+            max_pages: Result pages to load through ``&page=N`` (default 1).
+                A later page that adds no new ``person`` reference is past the
+                last result, so the walk stops there.
 
         Returns:
-            {url, sections: {name: text}}
+            {url, sections: {search_results: text}} where ``url`` is the
+            first page and a multi-page ``search_results`` joins each page's
+            text with ``PAGE_SEPARATOR``.
         """
         # Builds before it navigates, and the builder refuses a filter
         # LinkedIn would swallow, so an invalid token costs no page load.
@@ -502,24 +516,51 @@ class PersonScraper:
             location=location,
             network=network,
             current_company=current_company,
+            geo_urn=geo_urn,
         )
-        extracted = await self._capture.capture(
-            url,
-            section_name="search_results",
-            plan=CapturePlan(CaptureMode.SEARCH_RESULTS),
-        )
+
+        page_texts: list[str] = []
+        page_references: list[Reference] = []
+        seen_people: set[str] = set()
+        section_errors: dict[str, dict[str, Any]] = {}
+        for page_num in range(max(1, max_pages)):
+            if page_num > 0:
+                await asyncio.sleep(NAV_DELAY)
+            page_url = url if page_num == 0 else f"{url}&page={page_num + 1}"
+            extracted = await self._capture.capture(
+                page_url,
+                section_name="search_results",
+                plan=CapturePlan(CaptureMode.SEARCH_RESULTS),
+            )
+            if extracted.text == RATE_LIMITED_SECTION_TEXT:
+                section_errors["search_results"] = rate_limited_section_error()
+                break
+            if not extracted.text:
+                if extracted.error:
+                    section_errors["search_results"] = extracted.error
+                break
+
+            # Locale-independent end of results: a later page whose profile
+            # anchors are all ones already seen is LinkedIn repeating itself.
+            people = {
+                ref["url"] for ref in extracted.references if ref["kind"] == "person"
+            }
+            if page_num > 0 and not people - seen_people:
+                logger.debug(
+                    "People search page %d added no new profiles; stopping",
+                    page_num + 1,
+                )
+                break
+            seen_people |= people
+            page_texts.append(extracted.text)
+            page_references.extend(extracted.references)
 
         sections: dict[str, str] = {}
         references: dict[str, list[Reference]] = {}
-        section_errors: dict[str, dict[str, Any]] = {}
-        if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
-            sections["search_results"] = extracted.text
-            if extracted.references:
-                references["search_results"] = extracted.references
-        elif extracted.text == RATE_LIMITED_SECTION_TEXT:
-            section_errors["search_results"] = rate_limited_section_error()
-        elif extracted.error:
-            section_errors["search_results"] = extracted.error
+        if page_texts:
+            sections["search_results"] = PAGE_SEPARATOR.join(page_texts)
+            if page_references:
+                references["search_results"] = page_references
 
         result: dict[str, Any] = {
             "url": url,

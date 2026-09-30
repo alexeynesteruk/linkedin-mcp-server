@@ -124,6 +124,7 @@ def build_people_search_url(
     location: str | None = None,
     network: list[str] | None = None,
     current_company: str | None = None,
+    geo_urn: list[str] | None = None,
 ) -> str:
     """Build a LinkedIn people search URL, refusing filters LinkedIn ignores.
 
@@ -149,11 +150,25 @@ def build_people_search_url(
             f'URN via get_company_profile -> references["about"].'
         )
 
+    if geo_urn:
+        invalid_geo = [g for g in geo_urn if not re.fullmatch(r"[0-9]+", g)]
+        if invalid_geo:
+            raise FilterValidationError(
+                f"geo_urn values must be numeric LinkedIn geo URN ids "
+                f"(e.g. '103644278' for the United States); got {invalid_geo!r}. "
+                f"Apply the Locations filter in a linkedin.com people search "
+                f"and copy geoUrn from the result URL."
+            )
+
     params = f"keywords={quote_plus(keywords)}"
     if location:
         params += f"&location={quote_plus(location)}"
     if network:
         params += f"&network={_encode_list_facet(network)}"
+    if geo_urn:
+        # The facet LinkedIn's own Locations filter writes. Unlike free-text
+        # ``location``, which LinkedIn often ignores, it filters reliably.
+        params += f"&geoUrn={_encode_list_facet(geo_urn)}"
     if current_company:
         params += f"&currentCompany={_encode_list_facet([current_company])}"
 

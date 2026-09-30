@@ -25,6 +25,7 @@ from linkedin_mcp_server.scraping.capture import CaptureMode, SectionCapture
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import (
     RATE_LIMITED_SECTION_TEXT,
+    rate_limited_section_error,
     ExtractedSection,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
@@ -1907,3 +1908,109 @@ class TestSearchPeople:
         assert "location=Seattle" in result["url"]
         assert "network=%5B%22F%22%5D" in result["url"]
         assert "currentCompany=%5B%221115%22%5D" in result["url"]
+
+
+def _people(*slugs: str) -> list[Reference]:
+    return [{"kind": "person", "url": f"/in/{slug}/", "text": slug} for slug in slugs]
+
+
+class TestSearchPeopleFacetsAndPages:
+    async def test_geo_urn_becomes_the_locations_facet(self, mock_page):
+        scraper = _scraper(mock_page)
+        with patch.object(
+            scraper._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("Jane Doe"),
+        ):
+            result = await scraper.search_people(
+                "engineer", geo_urn=["103644278", "101165590"]
+            )
+
+        assert "geoUrn=%5B%22103644278%22%2C%22101165590%22%5D" in result["url"]
+
+    async def test_a_non_numeric_geo_urn_is_refused_before_navigating(self, mock_page):
+        scraper = _scraper(mock_page)
+        with pytest.raises(ValueError, match="geo_urn values must be numeric"):
+            await scraper.search_people("engineer", geo_urn=["United States"])
+
+        mock_page.goto.assert_not_awaited()
+
+    async def test_one_page_by_default(self, mock_page):
+        scraper = _scraper(mock_page)
+        with patch.object(
+            scraper._capture,
+            "capture",
+            new_callable=AsyncMock,
+            return_value=extracted("Page one", _people("a")),
+        ) as capture:
+            await scraper.search_people("engineer")
+
+        assert capture.await_count == 1
+
+    async def test_pages_are_joined_and_their_references_kept(self, mock_page):
+        scraper = _scraper(mock_page)
+        pages = [
+            extracted("Page one", _people("a", "b")),
+            extracted("Page two", _people("c")),
+            extracted("Page three", _people("d")),
+        ]
+        with (
+            patch.object(
+                scraper._capture, "capture", new_callable=AsyncMock, side_effect=pages
+            ) as capture,
+            patch("linkedin_mcp_server.scraping.person.asyncio.sleep", AsyncMock()),
+        ):
+            result = await scraper.search_people("engineer", max_pages=3)
+
+        urls = [call.args[0] for call in capture.await_args_list]
+        assert urls[0] == result["url"]
+        assert urls[1] == f"{result['url']}&page=2"
+        assert urls[2] == f"{result['url']}&page=3"
+        assert result["sections"]["search_results"] == (
+            "Page one\n---\nPage two\n---\nPage three"
+        )
+        assert [ref["url"] for ref in result["references"]["search_results"]] == [
+            "/in/a/",
+            "/in/b/",
+            "/in/c/",
+            "/in/d/",
+        ]
+
+    async def test_a_page_with_no_new_people_ends_the_walk(self, mock_page):
+        scraper = _scraper(mock_page)
+        pages = [
+            extracted("Page one", _people("a", "b")),
+            # LinkedIn answers past the last page with the last one again.
+            extracted("Page one again", _people("a", "b")),
+            extracted("never read", _people("z")),
+        ]
+        with (
+            patch.object(
+                scraper._capture, "capture", new_callable=AsyncMock, side_effect=pages
+            ) as capture,
+            patch("linkedin_mcp_server.scraping.person.asyncio.sleep", AsyncMock()),
+        ):
+            result = await scraper.search_people("engineer", max_pages=3)
+
+        assert capture.await_count == 2
+        assert result["sections"]["search_results"] == "Page one"
+
+    async def test_a_rate_limited_later_page_keeps_the_earlier_ones(self, mock_page):
+        scraper = _scraper(mock_page)
+        pages = [
+            extracted("Page one", _people("a")),
+            extracted(RATE_LIMITED_SECTION_TEXT),
+        ]
+        with (
+            patch.object(
+                scraper._capture, "capture", new_callable=AsyncMock, side_effect=pages
+            ),
+            patch("linkedin_mcp_server.scraping.person.asyncio.sleep", AsyncMock()),
+        ):
+            result = await scraper.search_people("engineer", max_pages=3)
+
+        assert result["sections"]["search_results"] == "Page one"
+        assert result["section_errors"]["search_results"] == (
+            rate_limited_section_error()
+        )

@@ -817,6 +817,21 @@
           "default": null,
           "description": "Optional current-employer filter. LinkedIn's\ncurrentCompany facet only filters on the numeric company URN id\n(e.g. \"1115\" for SAP); plain company names are accepted by the\nURL but ignored by LinkedIn and return the unfiltered result\nset. Look up a company's URN via get_company_profile -- it is\nexposed under references[\"about\"]. For company-wide employee\ndemographics (location/education/function breakdown) plus a\nslug-based lookup, use get_company_employees instead."
         },
+        "geo_urn": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional location facet: numeric LinkedIn geo URN ids,\ne.g. [\"103644278\"] for the United States. This is the filter\nLinkedIn's own Locations facet applies. Find an id by applying\nthat filter on linkedin.com and copying geoUrn from the URL. A\nsingle id or a comma-separated string is also accepted."
+        },
         "keywords": {
           "description": "Search keywords (e.g., \"software engineer\", \"recruiter at Google\")",
           "type": "string"
@@ -831,7 +846,14 @@
             }
           ],
           "default": null,
-          "description": "Optional location filter (e.g., \"New York\", \"Remote\")"
+          "description": "Optional free-text location filter (e.g., \"New York\").\nLinkedIn often ignores it; prefer geo_urn."
+        },
+        "max_pages": {
+          "default": 1,
+          "description": "Result pages to load, about 10 people each (1-10,\ndefault 1). Stops early once a page adds no new profiles.",
+          "maximum": 10,
+          "minimum": 1,
+          "type": "integer"
         },
         "network": {
           "anyOf": [
