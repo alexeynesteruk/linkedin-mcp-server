@@ -248,9 +248,11 @@ class LinkedInExtractor:
             max_pages=max_pages,
         )
 
-    async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
+    async def get_inbox(
+        self, limit: int = 20, inbox_filter: str = "none"
+    ) -> dict[str, Any]:
         """List recent conversations from the messaging inbox."""
-        return await self._conversations.get_inbox(limit)
+        return await self._conversations.get_inbox(limit, inbox_filter)
 
     async def get_conversation(
         self,

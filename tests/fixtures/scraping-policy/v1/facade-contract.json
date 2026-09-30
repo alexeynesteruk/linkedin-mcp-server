@@ -38,7 +38,7 @@
       },
       "get_inbox": {
         "coroutine": true,
-        "signature": "(self, limit: 'int' = 20) -> 'dict[str, Any]'"
+        "signature": "(self, limit: 'int' = 20, inbox_filter: 'str' = 'none') -> 'dict[str, Any]'"
       },
       "get_my_analytics": {
         "coroutine": true,
@@ -336,6 +336,19 @@
         "input": {
           "additionalProperties": false,
           "properties": {
+            "inbox_filter": {
+              "default": "none",
+              "description": "Narrow the list to one category: \"none\" (all\nconversations, the default), \"unread\", \"jobs\", \"connections\",\n\"inmail\" or \"starred\". The filter pills are matched by their\nEnglish names. When a pill cannot be activated, the result is\nthe unfiltered inbox text with no click-derived references and\nsection_errors.inbox.error_type \"inbox_filter_failed\".",
+              "enum": [
+                "none",
+                "unread",
+                "jobs",
+                "connections",
+                "inmail",
+                "starred"
+              ],
+              "type": "string"
+            },
             "limit": {
               "default": 20,
               "description": "Maximum number of conversations to load (1-50, default 20)",

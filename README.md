@@ -62,7 +62,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 | `get_sidebar_profiles` | Find recommended profile links in a person's sidebar. |
 | `get_pending_invitations` | List pending received or sent connection invitations, with full invitation notes. |
 | `withdraw_invitation` | Withdraw a sent connection request, only after a fresh read shows it pending. |
-| `get_inbox` | List recent messaging conversations from your LinkedIn inbox. |
+| `get_inbox` | List recent messaging conversations from your LinkedIn inbox, optionally filtered (`inbox_filter`: unread, jobs, connections, inmail, starred). |
 | `get_conversation` | Read a conversation by username or thread ID. |
 | `search_conversations` | Search messages by keyword across your conversations. |
 | `send_message` | Send after confirmation. Targeting a profile may start a separate DM instead of replying in a thread ([#483](https://github.com/stickerdaniel/linkedin-mcp-server/issues/483)). |

@@ -1318,6 +1318,179 @@ class TestGetInbox:
         scan.assert_not_awaited()
 
 
+class TestGetInboxFilter:
+    """The filter pill must hold on both pages, or no row is attributed."""
+
+    async def _run(
+        self,
+        mock_page: Any,
+        *,
+        inbox_filter: str,
+        activations: list[bool],
+        scan: _ThreadRefScan | None = None,
+    ) -> tuple[dict[str, Any], list[Any]]:
+        reader = _reader(mock_page)
+        order: list[Any] = []
+
+        async def nav(_navigator: Any, url: str) -> None:
+            order.append(("navigate", url))
+
+        async def activate(label: str) -> bool:
+            order.append(("activate", label))
+            return activations.pop(0)
+
+        async def settle() -> None:
+            order.append("settle")
+
+        async def root(_content: Any, _selectors: Any) -> dict[str, Any]:
+            order.append("root")
+            return _root("Filtered text")
+
+        async def refs(**kwargs: Any) -> _ThreadRefScan:
+            order.append("scan")
+            return scan if scan is not None else _scan()
+
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", nav),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(PageContentReader, "_extract_root_content", root),
+            patch.object(reader, "_activate_inbox_filter", activate),
+            patch.object(reader, "_wait_for_stable_rows", settle),
+            patch.object(reader, "_extract_conversation_thread_refs", refs),
+        ):
+            result = await reader.get_inbox(limit=10, inbox_filter=inbox_filter)
+        return result, order
+
+    async def test_the_pill_is_applied_on_each_page_before_that_page_is_read(
+        self, mock_page
+    ):
+        ref = _ref("/messaging/thread/2-ada/", "Ada Lovelace", "inbox")
+
+        result, order = await self._run(
+            mock_page,
+            inbox_filter="unread",
+            activations=[True, True],
+            scan=_scan(ref),
+        )
+
+        assert order == [
+            ("navigate", MESSAGING),
+            ("activate", "Unread"),
+            "root",
+            ("navigate", COMPOSE),
+            ("activate", "Unread"),
+            "settle",
+            "scan",
+        ]
+        assert result["references"]["inbox"] == [ref]
+        assert "section_errors" not in result
+
+    @pytest.mark.parametrize(
+        ("inbox_filter", "label"),
+        [
+            ("unread", "Unread"),
+            ("jobs", "Jobs"),
+            ("connections", "Connections"),
+            ("inmail", "InMail"),
+            ("starred", "Starred"),
+        ],
+    )
+    async def test_every_filter_names_its_own_pill(
+        self, mock_page, inbox_filter, label
+    ):
+        _, order = await self._run(
+            mock_page, inbox_filter=inbox_filter, activations=[True, True]
+        )
+
+        assert ("activate", label) in order
+
+    async def test_a_pill_that_fails_on_the_compose_page_runs_no_scan(self, mock_page):
+        """Unfiltered rows must not be attributed to a filtered request."""
+        result, order = await self._run(
+            mock_page,
+            inbox_filter="unread",
+            activations=[True, False],
+            scan=_scan(_ref("/messaging/thread/2-x/", "Wrong View", "inbox")),
+        )
+
+        assert "scan" not in order
+        assert "settle" not in order
+        assert "references" not in result
+        error = result["section_errors"]["inbox"]
+        assert error["error_type"] == "inbox_filter_failed"
+        assert COMPOSE in error["error_message"]
+
+    async def test_a_pill_that_fails_on_the_text_page_runs_no_scan(self, mock_page):
+        result, order = await self._run(
+            mock_page, inbox_filter="starred", activations=[False]
+        )
+
+        assert order.count(("activate", "Starred")) == 1
+        assert "scan" not in order
+        assert result["section_errors"]["inbox"]["error_type"] == "inbox_filter_failed"
+        assert MESSAGING in result["section_errors"]["inbox"]["error_message"]
+
+    async def test_a_scan_stop_is_still_reported_under_an_active_filter(
+        self, mock_page
+    ):
+        result, _ = await self._run(
+            mock_page,
+            inbox_filter="jobs",
+            activations=[True, True],
+            scan=_scan(stopped_at=_stop("Bob Stall", 0)),
+        )
+
+        assert (
+            result["section_errors"]["inbox"]["error_type"]
+            == "thread_attribution_stopped"
+        )
+
+    @pytest.mark.parametrize("bad", ["", "Unread", "all", "unread "])
+    async def test_an_unknown_filter_is_refused_before_any_browser_work(
+        self, mock_page, bad
+    ):
+        reader = _reader(mock_page)
+        nav = AsyncMock()
+        with patch.object(PageNavigator, "_navigate_to_page", nav):
+            with pytest.raises(ValueError, match="inbox_filter must be one of"):
+                await reader.get_inbox(limit=10, inbox_filter=bad)
+
+        nav.assert_not_awaited()
+
+    async def test_no_filter_touches_no_pill(self, mock_page):
+        reader = _reader(mock_page)
+        activate = AsyncMock()
+        settle = AsyncMock()
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Inbox text"),
+            ),
+            patch.object(reader, "_activate_inbox_filter", activate),
+            patch.object(reader, "_wait_for_stable_rows", settle),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=_scan(),
+            ),
+        ):
+            await reader.get_inbox(limit=10)
+
+        activate.assert_not_awaited()
+        settle.assert_not_awaited()
+
+
 class TestGetConversation:
     async def test_returns_conversation_by_thread_id(self, mock_page):
         reader = _reader(mock_page)

@@ -24,7 +24,7 @@ a page-owning collaborator.
 | `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_CONFIRM_DIALOG_PRIMARY_JS`, `CLICK_INCOMING_ACCEPT_JS`, `CLICK_WITHDRAW_ANCHOR_JS`, `CONFIRM_DIALOG_BUTTON_COUNT_JS`, `ConnectionActions`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile`, `WITHDRAW_SETTLE_SECONDS` | `page-owning` |
 | `content` | `PageContentReader` | `page-owning` |
 | `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `message_action_result()`, `rate_limited_section_error()`, `refuse_an_invalid_message()` | `browser-free` |
-| `conversations` | `ConversationReader`, `strip_select_conversation_prefix()` | `page-owning` |
+| `conversations` | `ConversationReader`, `INBOX_FILTERS`, `INBOX_FILTER_LABELS`, `strip_select_conversation_prefix()` | `page-owning` |
 | `extractor` | `LinkedInExtractor` | `page-owning` |
 | `feed` | `FeedScraper` | `page-owning` |
 | `feed_payload` | `POST_SLUG_URL_RE`, `append_permalink_references()`, `build_feed_references()`, `is_feed_payload_response()`, `is_permalink_payload_response()`, `permalink_paths_from_payload()` | `browser-free` |

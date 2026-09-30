@@ -9,6 +9,7 @@ from urllib.parse import quote_plus
 import logging
 import re
 
+from patchright.async_api import Error as PlaywrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import (
@@ -57,6 +58,20 @@ def strip_select_conversation_prefix(aria_label: str) -> str:
 # pathname unchanged, so it cannot be verified. Measured 2026-09-25, see
 # docs/decisions/2026-09-25-fail-closed-thread-attribution.md.
 _COMPOSE_URL = "https://www.linkedin.com/messaging/compose/"
+
+# Inbox filter pills, by the `inbox_filter` argument. English-only by design:
+# LinkedIn exposes the pills as buttons with no other stable handle, and the
+# browser locale is forced to en-US (see BrowserManager). A pill that is not
+# found under its English name fails closed as `inbox_filter_failed` instead of
+# returning an unfiltered list that looks filtered.
+INBOX_FILTER_LABELS: dict[str, str] = {
+    "unread": "Unread",
+    "jobs": "Jobs",
+    "connections": "Connections",
+    "inmail": "InMail",
+    "starred": "Starred",
+}
+INBOX_FILTERS: tuple[str, ...] = ("none", *INBOX_FILTER_LABELS)
 
 _SCAN_STARTED_ON_THREAD = (
     " The scan began on a thread path. An unchanged pre-click thread ID was"
@@ -166,6 +181,19 @@ def _conversation_rows_unavailable_error() -> dict[str, str]:
             "produced. This can mean an empty list or a list that was "
             "unavailable. Inbox text and any anchor-derived references were read "
             "from https://www.linkedin.com/messaging/." + _BYPASS_ROW_ATTRIBUTION
+        ),
+    }
+
+
+def _inbox_filter_failed_error(inbox_filter: str, *, page: str) -> dict[str, str]:
+    """The ``section_errors`` entry for a filter pill that could not be applied."""
+    return {
+        "error_type": "inbox_filter_failed",
+        "error_message": (
+            f"Could not activate the '{inbox_filter}' inbox filter on {page}, "
+            "so the inbox text is unfiltered and no click-derived conversation "
+            "references were produced: rows from an unfiltered list must not be "
+            "attributed to a filtered view." + _BYPASS_ROW_ATTRIBUTION
         ),
     }
 
@@ -652,13 +680,77 @@ class ConversationReader:
                 "Messaging search results did not load in time."
             ) from exc
 
-    async def get_inbox(self, limit: int = 20) -> dict[str, Any]:
-        """List recent conversations from the messaging inbox."""
+    async def _activate_inbox_filter(self, label: str) -> bool:
+        """Turn one inbox filter pill on and confirm it is on; never toggle it off.
+
+        A pill that is already pressed is left alone: the pill is a toggle, so a
+        second click would clear the filter the caller asked for. Success is the
+        pill's own ``aria-pressed`` state rather than a wall-clock pause. Any
+        failure, including a name that matches more than one button, returns
+        false and the caller treats the view as unfiltered.
+        """
+        page = self._session.page
+        pill = page.get_by_role("button", name=label, exact=True)
+        pressed = pill.and_(page.locator('[aria-pressed="true"]'))
+        try:
+            if await pressed.count() == 0:
+                await pill.click(timeout=5000)
+                await pressed.wait_for(timeout=5000)
+            return True
+        except PlaywrightError:
+            logger.warning("Could not activate the %s inbox filter", label)
+            return False
+
+    async def _wait_for_stable_rows(self) -> None:
+        """Wait until the conversation rows stop changing after a filter click.
+
+        The pill flips before the list re-renders, so rows still attached at
+        that moment can belong to the previous view. The rows are read again
+        every 250 ms and the wait ends after the same labels in the same order
+        are seen four times running, or after 5 s. An empty list counts as a
+        list. The click scan that follows is what verifies rows; this only
+        keeps it from starting on the outgoing view.
+        """
+        stable = 0
+        previous: list[str] | None = None
+        for _ in range(20):
+            labels: list[str] = await self._session.page.evaluate(
+                """() => Array.from(
+                    document.querySelectorAll('main li label[aria-label]')
+                ).map(label => label.getAttribute('aria-label') || '') // inbox_rows_settled
+                """
+            )
+            stable = stable + 1 if labels == previous else 1
+            if stable >= 4:
+                return
+            previous = labels
+            await self._session.delay(0.25)
+
+    async def get_inbox(
+        self, limit: int = 20, inbox_filter: str = "none"
+    ) -> dict[str, Any]:
+        """List recent conversations from the messaging inbox.
+
+        ``inbox_filter`` narrows the list to one pill. The text page and the
+        compose-page click scan are different navigations, so the pill is
+        activated on each; when either activation fails the scan is not run,
+        because rows from the unfiltered view would be attributed to a
+        filtered request.
+        """
+        if inbox_filter not in INBOX_FILTERS:
+            raise ValueError(
+                f"inbox_filter must be one of {', '.join(INBOX_FILTERS)}; "
+                f"got {inbox_filter!r}."
+            )
+        filter_label = INBOX_FILTER_LABELS.get(inbox_filter)
         url = "https://www.linkedin.com/messaging/"
         await self._navigator._navigate_to_page(url)
         await self._session.check_rate_limit()
         await self._wait_for_main_text(log_context="Messaging inbox")
         await self._session.dismiss_modal()
+        text_filtered = filter_label is None or await self._activate_inbox_filter(
+            filter_label
+        )
 
         scrolls = max(1, limit // 10)
         await self._scroll_main_scrollable_region(
@@ -680,9 +772,22 @@ class ConversationReader:
         await self._navigator._navigate_to_page(_COMPOSE_URL)
         await self._session.check_rate_limit()
         await self._session.dismiss_modal()
-        scan = await self._extract_conversation_thread_refs(
-            limit=limit, context="inbox", scroll_attempts=scrolls
-        )
+        filter_error: dict[str, str] | None = None
+        if filter_label is not None and not text_filtered:
+            filter_error = _inbox_filter_failed_error(inbox_filter, page=url)
+        elif filter_label is not None:
+            if await self._activate_inbox_filter(filter_label):
+                await self._wait_for_stable_rows()
+            else:
+                filter_error = _inbox_filter_failed_error(
+                    inbox_filter, page=_COMPOSE_URL
+                )
+        if filter_error is not None:
+            scan = _ThreadRefScan(refs=[])
+        else:
+            scan = await self._extract_conversation_thread_refs(
+                limit=limit, context="inbox", scroll_attempts=scrolls
+            )
         if scan.refs:
             references = dedupe_references(scan.refs + references)
 
@@ -692,8 +797,10 @@ class ConversationReader:
             cleaned,
             references=references,
         )
-        section_errors = _listing_section_errors(
-            "inbox", scan, report_unavailable_rows=True
+        section_errors = (
+            {"inbox": filter_error}
+            if filter_error is not None
+            else _listing_section_errors("inbox", scan, report_unavailable_rows=True)
         )
         if section_errors:
             result["section_errors"] = section_errors

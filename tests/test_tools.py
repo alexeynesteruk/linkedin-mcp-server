@@ -1394,6 +1394,45 @@ class TestMessagingTools:
         assert result["sections"]["inbox"] == "Conversation 1\nConversation 2"
         mock_extractor.get_inbox.assert_awaited_once_with(limit=20)
 
+    @pytest.mark.parametrize(
+        "filter_value", ["unread", "jobs", "connections", "inmail", "starred"]
+    )
+    async def test_get_inbox_forwards_the_filter(
+        self, filter_value, mock_context, serve_extractor
+    ):
+        mock_extractor = _make_mock_extractor(
+            {"url": "https://www.linkedin.com/messaging/", "sections": {"inbox": "x"}}
+        )
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        tool_fn = await get_tool_fn(mcp, "get_inbox")
+        await tool_fn(mock_context, inbox_filter=filter_value)
+
+        mock_extractor.get_inbox.assert_awaited_once_with(
+            limit=20, inbox_filter=filter_value
+        )
+
+    async def test_get_inbox_rejects_an_unknown_filter_before_the_browser(
+        self, mock_context, serve_extractor
+    ):
+        mock_extractor = _make_mock_extractor({"url": "u", "sections": {}})
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        mcp = FastMCP("test")
+        register_messaging_tools(mcp)
+
+        serve_extractor(mock_extractor)
+        with pytest.raises(Exception, match="inbox_filter"):
+            await mcp.call_tool("get_inbox", {"inbox_filter": "archived"})
+
+        mock_extractor.get_inbox.assert_not_awaited()
+
     async def test_get_conversation_success(self, mock_context, serve_extractor):
         expected = {
             "url": "https://www.linkedin.com/messaging/thread/abc123/",

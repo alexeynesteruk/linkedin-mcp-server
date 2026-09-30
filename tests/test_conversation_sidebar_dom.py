@@ -1302,3 +1302,103 @@ class TestTheMainTextWaitAgainstRealDom:
             )
 
         assert "Messaging inbox content did not appear" in caplog.text
+
+
+def pill_document(*, pressed: set[str] | None = None, duplicate: str | None = None):
+    """Filter pills that toggle ``aria-pressed`` on click, radio-style.
+
+    A click on the pressed pill clears it, which is how the real pills behave
+    and why activation must not click one that is already on. ``#log`` counts
+    the clicks.
+    """
+    names = ["Unread", "Jobs", "Starred"]
+    buttons = "".join(
+        f'<button aria-pressed="{"true" if name in (pressed or set()) else "false"}"'
+        f' onclick="pick(this)">{name}</button>'
+        for name in names
+    )
+    if duplicate:
+        buttons += f"<button>{duplicate}</button>"
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><title>Messaging</title></head>
+<body>
+  <p id="log"></p>
+  <main>{buttons}</main>
+  <script>
+    function pick(button) {{
+      const log = document.getElementById('log');
+      log.textContent += 'x';
+      const wasOn = button.getAttribute('aria-pressed') === 'true';
+      document.querySelectorAll('button').forEach(
+        other => other.setAttribute('aria-pressed', 'false')
+      );
+      button.setAttribute('aria-pressed', wasOn ? 'false' : 'true');
+    }}
+  </script>
+</body></html>
+"""
+
+
+class TestInboxFilterPillAgainstRealDom:
+    async def test_an_off_pill_is_clicked_once_and_ends_pressed(self, dom_page):
+        await serve(dom_page, pill_document())
+
+        assert await _reader(dom_page)._activate_inbox_filter("Unread") is True
+
+        assert await dom_page.locator("#log").inner_text() == "x"
+        assert (
+            await dom_page.get_by_role(
+                "button", name="Unread", exact=True
+            ).get_attribute("aria-pressed")
+            == "true"
+        )
+
+    async def test_an_already_pressed_pill_is_not_toggled_off(self, dom_page):
+        """The state can survive the navigation to the compose page."""
+        await serve(dom_page, pill_document(pressed={"Unread"}))
+
+        assert await _reader(dom_page)._activate_inbox_filter("Unread") is True
+
+        assert await dom_page.locator("#log").inner_text() == ""
+        assert (
+            await dom_page.get_by_role(
+                "button", name="Unread", exact=True
+            ).get_attribute("aria-pressed")
+            == "true"
+        )
+
+    async def test_a_missing_pill_fails_closed(self, dom_page):
+        await serve(dom_page, pill_document())
+
+        assert await _reader(dom_page)._activate_inbox_filter("Ungelesen") is False
+
+    async def test_an_ambiguous_pill_name_fails_closed(self, dom_page):
+        await serve(dom_page, pill_document(duplicate="Unread"))
+
+        assert await _reader(dom_page)._activate_inbox_filter("Unread") is False
+
+
+class TestStableRowsAgainstRealDom:
+    async def test_the_wait_outlasts_a_list_that_swaps_after_the_click(self, dom_page):
+        """Stale rows attached at click time are not the settled list."""
+        await serve(
+            dom_page,
+            "<!DOCTYPE html><html><body><main><ul id='l'>"
+            "<li><label aria-label='Old One'></label></li></ul></main>"
+            "<script>setTimeout(() => {"
+            "document.getElementById('l').innerHTML ="
+            " \"<li><label aria-label='New One'></label></li>\";"
+            "}, 600);</script></body></html>",
+        )
+
+        await _reader(dom_page)._wait_for_stable_rows()
+
+        assert await dom_page.evaluate(
+            "() => Array.from(document.querySelectorAll('main li label'))"
+            ".map(l => l.getAttribute('aria-label'))"
+        ) == ["New One"]
+
+    async def test_an_empty_list_settles_without_error(self, dom_page):
+        await serve(dom_page, "<!DOCTYPE html><html><body><main></main></body></html>")
+
+        await _reader(dom_page)._wait_for_stable_rows()

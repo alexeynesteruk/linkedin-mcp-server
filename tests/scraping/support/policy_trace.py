@@ -626,6 +626,7 @@ def semantic_program_id(program: str) -> str:
         ("return {ids: ids, scoped", "job_ids"),
         ("promoted.push(id)", "job_promoted_ids"),
         ("const heading = document.querySelector('main h1')", "profile_display_name"),
+        ("inbox_rows_settled", "inbox_rows_settled"),
         ("main li label[aria-label]", "conversation_thread_refs"),
         ("isScrollable", "scroll_main_region"),
         ("jobs-search-pagination__page-state", "job_total_pages"),
