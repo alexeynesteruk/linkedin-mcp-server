@@ -18,6 +18,7 @@ from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
 from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
+    NetworkError,
     await_deferring_cancels,
     detect_auth_barrier_quick,
     detect_rate_limit,
@@ -184,6 +185,37 @@ async def _log_feed_failure_context(
     )
 
 
+# Chromium's codes for a request that never reached LinkedIn: no DNS answer,
+# no network, the network changed or was suspended (a Mac waking from sleep, a
+# VPN reconnecting), a connection that failed or dropped. None of them says
+# anything about the session. Reported as an expired session, their recovery
+# moves the stored profile aside and asks for a new login over a network that
+# is merely down. ERR_TOO_MANY_REDIRECTS is deliberately absent: a loop is a
+# page answering, and it keeps the answer it has always had.
+_UNREACHABLE_ERROR_CODES = (
+    "net::ERR_NAME_NOT_RESOLVED",
+    "net::ERR_NAME_RESOLUTION_FAILED",
+    "net::ERR_INTERNET_DISCONNECTED",
+    "net::ERR_NETWORK_CHANGED",
+    "net::ERR_NETWORK_IO_SUSPENDED",
+    "net::ERR_ADDRESS_UNREACHABLE",
+    "net::ERR_CONNECTION_REFUSED",
+    "net::ERR_CONNECTION_RESET",
+    "net::ERR_CONNECTION_CLOSED",
+    "net::ERR_CONNECTION_ABORTED",
+    "net::ERR_CONNECTION_FAILED",
+    "net::ERR_CONNECTION_TIMED_OUT",
+    "net::ERR_TIMED_OUT",
+    "net::ERR_EMPTY_RESPONSE",
+)
+
+
+def _unreachable_error_code(exc: BaseException) -> str | None:
+    """The Chromium code in *exc* that means LinkedIn was never reached."""
+    message = str(exc)
+    return next((code for code in _UNREACHABLE_ERROR_CODES if code in message), None)
+
+
 async def _feed_auth_succeeds(
     browser: BrowserManager,
     *,
@@ -266,6 +298,17 @@ async def _feed_auth_succeeds(
             # caller an AuthenticationError, whose recovery moves the stored
             # profile aside and starts a login through the same broken proxy.
             raise_if_proxy_configured(exc)
+            # The same reasoning without a proxy, for the failures that name
+            # themselves: Chromium says outright that LinkedIn was not
+            # reached. A bare timeout still reports False, since nothing says
+            # what it waited on.
+            code = _unreachable_error_code(exc)
+            if code is not None:
+                raise NetworkError(
+                    f"LinkedIn could not be reached ({code}), so the stored "
+                    "session was not checked and has been kept. Check the "
+                    "connection and retry."
+                ) from None
         return False
 
 

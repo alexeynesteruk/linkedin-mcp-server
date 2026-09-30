@@ -10,6 +10,8 @@ import pytest
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import (
     AccountRestrictedError,
+    AuthenticationError,
+    NetworkError,
     ProxyConnectionError,
 )
 from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
@@ -1204,6 +1206,108 @@ class TestProxyFailureIsNotAnAuthFailure:
             return_value=False,
         ):
             assert await _feed_auth_succeeds(browser) is False
+
+
+class TestUnreachableLinkedInKeepsTheSession:
+    """No network is not a dead session (fork 7fba0ad, upstream issue #521).
+
+    The feed check runs on every browser start, including the first call after
+    each idle close, so a Mac waking from sleep or a VPN reconnecting meets it
+    first. Reported as an invalid session, the recovery moves the stored
+    profile aside and asks for a login over a network that is merely down.
+    """
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "net::ERR_INTERNET_DISCONNECTED",
+            "net::ERR_NAME_NOT_RESOLVED",
+            "net::ERR_NETWORK_CHANGED",
+            "net::ERR_NETWORK_IO_SUSPENDED",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_an_unreachable_linkedin_raises_a_network_error(
+        self, monkeypatch, code
+    ):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception(f"Page.goto: {code} at https://www.linkedin.com/")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(NetworkError, match=code) as excinfo,
+        ):
+            await _feed_auth_succeeds(browser)
+        assert not isinstance(excinfo.value, ProxyConnectionError)
+
+    @pytest.mark.asyncio
+    async def test_a_barrier_still_outranks_the_network_error(self, monkeypatch):
+        # A redirect to /login that merely missed its load event is evidence
+        # about the session, whatever the navigation error said.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(side_effect=Exception("net::ERR_NETWORK_CHANGED"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value="login page",
+            ),
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+    @pytest.mark.asyncio
+    async def test_startup_offline_keeps_the_source_profile(self, tmp_path):
+        profile_dir = _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+        source_browser = _make_mock_browser()
+        source_browser.page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_INTERNET_DISCONNECTED")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.get_runtime_id",
+                return_value="macos-arm64-host",
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.BrowserManager",
+                return_value=source_browser,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            pytest.raises(NetworkError) as excinfo,
+        ):
+            await get_or_create_browser()
+
+        assert not isinstance(excinfo.value, AuthenticationError)
+        source_browser.close.assert_awaited()
+        assert source_state_path(profile_dir).exists()
+        assert (profile_dir / "Default" / "Cookies").exists()
 
 
 class TestAmbiguousProxyFailureKeepsTheSession:
