@@ -27,6 +27,7 @@ from patchright.async_api import Page, async_playwright
 
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.invitations import (
+    CARD_LABELS_JS,
     EXPAND_NOTES_JS,
     RECEIVED_COUNT_IS_ZERO_JS,
     InvitationReader,
@@ -348,3 +349,47 @@ class TestReaderScroll:
 
         urls = [ref["url"] for ref in result["references"]["invitations"]]
         assert urls == [f"/in/person-{i}/" for i in range(30)]
+
+
+def _sent_card(slug: str, name: str, headline: str, labels: Labels) -> str:
+    # The live sent manager: an avatar-only profile link, the name as text.
+    return f"""
+      <li><div class="card">
+        <a href="https://www.linkedin.com/in/{slug}/"><img alt=""></a>
+        <div><p>{name}</p><p>{headline}</p><p>{labels.see_more}</p></div>
+        <a href="https://www.linkedin.com/mynetwork/invitation-manager/sent/"
+           aria-label="{labels.people_tab} {name}">{labels.see_less}</a>
+      </div></li>"""
+
+
+class TestCardLabelsDom:
+    async def test_each_avatar_link_is_labeled_by_its_own_card(self, dom_page):
+        def build(labels: Labels) -> str:
+            return (
+                "<main><ul>"
+                + _sent_card("ada", "Ada Lovelace", "Engineer", labels)
+                + _sent_card("bob", "Bob Stall", "Founder", labels)
+                + "</ul></main>"
+            )
+
+        async def read(page, html: str) -> Any:
+            await page.set_content(html)
+            return await page.evaluate(CARD_LABELS_JS)
+
+        await _in_every_locale(
+            dom_page,
+            build,
+            {"/in/ada/": "Ada Lovelace", "/in/bob/": "Bob Stall"},
+            read,
+        )
+
+    async def test_a_block_linking_two_people_is_not_a_card(self, dom_page):
+        await dom_page.set_content(
+            """<main><div>
+              <p>Mutual: Ada and Bob</p>
+              <a href="https://www.linkedin.com/in/ada/"></a>
+              <a href="https://www.linkedin.com/in/bob/"></a>
+            </div></main>"""
+        )
+
+        assert await dom_page.evaluate(CARD_LABELS_JS) == {}

@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import logging
 import re
+from urllib.parse import urlparse
 from typing import Any, Literal
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import rate_limited_section_error
-from linkedin_mcp_server.scraping.link_metadata import Reference, build_references
+from linkedin_mcp_server.scraping.link_metadata import (
+    RawReference,
+    Reference,
+    build_references,
+)
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.text import (
@@ -102,6 +107,69 @@ RECEIVED_COUNT_IS_ZERO_JS = r"""
 """
 
 
+# The sent manager links each invitee only through the avatar, an <a> with no
+# text, and prints the name as plain text beside it; build_references drops a
+# person link without a label. Each profile link is therefore given the first
+# line of its card: the largest block around it that links no other profile.
+# Structural, so it holds in any locale (measured live 2026-09-30).
+CARD_LABELS_JS = r"""
+() => {
+  const main = document.querySelector('main');
+  if (!main) return {};
+  const pathOf = anchor => {
+    try {
+      const path = new URL(anchor.href, location.href).pathname;
+      const match = path.match(/^\/in\/[^/]+/);
+      return match ? match[0] + '/' : null;
+    } catch (error) {
+      return null;
+    }
+  };
+  const labels = {};
+  for (const anchor of main.querySelectorAll('a[href*="/in/"]')) {
+    const path = pathOf(anchor);
+    if (!path || labels[path]) continue;
+    let card = null;
+    for (let el = anchor.parentElement; el && el !== main; el = el.parentElement) {
+      const paths = new Set(
+        Array.from(el.querySelectorAll('a[href*="/in/"]')).map(pathOf).filter(Boolean)
+      );
+      if (paths.size > 1) break;
+      card = el;
+    }
+    if (!card) continue;
+    const line = (card.innerText || '')
+      .split('\n')
+      .map(part => part.trim())
+      .find(Boolean);
+    if (line) labels[path] = line.slice(0, 200);
+  }
+  return labels;
+}
+"""
+
+
+def label_unlabeled_profiles(
+    raw_references: list[RawReference], labels: dict[str, str]
+) -> list[RawReference]:
+    """Give each text-less /in/ link its card label, leaving the rest alone."""
+    if not labels:
+        return raw_references
+    labeled: list[RawReference] = []
+    for raw in raw_references:
+        href = raw.get("href") or ""
+        if (raw.get("text") or "").strip() or "/in/" not in href:
+            labeled.append(raw)
+            continue
+        match = re.match(r"/in/[^/]+", urlparse(href).path)
+        label = labels.get(f"{match.group(0)}/") if match else None
+        if label:
+            raw = RawReference(**raw)
+            raw["text"] = label
+        labeled.append(raw)
+    return labeled
+
+
 def invitations_url(kind: InvitationKind) -> str:
     """The invitation-manager page for *kind*."""
     if kind not in INVITATION_KINDS:
@@ -186,6 +254,20 @@ class InvitationReader:
                 return
             await self._session.delay(0.3)
 
+    async def _card_labels(self) -> dict[str, str]:
+        try:
+            labels = await self._session.page.evaluate(CARD_LABELS_JS)
+        except Exception:
+            logger.debug("Could not read invitation card labels", exc_info=True)
+            return {}
+        if not isinstance(labels, dict):
+            return {}
+        return {
+            str(path): str(label)
+            for path, label in labels.items()
+            if isinstance(label, str) and label
+        }
+
     async def _received_count_is_zero(self) -> bool:
         try:
             return bool(await self._session.page.evaluate(RECEIVED_COUNT_IS_ZERO_JS))
@@ -242,7 +324,10 @@ class InvitationReader:
             return result
         cleaned = filter_linkedin_noise_lines(truncated)
 
-        references = build_references(raw_result["references"], "invitations")
+        raw_references = label_unlabeled_profiles(
+            raw_result["references"], await self._card_labels()
+        )
+        references = build_references(raw_references, "invitations")
         result["sections"]["invitations"] = trim_to_limit(cleaned, references, limit)
         if references[:limit]:
             result["references"] = {"invitations": references[:limit]}

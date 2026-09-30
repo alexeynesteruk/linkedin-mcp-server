@@ -1047,6 +1047,7 @@ async def _pending_invitations_scenario() -> dict[str, Any]:
     page = _page(recorder)
     page.script("evaluate:scroll_main_region", True)
     page.script("evaluate:invitation_expand_notes", 0)
+    page.script("evaluate:invitation_card_labels", {})
     page.script(
         "evaluate:root_content",
         _root(

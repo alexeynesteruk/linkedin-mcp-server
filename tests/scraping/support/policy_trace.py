@@ -600,6 +600,7 @@ def semantic_program_id(program: str) -> str:
         ("linkedinMcpMore", "comment_thread_more"),
         ("innerText.length || 0", "comment_thread_length"),
         ("expandable-text-button", "invitation_expand_notes"),
+        ("if (line) labels[path] = line", "invitation_card_labels"),
         ("invitation-manager/received/ALL", "invitation_received_zero"),
         ("anchors.length !== 1", "withdraw_anchor_click"),
         ("querySelectorAll('button').length : -1", "confirm_dialog_button_count"),

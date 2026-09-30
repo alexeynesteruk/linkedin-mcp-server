@@ -16,11 +16,13 @@ import pytest
 from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.contracts import rate_limited_section_error
 from linkedin_mcp_server.scraping.invitations import (
+    CARD_LABELS_JS,
     EXPAND_NOTES_JS,
     RECEIVED_COUNT_IS_ZERO_JS,
     SCROLL_LIST_JS,
     InvitationReader,
     invitations_url,
+    label_unlabeled_profiles,
     trim_to_limit,
 )
 from linkedin_mcp_server.scraping.link_metadata import Reference
@@ -49,7 +51,9 @@ def session_boundaries():
         yield SimpleNamespace(scroll=scroll, navigate=nav)
 
 
-def _evaluate(*, expanded: int = 0, zero: bool = False) -> AsyncMock:
+def _evaluate(
+    *, expanded: int = 0, zero: bool = False, labels: dict[str, str] | None = None
+) -> AsyncMock:
     """Answer the page programs the reader runs, by identity."""
     passes = iter([expanded, 0])
 
@@ -60,6 +64,8 @@ def _evaluate(*, expanded: int = 0, zero: bool = False) -> AsyncMock:
             return next(passes, 0)
         if script == RECEIVED_COUNT_IS_ZERO_JS:
             return zero
+        if script == CARD_LABELS_JS:
+            return labels or {}
         raise AssertionError(f"unexpected script: {script[:60]}")
 
     return AsyncMock(side_effect=evaluate)
@@ -177,3 +183,47 @@ class TestGetPendingInvitations:
 
         assert result["sections"] == {}
         assert result["section_errors"]["invitations"] == rate_limited_section_error()
+
+
+class TestCardLabels:
+    def test_a_textless_profile_link_takes_its_card_label(self):
+        raw = [
+            {"href": "https://www.linkedin.com/in/acomminos/", "text": ""},
+            {"href": "https://www.linkedin.com/in/bob/", "text": "Bob"},
+            {"href": "https://www.linkedin.com/mynetwork/", "text": ""},
+        ]
+        labeled = label_unlabeled_profiles(
+            raw, {"/in/acomminos/": "Andrew Comminos", "/in/bob/": "Other"}
+        )
+
+        assert [r.get("text") for r in labeled] == ["Andrew Comminos", "Bob", ""]
+        assert raw[0]["text"] == "", "the input must not be mutated"
+
+    async def test_the_sent_manager_returns_its_avatar_linked_invitees(self, mock_page):
+        # Measured live 2026-09-30: every invitee is linked only through an
+        # avatar with no text, and the name is plain text beside it.
+        mock_page.evaluate = _evaluate(
+            labels={"/in/ada/": "Ada Lovelace", "/in/bob/": "Bob Stall"}
+        )
+        reader = _reader(mock_page)
+        refs = [
+            {"href": "https://www.linkedin.com/in/ada/", "text": ""},
+            {"href": "https://www.linkedin.com/in/bob/", "text": ""},
+        ]
+        text = (
+            "Ada Lovelace\nEngineer\nSent 1 day ago\n\nBob Stall\nFounder\nSent today"
+        )
+        with patch.object(reader._content, "_extract_root_content", _root(text, refs)):
+            result = await reader.get_pending_invitations(limit=1, kind="sent")
+
+        assert result["references"]["invitations"] == [
+            {
+                "kind": "person",
+                "url": "/in/ada/",
+                "text": "Ada Lovelace",
+                "context": "invitation",
+            }
+        ]
+        assert result["sections"]["invitations"] == (
+            "Ada Lovelace\nEngineer\nSent 1 day ago"
+        )
