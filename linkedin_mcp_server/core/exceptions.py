@@ -88,3 +88,25 @@ class ScrapingError(LinkedInScraperException):
     """Raised when scraping fails for various reasons."""
 
     pass
+
+
+class BrowserLostError(LinkedInScraperException):
+    """The browser a call was driving is gone: closed, crashed or disconnected.
+
+    Not a page failure, and never a section error. A section that failed to load
+    leaves the browser usable, while this leaves nothing to call: every later
+    operation on the same page fails the same way until a new browser is
+    launched. Folded into ``section_errors`` it reads as an empty page, which is
+    why the capture paths raise it instead (``core/browser_loss.py``).
+
+    A ``LinkedInScraperException`` so the ``except LinkedInScraperException:
+    raise`` guard every per-section loop already has lets it through without
+    each loop learning about it.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(
+            f"The LinkedIn browser session was lost ({reason}) before this call "
+            "finished."
+        )

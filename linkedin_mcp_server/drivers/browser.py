@@ -11,7 +11,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
@@ -30,6 +30,7 @@ from linkedin_mcp_server.core import (
     raise_if_proxy_error,
     resolve_remember_me_prompt,
 )
+from linkedin_mcp_server.core.browser_loss import browser_loss_in
 
 
 from linkedin_mcp_server.browser_launch import build_launch_options, describe_launch
@@ -637,16 +638,88 @@ async def get_or_create_browser(
     if headless is not None:
         _headless = headless
 
-    if _browser is not None:
-        return _browser
+    browser = _browser
+    if browser is not None and _lost_reason(browser) is None:
+        return browser
 
     # Double-checked: only one concurrent caller may create the singleton. The
     # lifecycle lock additionally keeps creation out of an in-progress close,
     # which clears _browser before it has finished tearing Chromium down.
     async with _browser_create_lock, _browser_lifecycle_lock:
         if _browser is not None:
-            return _browser
+            reason = _lost_reason(_browser)
+            if reason is None:
+                return _browser
+            # Handed out as it was, a dead browser fails this call and every one
+            # after it for the life of the process, which for a stdio server is
+            # the life of its client. Closed the ordinary way, under the lock
+            # already held, so the profile is settled exactly as any close
+            # settles it: released when Chromium is proved gone, kept (and the
+            # launch below refused) when it is not.
+            logger.warning(
+                "The browser can no longer be driven (%s); closing it and "
+                "starting a fresh one on the saved profile",
+                reason,
+            )
+            await _run_deferring_cancels(_close_browser_locked())
         return await _create_browser()
+
+
+def _lost_reason(browser: BrowserManager) -> str | None:
+    """Why *browser* can no longer serve a call, or None if it can.
+
+    ``None`` too when the question itself fails or is answered with anything but
+    a reason, deliberately. Not knowing is not evidence the browser died, a
+    relaunch costs a /feed/ validation against LinkedIn, and a browser that
+    really is gone is still caught by the error of the call that meets it
+    (``reset_browser_lost_in``).
+    """
+    try:
+        reason = browser.lost_reason()
+    except Exception:
+        logger.debug("Could not ask the browser whether it is usable", exc_info=True)
+        return None
+    return reason if isinstance(reason, str) else None
+
+
+async def reset_browser_lost_in(error: BaseException) -> str | None:
+    """Close the browser when *error* says it is gone. Return how it was lost.
+
+    For the tool-call middleware, after a call failed. The next call then
+    launches a fresh browser instead of meeting the same dead one. ``None`` when
+    *error* reports no loss, and when there is no browser to close: a failure to
+    *launch* can carry the same closed-target text and is not a lost session.
+    """
+    return await _reset_a_lost_browser(lambda _browser: browser_loss_in(error))
+
+
+async def reset_browser_if_lost() -> str | None:
+    """Close the browser if it reports itself gone. Return how it was lost.
+
+    For the tool-call middleware, after a call returned: a scrape that met a dead
+    page in a helper that swallows its errors comes back looking complete.
+    """
+    return await _reset_a_lost_browser(_lost_reason)
+
+
+async def _reset_a_lost_browser(
+    why: Callable[[BrowserManager], str | None],
+) -> str | None:
+    """Close the singleton if *why* names a loss; the ordinary close, nothing more."""
+    async with _browser_lifecycle_lock:
+        browser = _browser
+        if browser is None:
+            return None
+        reason = why(browser)
+        if reason is None:
+            return None
+        logger.warning(
+            "The browser was lost during a tool call (%s); closing it so the "
+            "next call starts a fresh one",
+            reason,
+        )
+        await _run_deferring_cancels(_close_browser_locked())
+        return reason
 
 
 async def _create_browser() -> BrowserManager:

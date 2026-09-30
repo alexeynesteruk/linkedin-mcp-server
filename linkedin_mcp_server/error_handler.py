@@ -17,6 +17,7 @@ from linkedin_mcp_server.core.proxy_errors import (
 )
 from linkedin_mcp_server.core.exceptions import (
     AccountRestrictedError,
+    BrowserLostError,
     InvalidReferenceError,
     AuthenticationError,
     ElementNotFoundError,
@@ -271,6 +272,15 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
             "Scraping failed. LinkedIn page structure may have changed.",
             context=context,
         )
+
+    # Ahead of the catch-all, which it subclasses. No issue diagnostics: a page
+    # the user closed or a renderer that crashed is not a LinkedIn layout bug,
+    # and an issue template would bury what the serializing middleware then
+    # says about the reset. Chained, because that middleware finds the loss by
+    # walking to this exception.
+    elif isinstance(exception, BrowserLostError):
+        logger.warning("Browser lost%s: %s", ctx, exception)
+        raise ToolError(str(exception)) from exception
 
     # Ahead of the catch-all, which it subclasses. No issue diagnostics: a
     # reference the caller can correct is not a bug worth reporting, and an

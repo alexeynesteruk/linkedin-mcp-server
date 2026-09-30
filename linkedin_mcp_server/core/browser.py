@@ -7,7 +7,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from collections.abc import Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from typing import Any, TypeVar
 
 from patchright.async_api import (
@@ -163,6 +163,11 @@ class BrowserManager:
         # launch: ``_begin_a_launch`` decides what the next one may inherit.
         self._close_proven = False
         self._close_interrupted = False
+        #: Why this launch's page can no longer be driven, once Patchright has
+        #: said so, or None while it can. Set from the page, context and browser
+        #: events registered in ``_watch_for_loss``, because a crashed renderer
+        #: changes nothing ``is_closed()`` reports. See :meth:`lost_reason`.
+        self._lost: str | None = None
 
     async def __aenter__(self) -> "BrowserManager":
         await self.start()
@@ -353,6 +358,7 @@ class BrowserManager:
         self._close_confirmed = False
         self._is_authenticated = False
         self._containment = None
+        self._lost = None
 
     async def start(self) -> None:
         """Start Patchright and launch persistent browser context."""
@@ -554,6 +560,7 @@ class BrowserManager:
                 self._page = await open_hidden_page(self._context, startup)
             else:
                 self._page = startup
+            self._watch_for_loss(self._context, self._page)
 
             logger.info("Browser context and page ready")
 
@@ -770,6 +777,66 @@ class BrowserManager:
         it to record the verdict.
         """
         return self._close_confirmed
+
+    def _watch_for_loss(self, context: BrowserContext, page: Page) -> None:
+        """Record the moment Patchright reports this launch's page unusable.
+
+        Events rather than polling, for the one loss nothing else reports: a
+        renderer that crashed (an out-of-memory kill, a Mac that slept) leaves
+        ``page.is_closed()`` false while every later operation fails. The other
+        three are here too so the first reason is the one kept.
+
+        Each handler answers only for the page it was registered for. ``close()``
+        clears ``_page`` before it closes anything, so this manager's own
+        teardown is never mistaken for a loss, and a late event from a previous
+        launch cannot mark the next one.
+        """
+
+        def noting(reason: str) -> Callable[[object], None]:
+            def note(_source: object) -> None:
+                if self._page is page and self._lost is None:
+                    self._lost = reason
+
+            return note
+
+        # Fails open. The watch sharpens detection and nothing more: without it
+        # ``lost_reason`` still reads Patchright's own state, and the call that
+        # meets a dead page still reports it. Refusing a browser that works
+        # because a listener could not be attached would trade a degraded check
+        # for no browser at all.
+        try:
+            page.on("close", noting("the page was closed"))
+            page.on("crash", noting("the page crashed"))
+            context.on("close", noting("the browser context was closed"))
+            browser = context.browser
+            if browser is not None:
+                browser.on("disconnected", noting("the browser disconnected"))
+        except Exception:
+            logger.warning(
+                "Could not watch the browser for crashes; a crashed page will "
+                "be noticed by the call that meets it instead",
+                exc_info=True,
+            )
+
+    def lost_reason(self) -> str | None:
+        """Why this browser can no longer serve a call, or None while it can.
+
+        Read from Patchright's state and events only; nothing is sent to the
+        browser, so asking costs no round trip and cannot hang. That is also its
+        limit: a driver process that exited changes none of it, and only the
+        next call's error says so (``core/browser_loss.py``).
+        """
+        if self._lost is not None:
+            return self._lost
+        page, context = self._page, self._context
+        if page is None or context is None:
+            return "the browser is not running"
+        if page.is_closed():
+            return "the page was closed"
+        browser = context.browser
+        if browser is not None and not browser.is_connected():
+            return "the browser disconnected"
+        return None
 
     @property
     def page(self) -> Page:
