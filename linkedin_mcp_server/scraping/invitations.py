@@ -59,6 +59,33 @@ EXPAND_NOTES_JS = r"""
 }
 """
 
+# The invitation list lazy-loads as its scroller nears the bottom, and that
+# scroller is <main>, not the document: measured on the sent manager
+# (2026-08-25), window.scrollTo moved nothing and scrolling main's scrollTop
+# loaded the rest. The largest scrollable element in main is scrolled, the
+# way the inbox is, and the document too in case a layout scrolls it instead.
+SCROLL_LIST_JS = r"""
+() => {
+  const main = document.querySelector('main');
+  if (main) {
+    const isScrollable = element => {
+      const style = window.getComputedStyle(element);
+      return (
+        (style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+        element.scrollHeight > element.clientHeight + 20
+      );
+    };
+    const candidates = [main, ...main.querySelectorAll('*')].filter(isScrollable);
+    const target = candidates.sort(
+      (left, right) => right.scrollHeight - left.scrollHeight
+    )[0];
+    if (target) target.scrollTop = target.scrollHeight;
+  }
+  window.scrollTo(0, document.body.scrollHeight);
+  return true;
+}
+"""
+
 # The received manager renders "people you may know" cards under an empty
 # state, and their profile links are not invitations. The selected tab is
 # found structurally (aria-current plus the stable /received/ALL route); the
@@ -138,6 +165,16 @@ class InvitationReader:
         self._navigator = navigator
         self._content = content
 
+    async def _scroll_list(self, limit: int) -> None:
+        """Scroll the list far enough for *limit* cards to have loaded."""
+        for _ in range(max(1, limit // _CARDS_PER_SCROLL)):
+            try:
+                await self._session.page.evaluate(SCROLL_LIST_JS)
+            except Exception:
+                logger.debug("Invitation list scroll failed", exc_info=True)
+                return
+            await self._session.delay(0.5)
+
     async def _expand_notes(self) -> None:
         for _ in range(2):
             try:
@@ -187,9 +224,7 @@ class InvitationReader:
         except PlaywrightTimeoutError:
             logger.debug("Invitation list did not appear on %s", url)
 
-        await self._session.scroll_body(
-            pause_time=0.5, max_scrolls=max(1, limit // _CARDS_PER_SCROLL)
-        )
+        await self._scroll_list(limit)
         await self._expand_notes()
 
         result: dict[str, Any] = {"url": url, "sections": {}}

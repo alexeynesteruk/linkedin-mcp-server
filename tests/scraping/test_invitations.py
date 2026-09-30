@@ -18,6 +18,7 @@ from linkedin_mcp_server.scraping.contracts import rate_limited_section_error
 from linkedin_mcp_server.scraping.invitations import (
     EXPAND_NOTES_JS,
     RECEIVED_COUNT_IS_ZERO_JS,
+    SCROLL_LIST_JS,
     InvitationReader,
     invitations_url,
     trim_to_limit,
@@ -49,10 +50,12 @@ def session_boundaries():
 
 
 def _evaluate(*, expanded: int = 0, zero: bool = False) -> AsyncMock:
-    """Answer the two page programs the reader runs, by identity."""
+    """Answer the page programs the reader runs, by identity."""
     passes = iter([expanded, 0])
 
     async def evaluate(script: str, *args: Any) -> Any:
+        if script == SCROLL_LIST_JS:
+            return True
         if script == EXPAND_NOTES_JS:
             return next(passes, 0)
         if script == RECEIVED_COUNT_IS_ZERO_JS:
@@ -138,15 +141,14 @@ class TestGetPendingInvitations:
         # The sent manager has no received counter to consult.
         assert RECEIVED_COUNT_IS_ZERO_JS not in scripts
 
-    async def test_the_limit_sets_the_scroll_budget(
-        self, mock_page, session_boundaries
-    ):
+    async def test_the_limit_sets_the_scroll_budget(self, mock_page):
         mock_page.evaluate = _evaluate()
         reader = _reader(mock_page)
         with patch.object(reader._content, "_extract_root_content", _root("")):
             await reader.get_pending_invitations(limit=45)
 
-        assert session_boundaries.scroll.await_args.kwargs["max_scrolls"] == 4
+        scripts = [call.args[0] for call in mock_page.evaluate.await_args_list]
+        assert scripts.count(SCROLL_LIST_JS) == 4
 
     async def test_a_zero_received_count_skips_the_recommendations_below_it(
         self, mock_page

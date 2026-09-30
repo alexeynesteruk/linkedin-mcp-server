@@ -19,15 +19,20 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from patchright.async_api import async_playwright
+from patchright.async_api import Page, async_playwright
 
+from linkedin_mcp_server.scraping.content import PageContentReader
 from linkedin_mcp_server.scraping.invitations import (
     EXPAND_NOTES_JS,
     RECEIVED_COUNT_IS_ZERO_JS,
+    InvitationReader,
 )
+from linkedin_mcp_server.scraping.navigation import PageNavigator
+from linkedin_mcp_server.scraping.session import ScrapingSession
 
 pytestmark = [
     pytest.mark.browser_dom,
@@ -282,3 +287,64 @@ class TestReceivedCountIsZero:
             False,
             _zero,
         )
+
+
+# A list that lazy-loads ten cards whenever its scroller nears the bottom, up
+# to forty. Measured on the sent manager (2026-08-25): the scroller is <main>,
+# not the document, so window.scrollTo never reaches it. The other layout is
+# kept as well, so a fix for one cannot quietly break the other.
+_LAZY_LIST = """
+<html><head><style>
+  li {{ height: 120px; }}
+  {layout}
+</style></head><body><main><ul id="list"></ul></main>
+<script>
+  const list = document.getElementById('list');
+  let next = 0;
+  function addCards(n) {{
+    for (let i = 0; i < n && next < 40; i++, next++) {{
+      const li = document.createElement('li');
+      li.innerHTML = '<a href="https://www.linkedin.com/in/person-' + next + '/">'
+        + 'Person ' + next + '</a><p>Invitation ' + next + ' sent this week</p>';
+      list.appendChild(li);
+    }}
+  }}
+  addCards(10);
+  const scroller = {scroller};
+  (scroller === document.scrollingElement ? window : scroller)
+    .addEventListener('scroll', () => {{
+      if (scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 50) {{
+        addCards(10);
+      }}
+    }});
+</script></body></html>
+"""
+
+_MAIN_SCROLLS = _LAZY_LIST.format(
+    layout="html, body { height: 100%; margin: 0; overflow: hidden; }"
+    " main { height: 400px; overflow-y: auto; }",
+    scroller="document.querySelector('main')",
+)
+_DOCUMENT_SCROLLS = _LAZY_LIST.format(
+    layout="body { margin: 0; }", scroller="document.scrollingElement"
+)
+
+
+class TestReaderScroll:
+    @pytest.mark.parametrize(
+        "html", [_MAIN_SCROLLS, _DOCUMENT_SCROLLS], ids=["main-scrolls", "page-scrolls"]
+    )
+    async def test_the_limit_is_loaded_from_whichever_element_scrolls(
+        self, dom_page, html
+    ):
+        await dom_page.set_content(html)
+        session = ScrapingSession(cast(Page, dom_page))
+        reader = InvitationReader(
+            session, PageNavigator(session), PageContentReader(session)
+        )
+
+        with patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock):
+            result = await reader.get_pending_invitations(limit=30, kind="sent")
+
+        urls = [ref["url"] for ref in result["references"]["invitations"]]
+        assert urls == [f"/in/person-{i}/" for i in range(30)]

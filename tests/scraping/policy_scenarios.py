@@ -991,6 +991,7 @@ async def _pending_invitations_scenario() -> dict[str, Any]:
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
     clock = FakeClock(recorder)
     page = _page(recorder)
+    page.script("evaluate:scroll_main_region", True)
     page.script("evaluate:invitation_expand_notes", 0)
     page.script(
         "evaluate:root_content",

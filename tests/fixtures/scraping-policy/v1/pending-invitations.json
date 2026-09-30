@@ -93,11 +93,17 @@
       "timeout_ms": 10000
     },
     {
-      "actual_scrolls": 2,
       "call": "get_pending_invitations",
-      "kind": "boundary.scroll_body",
-      "max_scrolls": 1,
-      "pause_time": 0.5,
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "a9ee35f8dcc7",
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
       "section": "invitations"
     },
     {
