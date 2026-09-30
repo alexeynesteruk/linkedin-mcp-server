@@ -139,6 +139,20 @@ class TestHealthPayload:
         assert _session_auth_ready(profile_dir) is False
 
 
+class TestHealthHasNoSideEffects:
+    def test_health_writes_nothing_under_the_auth_root(self, profile_dir, tmp_path):
+        # It runs past the lease, so anything it wrote could race a process
+        # that holds the profile: a claim, a lease file, a browser cache.
+        _write_session_files(profile_dir)
+        before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+
+        build_health_payload()
+        build_health_payload()
+
+        after = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+        assert after == before
+
+
 class TestPingPayload:
     async def test_lists_tools_and_their_aliases(self):
         mcp = FastMCP("test")
