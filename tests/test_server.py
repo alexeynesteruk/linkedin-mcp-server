@@ -662,6 +662,34 @@ class TestProxyRole:
         # And the owner's own result is still there, not replaced by the notice.
         assert any("by the owner" in text for text in texts)
 
+    def test_every_role_strips_the_client_shim_first(self):
+        # Outermost on every role: a proxy forwards the cleaned arguments and
+        # its sign-in replay starts from them. FastMCP's own listing middleware
+        # sits in front and never sees a call.
+        from linkedin_mcp_server.client_compat_middleware import (
+            StripClientShimArgsMiddleware,
+        )
+
+        for role in ServerRole:
+            ours = [
+                middleware
+                for middleware in _server_for(role).middleware
+                if type(middleware).__module__.startswith("linkedin_mcp_server")
+            ]
+            assert isinstance(ours[0], StripClientShimArgsMiddleware), role
+
+    async def test_a_proxy_forwards_a_call_without_the_client_shim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        # The owner validates strictly, as every FastMCP server does, so a dummy
+        # "_" that reached it would fail the call there.
+        proxy = _proxy_to(monkeypatch, _owner_serving("linkedin_health"))
+
+        async with Client(proxy) as client:
+            result = await client.call_tool("linkedin_health", {"_": True})
+
+        assert result.structured_content == {"served": "by the owner"}
+
     def test_a_proxy_without_an_owner_is_refused(self):
         # It would serve an empty tool list and look like a server whose tools
         # disappeared, which is the confusing half of the same bug.
