@@ -278,7 +278,7 @@ def register_person_tools(
             Statuses: pending, already_connected, follow_only,
             connect_unavailable, unavailable, send_failed,
             note_not_supported, custom_note_limit_reached,
-            connected, or accepted.
+            incoming_request_ambiguous, connected, or accepted.
 
             ``connected`` means this call submitted the invitation and the
             re-read profile no longer exposes Connect; it does not mean a
@@ -291,6 +291,11 @@ def register_person_tools(
             personalized invite notes because the free note quota for the
             account is exhausted. The ``message`` is the raw Premium dialog
             text read from LinkedIn.
+
+            ``incoming_request_ambiguous`` means the profile looks like an
+            incoming request but a note was given. Accept takes no note, and
+            a creator-mode profile's Follow button has the same shape, so
+            nothing was clicked. Call again without a note to accept.
 
             A status of ``outcome_unknown`` comes from the transport rather
             than the page: the browser process went away with the call in

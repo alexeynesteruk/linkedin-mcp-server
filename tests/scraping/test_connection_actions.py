@@ -550,8 +550,16 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 side_effect=[
                     _signals(incoming_row=True),
+                    # The row's own More menu, open: no invite anchor.
+                    _signals(incoming_row=True),
                     _signals(compose=True),
                 ],
+            ),
+            patch.object(
+                actions,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 actions,
@@ -597,6 +605,12 @@ class TestConnectWithPerson:
             ),
             patch.object(
                 actions,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                actions,
                 "_click_incoming_accept",
                 new_callable=AsyncMock,
                 return_value=False,
@@ -627,6 +641,12 @@ class TestConnectWithPerson:
             ),
             patch.object(
                 actions,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                actions,
                 "_click_incoming_accept",
                 new_callable=AsyncMock,
                 return_value=True,
@@ -654,9 +674,17 @@ class TestConnectWithPerson:
                 new_callable=AsyncMock,
                 side_effect=[
                     _signals(incoming_row=True),
+                    # The row's own More menu, open: no invite anchor.
+                    _signals(incoming_row=True),
                     _signals(incoming_row=True),
                     _signals(compose=True),
                 ],
+            ),
+            patch.object(
+                actions,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
             ),
             patch.object(
                 actions,
@@ -673,6 +701,138 @@ class TestConnectWithPerson:
 
         assert result["status"] == "accepted"
         mock_sleep.assert_awaited_once()
+
+    async def test_incoming_shape_with_connect_in_its_menu_is_invited(self, mock_page):
+        """Issue #629: a creator-mode top card, [Follow][Save in Sales
+        Navigator][More], carries the incoming fingerprint. Its own More menu
+        holds the invite anchor, so the call invites through the deeplink and
+        never clicks the row's first button, which there is Follow."""
+        pre = "Marc\n\n· 2nd\n\nCreator\n\nFollow\nSave in Sales Navigator\nMore\n"
+        post = "Marc\n\n· 2nd\n\nCreator\n\nFollow\nPending\nMore\n"
+        actions = _actions(mock_page, _reads(pre, post))
+        mock_page.keyboard.press = AsyncMock()
+
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                side_effect=[
+                    _signals(incoming_row=True),
+                    # The row's own More menu, open: Connect is in it.
+                    _signals(invite=True, incoming_row=True),
+                    _signals(compose=True, labeled_anchor=True),
+                ],
+            ),
+            patch.object(
+                actions,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as mock_open_row_menu,
+            patch.object(
+                actions, "_click_incoming_accept", new_callable=AsyncMock
+            ) as mock_accept,
+            patch.object(
+                actions, "_open_more_menu", new_callable=AsyncMock
+            ) as mock_open_more,
+            patch.object(
+                PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                actions,
+                "_submit_invite_dialog",
+                new_callable=AsyncMock,
+                return_value=(True, False, None),
+            ) as mock_submit,
+        ):
+            result = await actions.connect_with_person("testuser")
+
+        assert result["status"] == "connected"
+        mock_open_row_menu.assert_awaited_once()
+        mock_accept.assert_not_awaited()
+        mock_open_more.assert_not_awaited()
+        mock_submit.assert_awaited_once_with(None)
+        mock_nav.assert_awaited_once()
+        await_args = mock_nav.await_args
+        assert await_args is not None
+        assert "preload/custom-invite/?vanityName=testuser" in await_args.args[0]
+        # The menu is closed again before the deeplink navigation.
+        mock_page.keyboard.press.assert_awaited_once_with("Escape")
+
+    async def test_incoming_row_whose_menu_will_not_open_is_not_accepted(
+        self, mock_page
+    ):
+        """No open menu, no disprove: Accept is not clicked on a guess."""
+        pre = "Eric\n\n· 2.\n\nAachen\n\nAnnehmen\nIgnorieren\nMehr\nInfo\n"
+        actions = _actions(mock_page, _reads(pre))
+
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=_signals(incoming_row=True),
+            ) as mock_signals,
+            patch.object(
+                actions,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch.object(
+                actions, "_click_incoming_accept", new_callable=AsyncMock
+            ) as mock_accept,
+            patch.object(
+                PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+        ):
+            result = await actions.connect_with_person("testuser")
+
+        assert result["status"] == "send_failed"
+        mock_accept.assert_not_awaited()
+        mock_nav.assert_not_awaited()
+        mock_signals.assert_awaited_once()
+
+    async def test_incoming_shape_with_a_note_and_no_menu_connect_is_ambiguous(
+        self, mock_page
+    ):
+        """A note asks for an invitation, and Accept takes none. With no
+        Connect in the row's menu either, the row could still be a Follow
+        button, so nothing is clicked and nothing is navigated."""
+        pre = "Marc\n\n· 2nd\n\nCreator\n\nFollow\nSave in Sales Navigator\nMore\n"
+        actions = _actions(mock_page, _reads(pre))
+
+        with (
+            patch.object(
+                actions,
+                "_read_action_signals",
+                new_callable=AsyncMock,
+                return_value=_signals(incoming_row=True),
+            ),
+            patch.object(
+                actions,
+                "_open_incoming_row_more_menu",
+                new_callable=AsyncMock,
+                return_value=True,
+            ),
+            patch.object(
+                actions, "_click_incoming_accept", new_callable=AsyncMock
+            ) as mock_accept,
+            patch.object(
+                PageNavigator, "_navigate_to_page", new_callable=AsyncMock
+            ) as mock_nav,
+            patch.object(
+                actions, "_submit_invite_dialog", new_callable=AsyncMock
+            ) as mock_submit,
+        ):
+            result = await actions.connect_with_person("testuser", note="Hi Marc")
+
+        assert result["status"] == "incoming_request_ambiguous"
+        assert result["note_sent"] is False
+        mock_accept.assert_not_awaited()
+        mock_nav.assert_not_awaited()
+        mock_submit.assert_not_awaited()
 
     async def test_returns_unavailable_when_no_signals_and_text(self, mock_page):
         """No structural signals, no actionable text → connect_unavailable."""

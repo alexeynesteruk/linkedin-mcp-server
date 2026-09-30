@@ -21,7 +21,7 @@ a page-owning collaborator.
 | `comment_thread` | `CLICK_MORE_COMMENTS_JS`, `COMPOSER_SELECTOR`, `MAIN_TEXT_LENGTH_JS`, `expand_comment_thread()` | `page-owning` |
 | `company` | `CompanyScraper` | `browser-free` |
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
-| `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_CONFIRM_DIALOG_PRIMARY_JS`, `CLICK_INCOMING_ACCEPT_JS`, `CLICK_WITHDRAW_ANCHOR_JS`, `CONFIRM_DIALOG_BUTTON_COUNT_JS`, `ConnectionActions`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile`, `WITHDRAW_SETTLE_SECONDS` | `page-owning` |
+| `connection_actions` | `ACTION_SIGNALS_JS`, `CLICK_CONFIRM_DIALOG_PRIMARY_JS`, `CLICK_INCOMING_ACCEPT_JS`, `CLICK_WITHDRAW_ANCHOR_JS`, `CONFIRM_DIALOG_BUTTON_COUNT_JS`, `ConnectionActions`, `OPEN_INCOMING_ROW_MORE_JS`, `OPEN_MORE_BUTTON_JS`, `ReadMainProfile`, `WITHDRAW_SETTLE_SECONDS` | `page-owning` |
 | `content` | `PageContentReader` | `page-owning` |
 | `contracts` | `ExtractedSection`, `FilterValidationError`, `RATE_LIMITED_SECTION_TEXT`, `SEND_INTERRUPTED_WARNING`, `THREAD_REPLY_PROFILE_URN_REFUSAL`, `message_action_result()`, `rate_limited_section_error()`, `refuse_an_invalid_message()`, `refuse_an_invalid_thread_message()` | `browser-free` |
 | `conversations` | `ConversationReader`, `INBOX_FILTERS`, `INBOX_FILTER_LABELS`, `strip_select_conversation_prefix()` | `page-owning` |

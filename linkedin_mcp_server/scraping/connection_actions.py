@@ -275,6 +275,33 @@ CLICK_INCOMING_ACCEPT_JS = (
 """
 )
 
+# Open the More menu of the fingerprinted incoming-request row, the disprove
+# step that runs before Accept. A creator-mode profile renders
+# [Follow][Save in Sales Navigator][More] with no Message action, which is
+# the incoming fingerprint exactly, with Connect demoted into that More menu
+# (issue #629). LinkedIn mounts the menu's invite anchor only once More is
+# clicked, so nothing on the closed page tells the two rows apart, and
+# Accept on the wrong one clicks Follow. The row is re-derived here rather
+# than trusted from an earlier read, so the click can only land on that
+# row's own expander.
+OPEN_INCOMING_ROW_MORE_JS = (
+    r"""
+(() => {
+"""
+    + _FIND_INCOMING_ACTION_ROW_FN_JS
+    + r"""
+  const main = document.querySelector('main');
+  if (!main) return false;
+  const row = findIncomingActionRow(main);
+  if (!row) return false;
+  const opener = row.querySelector('button[aria-expanded]');
+  if (!opener) return false;
+  opener.click();
+  return true;
+})
+"""
+)
+
 
 # Click the Pending control that withdraws a sent invitation. LinkedIn renders
 # Pending as the one labeled <a> in the top-card action root (the signal
@@ -562,6 +589,29 @@ class ConnectionActions:
             return True
         except PlaywrightTimeoutError:
             logger.debug("More menu did not appear after click")
+            return False
+
+    async def _open_incoming_row_more_menu(self) -> bool:
+        """Open the fingerprinted incoming row's own More menu.
+
+        The disprove step before Accept (issue #629): the caller re-reads
+        the signals while the menu is open, and an invite anchor there means
+        the row was a creator-mode top card, not an incoming request.
+        Returns True iff the click landed and a ``[role='menu']`` became
+        visible; on False the caller must not click Accept either.
+        """
+        try:
+            clicked = await self._session.page.evaluate(OPEN_INCOMING_ROW_MORE_JS)
+        except Exception:
+            logger.debug("Incoming-row More click via JS failed", exc_info=True)
+            return False
+        if clicked is not True:
+            return False
+        try:
+            await self._session.page.wait_for_selector("[role='menu']", timeout=3000)
+            return True
+        except PlaywrightTimeoutError:
+            logger.debug("Incoming-row More menu did not appear after click")
             return False
 
     async def _click_incoming_accept(self) -> bool:
@@ -855,7 +905,9 @@ class ConnectionActions:
         only as a non-submitting note-quota probe. Sending itself uses the
         ``/preload/custom-invite/?vanityName=`` deeplink, which works
         whether the user-visible Connect button is in the action bar
-        or buried under the More menu.
+        or buried under the More menu. An incoming-request row is only
+        accepted after its own More menu has been opened and shown no invite
+        anchor, since a creator-mode top card has the same shape (#629).
         """
         username = normalize_person_identifier(username)
         url = person_profile_url(username, "/")
@@ -894,6 +946,54 @@ class ConnectionActions:
                 "A connection request is already pending for this profile.",
                 profile=page_text,
             )
+
+        if state == "incoming_request":
+            # Disprove before Accept (issue #629). A creator-mode top card,
+            # [Follow][Save in Sales Navigator][More] with no Message action,
+            # carries the incoming fingerprint exactly, and Accept there
+            # clicks Follow. Such a row may keep Connect in its More menu,
+            # which LinkedIn only mounts on click, so open that row's own
+            # menu and read the signals while it is open. A row whose menu
+            # cannot be opened is one nothing here can vouch for.
+            opened = await self._open_incoming_row_more_menu()
+            if not opened:
+                return _connection_result(
+                    url,
+                    "send_failed",
+                    "Could not open the More menu of the incoming-request row "
+                    "to rule out a creator-mode profile, so Accept was not "
+                    "clicked.",
+                    profile=page_text,
+                )
+            menu_signals = await self._read_action_signals(username)
+            try:
+                await self._session.page.keyboard.press("Escape")
+            except Exception:
+                logger.debug(
+                    "Escape after incoming-row More read failed", exc_info=True
+                )
+            logger.info(
+                "Incoming-row More signals for %s: signals=%s", username, menu_signals
+            )
+            if menu_signals.has_invite_anchor:
+                # Connect was in the menu all along: this is a creator-mode
+                # profile, and the invite anchor opens the same write gate
+                # the connectable state does.
+                signals = menu_signals
+                state = "connectable"
+            elif note:
+                # Accept takes no note, so a note asks for an invitation,
+                # and a creator-mode profile can hide Connect even from its
+                # More menu. Nothing tells the two apart any more.
+                return _connection_result(
+                    url,
+                    "incoming_request_ambiguous",
+                    "The profile's action row has the shape of an incoming "
+                    "connection request, but a note was given and Accept takes "
+                    "none; the row may be a creator-mode Follow button, so "
+                    "nothing was clicked. Call again without a note to accept.",
+                    profile=page_text,
+                )
 
         if state == "incoming_request":
             # Accept clicks the first labeled button in the fingerprinted

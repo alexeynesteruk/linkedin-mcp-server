@@ -49,6 +49,7 @@ from linkedin_mcp_server.scraping.connection_actions import (
     CLICK_INCOMING_ACCEPT_JS,
     CLICK_WITHDRAW_ANCHOR_JS,
     CONFIRM_DIALOG_BUTTON_COUNT_JS,
+    OPEN_INCOMING_ROW_MORE_JS,
     OPEN_MORE_BUTTON_JS,
     ConnectionActions,
 )
@@ -82,6 +83,7 @@ class Labels:
     message: str
     connect: str
     follow: str
+    save_lead: str
     pending: str
     edit: str
     play: str
@@ -106,6 +108,7 @@ ENGLISH = Labels(
     message="Message Julien",
     connect="Invite Rahul to connect",
     follow="Follow Verena",
+    save_lead="Save in Sales Navigator",
     pending="Pending, click to withdraw the invitation sent to Florian",
     edit="Edit intro",
     play="Play",
@@ -130,6 +133,7 @@ GERMAN = Labels(
     message="Nachricht an Julien senden",
     connect="Rahul als Kontakt einladen",
     follow="Verena folgen",
+    save_lead="In Sales Navigator speichern",
     pending="Ausstehend, klicken zum Zurückziehen",
     edit="Intro bearbeiten",
     play="Abspielen",
@@ -157,6 +161,7 @@ OPAQUE = Labels(
     message="d1f6e2",
     connect="e4b7a9",
     follow="f0c3d8",
+    save_lead="e1c9f4",
     pending="a9e2f7",
     edit="b5d8c0",
     play="c2f4a6",
@@ -184,6 +189,7 @@ EMPTY_ARIA = Labels(
     message="",
     connect="",
     follow="",
+    save_lead="",
     pending="",
     edit="",
     play="",
@@ -318,6 +324,70 @@ def follow_only_top_card(labels: Labels) -> str:
     <button type="button" aria-expanded="false"
       onclick="document.body.setAttribute('data-clicked','expander')"
       >{labels.more}</button>
+  </div>
+</section>
+"""
+
+
+def _mount_menu_js(*, with_invite: bool) -> str:
+    """Inline handler that mounts a [role=menu] the way LinkedIn does on click.
+
+    The menu is a portal: it lands outside <main>, and it exists only after
+    the click, so nothing about the closed page can reveal what it holds.
+    """
+    invite = (
+        "const a = document.createElement('a');"
+        f"a.setAttribute('href', '/preload/custom-invite/?vanityName={USER}');"
+        "a.textContent = 'x'; m.appendChild(a);"
+        if with_invite
+        else ""
+    )
+    return (
+        "document.body.setAttribute('data-clicked','expander');"
+        "const m = document.createElement('div'); m.setAttribute('role','menu');"
+        "const item = document.createElement('span'); item.textContent = 'x';"
+        "m.appendChild(item);"
+        f"{invite}document.body.appendChild(m);"
+    )
+
+
+def creator_mode_top_card(labels: Labels) -> str:
+    """Issue #629: [Follow][Save in Sales Navigator][More], no Message action.
+
+    The incoming fingerprint exactly. Connect lives in the More menu, which
+    mounts on click.
+    """
+    return f"""
+<section class="topcard">
+  <h1>Marc</h1>
+  <div class="actions">
+    <button type="button" aria-label="{labels.follow}"
+      onclick="document.body.setAttribute('data-clicked','first-labeled')"
+      >{labels.follow}</button>
+    <button type="button" aria-label="{labels.save_lead}"
+      onclick="document.body.setAttribute('data-clicked','second-labeled')"
+      >{labels.save_lead}</button>
+    <button type="button" aria-expanded="false"
+      onclick="{_mount_menu_js(with_invite=True)}">{labels.more}</button>
+  </div>
+</section>
+"""
+
+
+def incoming_top_card_with_menu(labels: Labels) -> str:
+    """A genuine incoming request whose More menu holds no invite anchor."""
+    return f"""
+<section class="topcard">
+  <h1>Eric Langlouis</h1>
+  <div class="actions">
+    <button type="button" aria-label="{labels.accept}"
+      onclick="document.body.setAttribute('data-clicked','first-labeled')"
+      >{labels.accept}</button>
+    <button type="button" aria-label="{labels.ignore}"
+      onclick="document.body.setAttribute('data-clicked','second-labeled')"
+      >{labels.ignore}</button>
+    <button type="button" aria-expanded="false"
+      onclick="{_mount_menu_js(with_invite=False)}">{labels.more}</button>
   </div>
 </section>
 """
@@ -527,6 +597,9 @@ FINGERPRINT_CASES: tuple[tuple[str, Build, bool], ...] = (
     ),
     ("extra-unlabeled-button", extra_button_row, False),
     ("follow-only-row", follow_only_top_card, False),
+    # Issue #629: the shape alone cannot tell this from an incoming request,
+    # which is why Accept waits for the row's own More menu.
+    ("creator-mode-row", creator_mode_top_card, True),
     ("pending-row", pending_top_card, False),
     ("connected-row", _both(connected_top_card, sidebar_section), False),
 )
@@ -1076,3 +1149,52 @@ class TestWithdrawFlow:
         assert "not the only dialog" in result["message"]
         assert await dom_page.evaluate("document.body.dataset.popup") is None
         assert await dom_page.evaluate("document.body.dataset.withdrawn") is None
+
+
+async def _disprove(page, html: str) -> tuple[bool, bool, str | None]:
+    """Run the pre-Accept disprove through the owner on one rendered page.
+
+    Answers whether the row's menu opened, whether the invite anchor was
+    readable while it was open, and which control the click hit.
+    """
+    await page.set_content(_page_html(html))
+    actions = _actions(page)
+    opened = await actions._open_incoming_row_more_menu()
+    signals = await actions._read_action_signals(USER)
+    recorded = await page.evaluate("document.body.getAttribute('data-clicked')")
+    return (opened, signals.has_invite_anchor, recorded)
+
+
+class TestIncomingDisproveIsStructural:
+    """The step that keeps Accept off a creator-mode Follow button (#629)."""
+
+    async def test_the_row_opener_is_its_expander_not_the_first_button(self, dom_page):
+        # On a creator-mode card the first labeled button is Follow, which
+        # is exactly what Accept would click.
+        await _in_every_locale(
+            dom_page,
+            creator_mode_top_card,
+            (True, "expander"),
+            lambda page, html: _click(page, html, OPEN_INCOMING_ROW_MORE_JS),
+        )
+
+    async def test_no_row_opener_without_a_fingerprint_match(self, dom_page):
+        await _in_every_locale(
+            dom_page,
+            follow_only_top_card,
+            (False, None),
+            lambda page, html: _click(page, html, OPEN_INCOMING_ROW_MORE_JS),
+        )
+
+    async def test_creator_mode_menu_reveals_the_invite_anchor(self, dom_page):
+        await _in_every_locale(
+            dom_page, creator_mode_top_card, (True, True, "expander"), _disprove
+        )
+
+    async def test_a_genuine_incoming_menu_reveals_no_invite_anchor(self, dom_page):
+        await _in_every_locale(
+            dom_page,
+            _both(incoming_top_card_with_menu, sidebar_section),
+            (True, False, "expander"),
+            _disprove,
+        )

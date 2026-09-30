@@ -608,6 +608,7 @@ def semantic_program_id(program: str) -> str:
         ("MAX_HEADING_CONTAINERS", "root_content"),
         ("SIDEBAR_SECTIONS", "sidebar_profiles"),
         ("showAllUrls", "sidebar_profiles"),
+        ("const opener = row.querySelector", "open_incoming_row_more"),
         ("hasInvite", "connection_action_signals"),
         ("expanded === 'false'", "open_more_button"),
         ("hasIncomingActionRow", "incoming_accept"),

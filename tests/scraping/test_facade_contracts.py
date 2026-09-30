@@ -571,6 +571,9 @@ async def test_incoming_verification_resolves_classifier_at_call_time(
         }
     )
     incoming = ActionSignals(False, False, False, False, False, True)
+    # The incoming row's own More menu, read while open: no invite anchor.
+    # The disprove step only reads the anchor and never classifies.
+    menu = ActionSignals(False, False, False, False, False, True)
     connected = ActionSignals(False, True, False, False, False, False)
     calls: list[ActionSignals] = []
 
@@ -584,7 +587,13 @@ async def test_incoming_verification_resolves_classifier_at_call_time(
             ConnectionActions,
             "_read_action_signals",
             new_callable=AsyncMock,
-            side_effect=[incoming, connected],
+            side_effect=[incoming, menu, connected],
+        ),
+        patch.object(
+            ConnectionActions,
+            "_open_incoming_row_more_menu",
+            new_callable=AsyncMock,
+            return_value=True,
         ),
         patch.object(
             ConnectionActions,
