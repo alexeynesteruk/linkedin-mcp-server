@@ -2014,3 +2014,26 @@ class TestSearchPeopleFacetsAndPages:
         assert result["section_errors"]["search_results"] == (
             rate_limited_section_error()
         )
+
+    async def test_a_profile_on_two_pages_is_referenced_once(self, mock_page):
+        # LinkedIn re-ranks between page loads, so one person can surface on
+        # two pages; the walk goes on because page two still adds someone.
+        scraper = _scraper(mock_page)
+        pages = [
+            extracted("Page one", _people("a", "b")),
+            extracted("Page two", _people("b", "c")),
+        ]
+        with (
+            patch.object(
+                scraper._capture, "capture", new_callable=AsyncMock, side_effect=pages
+            ),
+            patch("linkedin_mcp_server.scraping.person.asyncio.sleep", AsyncMock()),
+        ):
+            result = await scraper.search_people("engineer", max_pages=2)
+
+        assert result["sections"]["search_results"] == "Page one\n---\nPage two"
+        assert [ref["url"] for ref in result["references"]["search_results"]] == [
+            "/in/a/",
+            "/in/b/",
+            "/in/c/",
+        ]

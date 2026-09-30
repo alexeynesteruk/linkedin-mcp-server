@@ -27,7 +27,7 @@ from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
     person_profile_url,
 )
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.scraping.link_metadata import Reference, dedupe_references
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
 from linkedin_mcp_server.scraping.search_urls import build_people_search_url
@@ -560,7 +560,9 @@ class PersonScraper:
         if page_texts:
             sections["search_results"] = PAGE_SEPARATOR.join(page_texts)
             if page_references:
-                references["search_results"] = page_references
+                # A person re-ranked onto a second page, or a link every page
+                # carries, is one reference, as search_jobs keeps them.
+                references["search_results"] = dedupe_references(page_references)
 
         result: dict[str, Any] = {
             "url": url,
