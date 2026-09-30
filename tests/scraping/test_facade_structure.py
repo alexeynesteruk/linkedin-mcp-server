@@ -30,6 +30,7 @@ FACADE_PACKAGE_IMPORTERS = {
 }
 
 PUBLIC_SIGNATURES = {
+    "get_my_analytics": "(self, requested: 'set[str]', time_range: 'str | None' = None, callbacks: 'ProgressCallback | None' = None, max_scrolls: 'int | None' = None) -> 'dict[str, Any]'",
     "click_button_by_text": "(self, text: 'str', *, scope: 'str' = 'main', timeout: 'int' = 5000) -> 'bool'",
     "connect_with_person": "(self, username: 'str', *, note: 'str | None' = None) -> 'dict[str, Any]'",
     "extract_feed": "(self, num_posts: 'int' = 10) -> 'ExtractedSection'",
@@ -55,6 +56,7 @@ PUBLIC_SIGNATURES = {
 }
 
 DELEGATES = {
+    "get_my_analytics": ("_analytics", "get_my_analytics"),
     "click_button_by_text": ("_content", "click_button_by_text"),
     "connect_with_person": ("_connection", "connect_with_person"),
     "extract_feed": ("_feed", "extract_feed"),
@@ -80,6 +82,7 @@ DELEGATES = {
 }
 
 DELEGATE_CALLS = {
+    "get_my_analytics": "self._analytics.get_my_analytics(requested, time_range, callbacks, max_scrolls)",
     "click_button_by_text": "self._content.click_button_by_text(text, scope=scope, timeout=timeout)",
     "connect_with_person": "self._connection.connect_with_person(username, note=note)",
     "extract_feed": "self._feed.extract_feed(num_posts)",
@@ -105,6 +108,7 @@ DELEGATE_CALLS = {
 }
 
 FACADE_STATE = {
+    "_analytics",
     "_capture",
     "_company",
     "_connection",

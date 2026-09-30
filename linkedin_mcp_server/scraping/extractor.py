@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from patchright.async_api import Page
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.scraping.analytics import AnalyticsScraper
 from linkedin_mcp_server.scraping.capture import SectionCapture
 from linkedin_mcp_server.scraping.company import CompanyScraper
 from linkedin_mcp_server.scraping.connection_actions import ConnectionActions
@@ -70,6 +71,7 @@ class LinkedInExtractor:
             session, navigator, content, profile_page
         )
         self._invitations = InvitationReader(session, navigator, content)
+        self._analytics = AnalyticsScraper(session, capture)
 
     async def get_page_text(self) -> str:
         """Extract innerText from the main content area of the current page."""
@@ -273,4 +275,16 @@ class LinkedInExtractor:
             message,
             confirm_send=confirm_send,
             profile_urn=profile_urn,
+        )
+
+    async def get_my_analytics(
+        self,
+        requested: set[str],
+        time_range: str | None = None,
+        callbacks: ProgressCallback | None = None,
+        max_scrolls: int | None = None,
+    ) -> dict[str, Any]:
+        """Scrape the signed-in member's own analytics dashboards."""
+        return await self._analytics.get_my_analytics(
+            requested, time_range, callbacks, max_scrolls
         )

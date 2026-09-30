@@ -371,6 +371,71 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "analytics",
+          "scraping"
+        ]
+      }
+    },
+    "annotations": {
+      "openWorldHint": true,
+      "readOnlyHint": true
+    },
+    "description": "Get the signed-in user's own LinkedIn analytics dashboards.\n\nThese are the \"Private to you\" analytics pages, so they exist only for\nthe logged-in account; there is no per-username variant.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_scrolls": {
+          "anyOf": [
+            {
+              "maximum": 50,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Maximum scroll-to-bottom iterations per section.\nDefault (None) uses the standard limit; the dashboards are short pages."
+        },
+        "sections": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Comma-separated list of sections to scrape.\nAvailable sections: content, audience, top_posts, profile_views, search_appearances\n- content: impressions, members reached, engagement breakdown, top performing posts\n- audience: total followers, follower growth, top demographics\n- top_posts: recent posts ranked by impressions, with per-post counts\n- profile_views: profile viewers over the past 90 days and viewer highlights\n- search_appearances: search appearance counts and where the profile appeared\nDefault (None) scrapes ALL five sections (one page navigation each)."
+        },
+        "time_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reporting window for the content and audience sections:\n\"7d\", \"28d\", \"90d\" or \"365d\" (past_7_days style values are also\naccepted). Other sections use LinkedIn's fixed windows\n(top_posts 14 days, profile_views 90 days) and ignore it.\nAn unrecognised value is refused before any page is opened.\nDefault (None) uses LinkedIn's default of 7 days."
+        }
+      },
+      "type": "object"
+    },
+    "name": "get_my_analytics",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "Get My Analytics"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "person",
           "scraping"
         ]

@@ -16,6 +16,7 @@ a page-owning collaborator.
 | Module | Canonical public owners | Source classification |
 | --- | --- | --- |
 | `__init__` | _(no public definitions)_ | `browser-free` |
+| `analytics` | `ANALYTICS_BASE_URL`, `AnalyticsScraper` | `browser-free` |
 | `capture` | `CaptureMode`, `CapturePlan`, `OverlayRootNotFoundError`, `RATE_LIMIT_RETRY_DELAY`, `SectionCapture`, `capture_plan_for_url()` | `page-owning` |
 | `company` | `CompanyScraper` | `browser-free` |
 | `connection` | `ActionSignals`, `ConnectionState`, `detect_connection_state()` | `browser-free` |
@@ -26,7 +27,7 @@ a page-owning collaborator.
 | `extractor` | `LinkedInExtractor` | `page-owning` |
 | `feed` | `FeedScraper` | `page-owning` |
 | `feed_payload` | `POST_SLUG_URL_RE`, `append_permalink_references()`, `build_feed_references()`, `is_feed_payload_response()`, `is_permalink_payload_response()`, `permalink_paths_from_payload()` | `browser-free` |
-| `fields` | `COMPANY_SECTIONS`, `PERSON_SECTIONS`, `parse_company_sections()`, `parse_person_sections()` | `browser-free` |
+| `fields` | `ANALYTICS_SECTIONS`, `ANALYTICS_TIME_RANGE_SECTIONS`, `COMPANY_SECTIONS`, `PERSON_SECTIONS`, `normalize_analytics_time_range()`, `parse_analytics_sections()`, `parse_company_sections()`, `parse_person_sections()` | `browser-free` |
 | `identifiers` | `company_page_url()`, `job_view_url()`, `messaging_thread_url()`, `normalize_company_identifier()`, `normalize_job_id()`, `normalize_opaque_id()`, `normalize_person_identifier()`, `normalize_profile_urn()`, `normalize_thread_id()`, `person_profile_url()` | `browser-free` |
 | `invitations` | `EXPAND_NOTES_JS`, `INVITATION_KINDS`, `InvitationKind`, `InvitationReader`, `RECEIVED_COUNT_IS_ZERO_JS`, `invitations_url()`, `trim_to_limit()` | `page-owning` |
 | `job_pages` | `JOB_IDS_JS`, `JobPageCapture`, `JobPageReader`, `PROMOTED_JOB_IDS_JS` | `page-owning` |
@@ -45,6 +46,7 @@ a page-owning collaborator.
 ## Internal import graph
 
 - `__init__` -> `extractor`, `fields`
+- `analytics` -> `capture`, `contracts`, `fields`, `link_metadata`, `session`
 - `capture` -> `content`, `contracts`, `feed_payload`, `link_metadata`, `navigation`, `session`, `text`
 - `company` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `search_urls`, `session`
 - `connection` -> _(none)_
@@ -52,10 +54,10 @@ a page-owning collaborator.
 - `content` -> `session`, `text`
 - `contracts` -> `identifiers`, `link_metadata`
 - `conversations` -> `content`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `session`, `text`
-- `extractor` -> `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `invitations`, `job_pages`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
+- `extractor` -> `analytics`, `capture`, `company`, `connection_actions`, `content`, `contracts`, `conversations`, `feed`, `invitations`, `job_pages`, `jobs`, `message_sender`, `navigation`, `person`, `posts`, `profile_page`, `session`, `text`
 - `feed` -> `content`, `contracts`, `feed_payload`, `navigation`, `session`, `text`
 - `feed_payload` -> `link_metadata`
-- `fields` -> `capture`
+- `fields` -> `capture`, `contracts`
 - `identifiers` -> _(none)_
 - `invitations` -> `content`, `contracts`, `link_metadata`, `navigation`, `session`, `text`
 - `job_pages` -> `capture`, `content`, `contracts`, `job_policy`, `link_metadata`, `navigation`, `session`, `text`
@@ -80,6 +82,7 @@ a page-owning collaborator.
 - `get_company_employees`
 - `get_conversation`
 - `get_inbox`
+- `get_my_analytics`
 - `get_my_profile`
 - `get_page_text`
 - `get_pending_invitations`
@@ -98,6 +101,7 @@ a page-owning collaborator.
 
 ## `LinkedInExtractor` construction-state allowlist
 
+- `_analytics`
 - `_capture`
 - `_company`
 - `_connection`

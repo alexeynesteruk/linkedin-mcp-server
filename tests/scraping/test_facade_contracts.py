@@ -46,6 +46,7 @@ from .support.policy_trace import ScriptedPage, TraceRecorder
 
 
 TOOL_DELEGATES = {
+    "get_my_analytics": "get_my_analytics",
     "connect_with_person": "connect_with_person",
     "get_company_employees": "get_company_employees",
     "get_company_posts": "extract_page",
@@ -94,6 +95,7 @@ async def test_constructor_export_and_dependency_use_the_same_facade(monkeypatch
     constructed = await dependencies.get_ready_extractor(None, tool_name="policy-test")
 
     expected_state = {
+        "_analytics",
         "_capture",
         "_company",
         "_connection",

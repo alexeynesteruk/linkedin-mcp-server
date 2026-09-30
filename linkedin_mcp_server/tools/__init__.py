@@ -15,6 +15,7 @@ Available Tools:
 - Meta tools: Health and ping, answered without the browser
 - Feed tools: Home feed scraping
 - Post tools: Global post/content search
+- Analytics tools: The signed-in member's own analytics dashboards
 
 Architecture:
 - FastMCP integration for MCP-compliant tool registration

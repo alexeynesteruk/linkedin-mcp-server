@@ -1,0 +1,225 @@
+{
+  "call": {
+    "arguments": {
+      "requested": [
+        "content",
+        "top_posts"
+      ],
+      "time_range": "28d"
+    },
+    "method": "get_my_analytics"
+  },
+  "events": [
+    {
+      "call": "get_my_analytics",
+      "kind": "callback.start",
+      "operation": "analytics",
+      "url": "https://www.linkedin.com/analytics"
+    },
+    {
+      "call": "get_my_analytics",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "get_my_analytics",
+      "extra": {
+        "target_url": "https://www.linkedin.com/analytics/creator/content/?timeRange=past_28_days",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/analytics/creator/content/?timeRange=past_28_days",
+      "requested_url": "https://www.linkedin.com/analytics/creator/content/?timeRange=past_28_days",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_my_analytics",
+      "description": "goto https://www.linkedin.com/analytics/creator/content/?timeRange=past_28_days",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_my_analytics",
+      "extra": {
+        "target_url": "https://www.linkedin.com/analytics/creator/content/?timeRange=past_28_days",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "get_my_analytics",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_my_analytics",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "get_my_analytics",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_my_analytics",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "callback.progress",
+      "message": "Scraped content (1/2)",
+      "percent": 48
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 2.0
+    },
+    {
+      "call": "get_my_analytics",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.add"
+    },
+    {
+      "call": "get_my_analytics",
+      "extra": {
+        "target_url": "https://www.linkedin.com/analytics/creator/top-posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/analytics/creator/top-posts/",
+      "requested_url": "https://www.linkedin.com/analytics/creator/top-posts/",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_my_analytics",
+      "description": "goto https://www.linkedin.com/analytics/creator/top-posts/",
+      "kind": "boundary.stabilize",
+      "result": null
+    },
+    {
+      "call": "get_my_analytics",
+      "extra": {
+        "target_url": "https://www.linkedin.com/analytics/creator/top-posts/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "boundary.auth_quick",
+      "result": null
+    },
+    {
+      "call": "get_my_analytics",
+      "callback_id": "callback-2",
+      "event": "framenavigated",
+      "kind": "listener.remove"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "boundary.rate_limit"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_my_analytics",
+      "dismissed": false,
+      "kind": "boundary.modal"
+    },
+    {
+      "actual_scrolls": 2,
+      "call": "get_my_analytics",
+      "kind": "boundary.scroll_body",
+      "max_scrolls": 5,
+      "pause_time": 0.5
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_my_analytics",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5"
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "callback.progress",
+      "message": "Scraped top_posts (2/2)",
+      "percent": 95
+    },
+    {
+      "call": "get_my_analytics",
+      "kind": "callback.complete",
+      "operation": "analytics",
+      "result_url": "https://www.linkedin.com/analytics/"
+    }
+  ],
+  "result": {
+    "section_names": [
+      "content",
+      "top_posts"
+    ],
+    "sections": {
+      "content": "Impressions 1,200",
+      "top_posts": "Ada Lovelace's post\n300 impressions"
+    },
+    "url": "https://www.linkedin.com/analytics/"
+  },
+  "scenario": "get_my_analytics__time_range",
+  "schema_version": 1
+}

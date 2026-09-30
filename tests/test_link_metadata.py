@@ -2,7 +2,11 @@
 
 from urllib.parse import quote
 
-from linkedin_mcp_server.scraping.fields import COMPANY_SECTIONS, PERSON_SECTIONS
+from linkedin_mcp_server.scraping.fields import (
+    ANALYTICS_SECTIONS,
+    COMPANY_SECTIONS,
+    PERSON_SECTIONS,
+)
 from linkedin_mcp_server.scraping.link_metadata import (
     _REFERENCE_CAPS,
     RawReference,
@@ -671,6 +675,7 @@ class TestBuildReferences:
             set(PERSON_SECTIONS)
             | set(COMPANY_SECTIONS)
             | set(_REFERENCE_CAPS)
+            | set(ANALYTICS_SECTIONS)
             | {"saved_jobs"}
         )
 

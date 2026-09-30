@@ -57,6 +57,7 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 |------|-------------|
 | `get_person_profile` | Read profile sections such as experience, education, skills, projects and posts. |
 | `get_my_profile` | Read your own profile using the same selectable sections. |
+| `get_my_analytics` | Read your own analytics dashboards: content, audience, top posts, profile views and search appearances, with an optional time range. |
 | `connect_with_person` | Send or accept a connection request, with an optional note. |
 | `get_sidebar_profiles` | Find recommended profile links in a person's sidebar. |
 | `get_pending_invitations` | List pending received or sent connection invitations, with full invitation notes. |

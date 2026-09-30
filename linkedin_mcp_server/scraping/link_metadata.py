@@ -91,6 +91,11 @@ _SECTION_CONTEXTS = {
     "saved_jobs": "saved jobs",
     "feed": "feed",
     "invitations": "invitation",
+    "content": "analytics content",
+    "audience": "analytics audience",
+    "top_posts": "top posts",
+    "profile_views": "profile views",
+    "search_appearances": "search appearances",
 }
 
 _DEFAULT_REFERENCE_CAP = 12

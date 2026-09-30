@@ -1016,6 +1016,34 @@ async def _pending_invitations_scenario() -> dict[str, Any]:
     )
 
 
+async def _my_analytics_scenario() -> dict[str, Any]:
+    """time_range reaches the dashboards that honour it and only those."""
+    name = "get_my_analytics__time_range"
+    recorder = TraceRecorder(name, _COMMON_ALLOWED)
+    clock = FakeClock(recorder)
+    page = _page(recorder).script(
+        "evaluate:root_content",
+        _root("Impressions 1,200"),
+        _root("Ada Lovelace's post\n300 impressions"),
+    )
+    extractor = _extractor(page)
+    callbacks = TraceCallbacks(recorder)
+    arguments = {
+        "requested": ["content", "top_posts"],
+        "time_range": "28d",
+    }
+    async with boundaries(recorder, clock):
+        with recorder.context("get_my_analytics"):
+            result = await extractor.get_my_analytics(
+                {"content", "top_posts"}, time_range="28d", callbacks=callbacks
+            )
+    page.assert_clean()
+    return recorder.trace(
+        {"method": "get_my_analytics", "arguments": arguments},
+        _complete_mapping_result(result, section_names=list(result["sections"])),
+    )
+
+
 async def _sidebar_scenario() -> dict[str, Any]:
     name = "get_sidebar_profiles__baseline"
     recorder = TraceRecorder(name, _COMMON_ALLOWED)
@@ -1138,6 +1166,7 @@ async def _facade_contract_trace() -> dict[str, Any]:
 
 
 TOOL_FACADE_METHODS = {
+    "get_my_analytics",
     "connect_with_person",
     "extract_feed",
     "extract_page",
@@ -1220,6 +1249,7 @@ async def build_policy_traces() -> dict[str, dict[str, Any]]:
         "connect.json": await _connect_scenario(),
         "withdraw-invitation.json": await _withdraw_scenario(),
         "pending-invitations.json": await _pending_invitations_scenario(),
+        "my-analytics.json": await _my_analytics_scenario(),
         "get-my-profile.json": await _get_my_profile_scenario(),
         "sidebar-profiles.json": await _sidebar_scenario(),
         "company-employees.json": await _single_capture_facade_scenario(

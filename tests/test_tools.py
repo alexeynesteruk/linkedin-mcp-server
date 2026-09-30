@@ -41,6 +41,7 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     mock.search_conversations = AsyncMock(return_value=scrape_result)
     mock.send_message = AsyncMock(return_value=scrape_result)
     mock.get_my_profile = AsyncMock(return_value=scrape_result)
+    mock.get_my_analytics = AsyncMock(return_value=scrape_result)
     mock.search_companies = AsyncMock(return_value=scrape_result)
     mock.search_posts = AsyncMock(return_value=scrape_result)
     mock.get_company_employees = AsyncMock(return_value=scrape_result)
@@ -51,7 +52,15 @@ def _make_mock_extractor(scrape_result: dict) -> MagicMock:
     return mock
 
 
-_TOOL_MODULES = ("person", "company", "job", "messaging", "feed", "post")
+_TOOL_MODULES = (
+    "person",
+    "company",
+    "job",
+    "messaging",
+    "feed",
+    "post",
+    "analytics",
+)
 
 
 @pytest.fixture
@@ -2359,6 +2368,118 @@ class TestPostTools:
 
         with pytest.raises(ValidationError, match="max_pages"):
             await mcp.call_tool("search_posts", {"keywords": "python", "max_pages": 0})
+
+
+class TestGetMyAnalyticsTool:
+    async def _tool(self, serve_extractor, expected):
+        from linkedin_mcp_server.tools.analytics import register_analytics_tools
+
+        mock_extractor = _make_mock_extractor(expected)
+        mcp = FastMCP("test")
+        register_analytics_tools(mcp)
+        serve_extractor(mock_extractor)
+        return mock_extractor, await get_tool_fn(mcp, "get_my_analytics")
+
+    async def test_defaults_request_every_section(self, mock_context, serve_extractor):
+        expected = {
+            "url": "https://www.linkedin.com/analytics/",
+            "sections": {"content": "Impressions"},
+        }
+        extractor, tool_fn = await self._tool(serve_extractor, expected)
+
+        result = await tool_fn(mock_context)
+
+        assert result == expected
+        args = extractor.get_my_analytics.await_args
+        assert args.args[0] == {
+            "content",
+            "audience",
+            "top_posts",
+            "profile_views",
+            "search_appearances",
+        }
+        assert args.kwargs["time_range"] is None
+        assert isinstance(args.kwargs["callbacks"], MCPContextProgressCallback)
+
+    async def test_passes_sections_time_range_and_max_scrolls(
+        self, mock_context, serve_extractor
+    ):
+        extractor, tool_fn = await self._tool(
+            serve_extractor, {"url": "u", "sections": {}}
+        )
+
+        await tool_fn(
+            mock_context,
+            sections="audience,top_posts",
+            time_range="90d",
+            max_scrolls=3,
+        )
+
+        args = extractor.get_my_analytics.await_args
+        assert args.args[0] == {"audience", "top_posts"}
+        assert args.kwargs["time_range"] == "90d"
+        assert args.kwargs["max_scrolls"] == 3
+
+    async def test_unknown_sections_are_reported(self, mock_context, serve_extractor):
+        _, tool_fn = await self._tool(
+            serve_extractor, {"url": "u", "sections": {"content": "x"}}
+        )
+
+        result = await tool_fn(mock_context, sections="content,bogus")
+
+        assert result["unknown_sections"] == ["bogus"]
+
+    async def test_invalid_time_range_is_refused_before_the_browser(
+        self, mock_context, serve_extractor
+    ):
+        from fastmcp.exceptions import ToolError
+
+        extractor, tool_fn = await self._tool(
+            serve_extractor, {"url": "u", "sections": {}}
+        )
+
+        with pytest.raises(ToolError, match="Invalid time_range"):
+            await tool_fn(mock_context, time_range="1y")
+
+        extractor.get_my_analytics.assert_not_awaited()
+
+    async def test_rejects_invalid_max_scrolls(self, mock_context):
+        from fastmcp.exceptions import ValidationError
+
+        from linkedin_mcp_server.tools.analytics import register_analytics_tools
+
+        mcp = FastMCP("test")
+        register_analytics_tools(mcp)
+
+        with pytest.raises(ValidationError):
+            await mcp.call_tool("get_my_analytics", {"max_scrolls": 0})
+
+    async def test_is_read_only(self):
+        from linkedin_mcp_server.tools.analytics import register_analytics_tools
+
+        mcp = FastMCP("test")
+        register_analytics_tools(mcp)
+
+        tool = await mcp.get_tool("get_my_analytics")
+        assert tool is not None
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is True
+        assert not tool.annotations.destructive_hint
+
+    async def test_scraper_errors_become_tool_errors(
+        self, mock_context, serve_extractor
+    ):
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.exceptions import SessionExpiredError
+
+        extractor, tool_fn = await self._tool(
+            serve_extractor, {"url": "u", "sections": {}}
+        )
+        extractor.get_my_analytics = AsyncMock(side_effect=SessionExpiredError())
+
+        with pytest.raises(ToolError, match="Session expired"):
+            await tool_fn(mock_context)
 
 
 class TestToolTimeouts:
