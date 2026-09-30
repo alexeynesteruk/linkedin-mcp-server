@@ -11,12 +11,15 @@ Available Tools:
 - Company tools: Company profile and information extraction
 - Job tools: Job posting details and search functionality
 - Messaging tools: Inbox, conversations, search, and sending messages
+- Network tools: Pending invitations and withdrawing a sent one
+- Meta tools: Health and ping, answered without the browser
 - Feed tools: Home feed scraping
 - Post tools: Global post/content search
+- Analytics tools: The signed-in member's own analytics dashboards
 
 Architecture:
 - FastMCP integration for MCP-compliant tool registration
-- Depends()-based dependency injection for browser/extractor setup
+- Each tool acquires its extractor through get_ready_extractor() at call time
 - ToolError-based error handling through centralized raise_tool_error()
 - Singleton driver pattern for session persistence
 - Structured data return format for consistent MCP responses

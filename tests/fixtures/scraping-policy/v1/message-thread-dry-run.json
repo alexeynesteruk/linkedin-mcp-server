@@ -1,0 +1,119 @@
+{
+  "call": {
+    "arguments": {
+      "confirm_send": false,
+      "linkedin_username": "ignored-for-a-thread",
+      "thread_id": "2-policy-reply==",
+      "thread_outcome": "dry_run"
+    },
+    "method": "send_message"
+  },
+  "events": [
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-reply==/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/messaging/thread/2-policy-reply==/",
+      "requested_url": "https://www.linkedin.com/messaging/thread/2-policy-reply==/",
+      "section": "message",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "send_message",
+      "description": "goto https://www.linkedin.com/messaging/thread/2-policy-reply==/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "extra": {
+        "target_url": "https://www.linkedin.com/messaging/thread/2-policy-reply==/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "boundary.rate_limit",
+      "section": "message"
+    },
+    {
+      "call": "send_message",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "message",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": 30000
+    },
+    {
+      "arg": {
+        "threadPath": "/messaging/thread/2-policy-reply==/"
+      },
+      "call": "send_message",
+      "kind": "wait_for_function",
+      "operation": "message_composer_ready",
+      "program_digest": "102e1f1f58ed",
+      "section": "message",
+      "timeout_ms": 30000
+    },
+    {
+      "arg": {
+        "threadPath": "/messaging/thread/2-policy-reply==/"
+      },
+      "call": "send_message",
+      "kind": "evaluate",
+      "operation": "message_composer_state",
+      "program_digest": "f332ed24b13f",
+      "section": "message"
+    }
+  ],
+  "result": {
+    "message": "Set confirm_send=true to send the message.",
+    "recipient_selected": true,
+    "retry_safe": true,
+    "sent": false,
+    "status": "confirmation_required",
+    "url": "https://www.linkedin.com/messaging/thread/2-policy-reply==/"
+  },
+  "scenario": "send_message__thread_dry_run",
+  "schema_version": 1
+}

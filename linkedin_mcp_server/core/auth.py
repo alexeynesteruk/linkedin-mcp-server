@@ -5,12 +5,21 @@ import logging
 import re
 from urllib.parse import urlparse
 
-from patchright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+from patchright.async_api import (
+    Error as PlaywrightError,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
-from .exceptions import AuthenticationError
+from .exceptions import AccountRestrictedError, AuthenticationError
 
 logger = logging.getLogger(__name__)
 
+# LinkedIn's account-restriction route. The page is localized, so only the path
+# is read, as its final segments so the route without the flagship-web prefix
+# counts too. Observations, and any new route, go in
+# docs/linkedin-auth-routes.md first; nothing here is guessed.
+_ACCOUNT_RESTRICTION_PATH_TAIL = ("login", "login-restriction")
 _AUTH_BLOCKER_URL_PATTERNS = (
     "/login",
     "/authwall",
@@ -23,6 +32,10 @@ _LOGIN_TITLE_PATTERNS = (
     "linkedin login",
     "sign in | linkedin",
 )
+# English only, and knowingly so: these are the words the account picker uses,
+# and the words change with the interface language while nothing about the page
+# announces which one is in play. The structural check below carries the
+# locales this table does not, which is why it runs first.
 _AUTH_BARRIER_TEXT_MARKERS = (
     ("welcome back", "sign in using another account"),
     ("welcome back", "join now"),
@@ -31,6 +44,8 @@ _AUTH_BARRIER_TEXT_MARKERS = (
 )
 _REMEMBER_ME_CONTAINER_SELECTOR = "#rememberme-div"
 _REMEMBER_ME_BUTTON_SELECTOR = "#rememberme-div button"
+_MANUAL_LOGIN_STATUS_INTERVAL_SECONDS = 30
+_AUTH_COOKIE_URL = "https://www.linkedin.com/feed/"
 
 
 async def is_logged_in(page: Page) -> bool:
@@ -40,7 +55,11 @@ async def is_logged_in(page: Page) -> bool:
     1. Fail-fast on auth blocker URLs
     2. Check for navigation elements (primary)
     3. URL-based fallback for authenticated-only pages
+
+    Raises:
+        AccountRestrictedError: On LinkedIn's account-restriction route.
     """
+    _raise_if_account_restricted(page.url)
     try:
         current_url = page.url
 
@@ -92,25 +111,6 @@ async def is_logged_in(page: Page) -> bool:
         raise
 
 
-async def has_auth_cookie(page: Page) -> bool:
-    """Return True only once the ``li_at`` session cookie has been issued.
-
-    ``li_at`` is the authoritative signal that LinkedIn has fully authenticated
-    the session - it is set only after every challenge (password, 2FA, app
-    verification, captcha) clears. Nav chrome can flash on screen during the 2FA
-    handshake before ``li_at`` exists, so relying on :func:`is_logged_in` alone
-    lets the login loop return - and the browser close - mid-2FA, persisting a
-    half-baked session that later fails ``/feed/`` validation. Gating on this
-    cookie closes that race.
-    """
-    try:
-        cookies = await page.context.cookies()
-    except Exception:
-        logger.warning("Could not read cookies while checking login completion")
-        return False
-    return any(c.get("name") == "li_at" and c.get("value") for c in cookies)
-
-
 async def detect_auth_barrier(page: Page) -> str | None:
     """Detect LinkedIn auth/account-picker barriers on the current page."""
     return await _detect_auth_barrier(page, include_body_text=True)
@@ -121,7 +121,15 @@ async def _detect_auth_barrier(
     *,
     include_body_text: bool,
 ) -> str | None:
-    """Detect LinkedIn auth/account-picker barriers on the current page."""
+    """Detect LinkedIn auth/account-picker barriers on the current page.
+
+    Raises:
+        AccountRestrictedError: On LinkedIn's account-restriction route, which
+            no login can clear and so is not reported as a barrier.
+    """
+    # Outside the try, which answers every failure with "no barrier". Ahead of
+    # the blocker routes, which the bare /login/login-restriction/ also matches.
+    _raise_if_account_restricted(page.url)
     try:
         current_url = page.url
         if _is_auth_blocker_url(current_url):
@@ -133,6 +141,24 @@ async def _detect_auth_barrier(
             title = ""
         if any(pattern in title for pattern in _LOGIN_TITLE_PATTERNS):
             return f"login title: {title}"
+
+        # An id, so it says the same thing in every interface language, which
+        # the picker's own words do not. The rest of the codebase already reads
+        # this container as the picker; here it is the only signal that
+        # survives a locale change, because the URL of an in-place picker is
+        # the page that was asked for and its title is that page's title.
+        #
+        # Ahead of the quick check's exit, and not behind it, because the two
+        # signals it does read are exactly the two this page defeats. The
+        # quick check runs after every navigation, so a picker served in a
+        # locale the table below does not cover reached every scraping tool
+        # as page text. It costs one selector count, where the body read
+        # below is what the quick check exists to skip.
+        try:
+            if await page.locator(_REMEMBER_ME_CONTAINER_SELECTOR).count() > 0:
+                return f"account picker: {_REMEMBER_ME_CONTAINER_SELECTOR}"
+        except Exception:
+            logger.debug("Could not count remember-me containers", exc_info=True)
 
         if not include_body_text:
             return None
@@ -169,39 +195,46 @@ async def detect_auth_barrier_quick(page: Page) -> str | None:
     return await _detect_auth_barrier(page, include_body_text=False)
 
 
-async def resolve_remember_me_prompt(page: Page) -> bool:
-    """Click through LinkedIn's saved-account chooser when it appears."""
+async def resolve_remember_me_prompt(page: Page, *, timeout: int | None = None) -> bool:
+    """Click through LinkedIn's saved-account chooser when it appears.
+
+    ``timeout`` bounds the whole attempt in milliseconds. ``None`` retains the
+    normal per-operation limits.
+    """
+    deadline = None
+    loop = None
+    if timeout is not None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout / 1000
+
+    def _operation_timeout(default: int) -> int | None:
+        if deadline is None or loop is None:
+            return default
+        remaining = int((deadline - loop.time()) * 1000)
+        if remaining <= 0:
+            return None
+        return min(default, remaining)
+
     try:
         logger.debug("Checking remember-me prompt on %s", page.url)
         try:
-            await page.wait_for_selector(_REMEMBER_ME_CONTAINER_SELECTOR, timeout=3000)
+            operation_timeout = _operation_timeout(3000)
+            if operation_timeout is None:
+                return False
+            await page.wait_for_selector(
+                _REMEMBER_ME_CONTAINER_SELECTOR, timeout=operation_timeout
+            )
             logger.debug("Remember-me container appeared")
         except PlaywrightTimeoutError:
             logger.debug("Remember-me container did not appear in time")
             return False
 
-        target_locator = page.locator(_REMEMBER_ME_BUTTON_SELECTOR)
-        target = target_locator.first
+        target = page.locator(_REMEMBER_ME_BUTTON_SELECTOR).first
         try:
-            target_count = await target_locator.count()
-        except Exception:
-            logger.debug(
-                "Could not count remember-me buttons; continuing with first match",
-                exc_info=True,
-            )
-            target_count = -1
-        logger.debug(
-            "Remember-me target count for %s: %d",
-            _REMEMBER_ME_BUTTON_SELECTOR,
-            target_count,
-        )
-        if target_count == 0:
-            logger.debug(
-                "Remember-me container appeared without any matching button selector"
-            )
-            return False
-        try:
-            await target.wait_for(state="visible", timeout=3000)
+            operation_timeout = _operation_timeout(3000)
+            if operation_timeout is None:
+                return False
+            await target.wait_for(state="visible", timeout=operation_timeout)
             logger.debug("Remember-me button became visible")
         except PlaywrightTimeoutError:
             logger.debug(
@@ -211,22 +244,42 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
 
         logger.info("Clicking LinkedIn saved-account chooser to resume session")
         try:
-            await target.scroll_into_view_if_needed(timeout=3000)
+            operation_timeout = _operation_timeout(3000)
+            if operation_timeout is None:
+                return False
+            await target.scroll_into_view_if_needed(timeout=operation_timeout)
         except PlaywrightTimeoutError:
             logger.debug("Remember-me button did not scroll into view in time")
 
         try:
-            await target.click(timeout=5000)
+            operation_timeout = _operation_timeout(5000)
+            if operation_timeout is None:
+                return False
+            await target.click(timeout=operation_timeout)
             logger.debug("Remember-me button click succeeded")
         except PlaywrightTimeoutError:
             logger.debug("Retrying remember-me prompt click with force=True")
-            await target.click(timeout=5000, force=True)
+            operation_timeout = _operation_timeout(5000)
+            if operation_timeout is None:
+                return False
+            await target.click(timeout=operation_timeout, force=True)
             logger.debug("Remember-me button force-click succeeded")
         try:
-            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+            operation_timeout = _operation_timeout(10000)
+            if operation_timeout is None:
+                return False
+            await page.wait_for_load_state(
+                "domcontentloaded", timeout=operation_timeout
+            )
         except PlaywrightTimeoutError:
             logger.debug("Remember-me prompt click did not finish loading in time")
-        await asyncio.sleep(1)
+
+        if deadline is None or loop is None:
+            await asyncio.sleep(1)
+        else:
+            remaining = deadline - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(min(1, remaining))
         return True
     except PlaywrightTimeoutError:
         logger.debug("Remember-me prompt was present but not clickable in time")
@@ -234,6 +287,20 @@ async def resolve_remember_me_prompt(page: Page) -> bool:
     except Exception:
         logger.debug("Failed to resolve remember-me prompt", exc_info=True)
         return False
+
+
+def _is_account_restricted_url(url: str) -> bool:
+    """Return True for LinkedIn's account-restriction route, by path alone."""
+    segments = tuple(segment for segment in urlparse(url).path.split("/") if segment)
+    return segments[-len(_ACCOUNT_RESTRICTION_PATH_TAIL) :] == (
+        _ACCOUNT_RESTRICTION_PATH_TAIL
+    )
+
+
+def _raise_if_account_restricted(url: str) -> None:
+    if _is_account_restricted_url(url):
+        logger.warning("LinkedIn account restriction page: %s", url)
+        raise AccountRestrictedError()
 
 
 def _is_auth_blocker_url(url: str) -> bool:
@@ -249,6 +316,14 @@ def _is_auth_blocker_url(url: str) -> bool:
     )
 
 
+async def _has_auth_cookie(page: Page) -> bool:
+    """Return whether this context can send ``li_at`` to LinkedIn's feed."""
+    cookies = await page.context.cookies(_AUTH_COOKIE_URL)
+    return any(
+        cookie.get("name") == "li_at" and cookie.get("value") for cookie in cookies
+    )
+
+
 async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
     """Wait for user to manually complete login.
 
@@ -258,6 +333,8 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
 
     Raises:
         AuthenticationError: If the timeout elapses before login completes.
+        AccountRestrictedError: If any tab lands on LinkedIn's
+            account-restriction route.
     """
     minutes = timeout / 60000
     if timeout:
@@ -281,25 +358,83 @@ async def wait_for_manual_login(page: Page, timeout: int = 300000) -> None:
 
     loop = asyncio.get_running_loop()
     start_time = loop.time()
+    deadline = start_time + timeout / 1000 if timeout else None
+    next_status_time = start_time + _MANUAL_LOGIN_STATUS_INTERVAL_SECONDS
+
+    def _check_wait_budget(*, log_status: bool = True) -> None:
+        nonlocal next_status_time
+        now = loop.time()
+        if deadline is not None and now > deadline:
+            raise _timeout_error()
+        if log_status and now >= next_status_time:
+            logger.info(
+                "Still waiting for manual login. Complete sign-in in any "
+                "LinkedIn tab in this browser."
+            )
+            next_status_time = now + _MANUAL_LOGIN_STATUS_INTERVAL_SECONDS
+
+    def _remaining_wait_seconds() -> float | None:
+        if deadline is None:
+            return None
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise _timeout_error()
+        return remaining
 
     while True:
-        if await resolve_remember_me_prompt(page):
-            logger.info("Resolved saved-account chooser during manual login flow")
-            elapsed = (loop.time() - start_time) * 1000
-            if timeout and elapsed > timeout:
-                raise _timeout_error()
-            continue
+        _check_wait_budget(log_status=False)
+        # interactive_login rotates the old profile before opening this context,
+        # so any li_at here was issued after the current login's challenges
+        # cleared. The cookie belongs to the context rather than a tab and survives
+        # the tab
+        # that completed sign-in being closed.
+        try:
+            remaining = _remaining_wait_seconds()
+            if remaining is None:
+                has_auth_cookie = await _has_auth_cookie(page)
+            else:
+                has_auth_cookie = await asyncio.wait_for(
+                    _has_auth_cookie(page), timeout=remaining
+                )
+        except TimeoutError:
+            raise _timeout_error() from None
+        except PlaywrightError as exc:
+            raise AuthenticationError(
+                "Manual login cancelled because the browser was closed."
+            ) from exc
 
-        # Require the authoritative li_at cookie, not just logged-in-looking
-        # chrome. During app/2FA verification LinkedIn can render nav elements
-        # before li_at is issued; returning then would close the browser
-        # mid-challenge and persist an unusable session. See has_auth_cookie.
-        if await is_logged_in(page) and await has_auth_cookie(page):
+        # Every tab, because sign-in may happen in any of them. Without this a
+        # restricted account keeps the loop waiting for a cookie LinkedIn will
+        # not issue, which with LOGIN_TIMEOUT=0 is forever. Ahead of the cookie,
+        # so a restriction page wins even if LinkedIn did set one.
+        for tab in page.context.pages:
+            _raise_if_account_restricted(tab.url)
+
+        if has_auth_cookie:
+            _check_wait_budget(log_status=False)
             logger.info("Manual login completed successfully")
             return
 
-        elapsed = (loop.time() - start_time) * 1000
-        if timeout and elapsed > timeout:
-            raise _timeout_error()
+        _check_wait_budget()
 
-        await asyncio.sleep(1)
+        if page.is_closed() and not page.context.pages:
+            raise AuthenticationError(
+                "Manual login cancelled because the browser was closed."
+            )
+
+        resolved_prompt = False
+        if not page.is_closed():
+            remaining = _remaining_wait_seconds()
+            if remaining is None:
+                resolved_prompt = await resolve_remember_me_prompt(page)
+            else:
+                resolved_prompt = await resolve_remember_me_prompt(
+                    page, timeout=max(1, int(remaining * 1000))
+                )
+
+        if resolved_prompt:
+            logger.info("Resolved saved-account chooser during manual login flow")
+            continue
+
+        remaining = _remaining_wait_seconds()
+        await asyncio.sleep(1 if remaining is None else min(1, remaining))

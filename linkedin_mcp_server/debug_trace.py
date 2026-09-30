@@ -7,27 +7,40 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import time
 from typing import Any, Literal
 
 from linkedin_mcp_server.common_utils import secure_mkdir, slugify_fragment
-from linkedin_mcp_server.session_state import auth_root_dir, get_source_profile_dir
-
-TraceMode = Literal["off", "on_error", "always"]
+from linkedin_mcp_server.exceptions import ProfileRootRefusedError
+from linkedin_mcp_server.session_state import (
+    _owned,
+    auth_root_dir,
+    get_source_profile_dir,
+)
 
 logger = logging.getLogger(__name__)
+
+TraceMode = Literal["off", "on_error", "always"]
 
 _TRACE_COUNTER = itertools.count(1)
 _TRACE_DIR: Path | None = None
 _TRACE_KEEP = False
 _EXPLICIT_TRACE_DIR = False
 
-# Default GC: drop empty/near-empty run dirs older than 7 days; hard-cap at 200 dirs.
-_DEFAULT_TRACE_MAX_AGE_DAYS = 7.0
-_DEFAULT_TRACE_MAX_RUNS = 200
-_MIN_USEFUL_BYTES = 64
+#: Run directories are made by ``tempfile.mkdtemp(prefix="run-")``: the prefix
+#: and eight characters from its ``[a-z0-9_]`` alphabet. Pruning matches exactly
+#: that shape, so a file or directory someone else put in the trace root is
+#: never a candidate.
+_RUN_PREFIX = "run-"
+_RUN_DIR_NAME = re.compile(r"^run-[a-z0-9_]{8}$")
+
+#: Retention for ``trace-runs``: the newest ``_TRACE_RUNS_KEEP`` runs survive,
+#: and of those only the ones younger than ``_TRACE_RUNS_MAX_AGE_DAYS``.
+_TRACE_RUNS_KEEP = 50
+_TRACE_RUNS_MAX_AGE_DAYS = 14.0
 
 
 def _trace_mode() -> TraceMode:
@@ -69,11 +82,80 @@ def get_trace_dir() -> Path | None:
     if _TRACE_DIR is None:
         _TRACE_DIR = Path(
             tempfile.mkdtemp(
-                prefix="run-",
+                prefix=_RUN_PREFIX,
                 dir=_trace_root(),
             )
         ).resolve()
+        _prune_trace_runs_best_effort(_TRACE_DIR)
     return _TRACE_DIR
+
+
+def _prune_trace_runs_best_effort(current: Path) -> None:
+    try:
+        prune_trace_runs(current.parent, keep_dir=current)
+    except Exception:
+        logger.debug("Trace-run pruning skipped", exc_info=True)
+
+
+def prune_trace_runs(
+    trace_root: Path,
+    *,
+    keep_dir: Path | None = None,
+    keep: int = _TRACE_RUNS_KEEP,
+    max_age_days: float = _TRACE_RUNS_MAX_AGE_DAYS,
+    now: float | None = None,
+) -> list[Path]:
+    """Delete old ``run-*`` directories from *trace_root*; return what went.
+
+    Bounded so retained traces (``on_error`` keeps one per failing run) cannot
+    accumulate forever. A run survives only if it is among the newest *keep* and
+    younger than *max_age_days*; *keep_dir*, this process's own run, always
+    survives.
+
+    Only deletes what this module made: a real (not symlinked) directory named
+    exactly like ``tempfile.mkdtemp(prefix="run-")`` output, directly inside
+    ``<auth root>/trace-runs``. The auth root has to pass the same ownership
+    check as every other destructive operation (``session_state._owned``); a
+    root this server cannot prove it owns is left untouched. Symlinks are
+    neither followed nor removed.
+    """
+    try:
+        source_profile = _owned(_safe_source_profile_dir())
+    except ProfileRootRefusedError:
+        logger.debug("Not pruning trace runs: profile root is not owned")
+        return []
+    expected_root = auth_root_dir(source_profile) / "trace-runs"
+    if trace_root.is_symlink() or trace_root.resolve() != expected_root.resolve():
+        return []
+
+    current = time.time() if now is None else now
+    runs: list[tuple[float, Path]] = []
+    with os.scandir(trace_root) as entries:
+        for entry in entries:
+            if not _RUN_DIR_NAME.match(entry.name):
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+                runs.append((entry.stat(follow_symlinks=False).st_mtime, Path(entry)))
+            except OSError:
+                continue
+
+    runs.sort(key=lambda run: run[0], reverse=True)
+    cutoff = current - max_age_days * 86400
+    removed: list[Path] = []
+    for rank, (mtime, path) in enumerate(runs):
+        if keep_dir is not None and path.resolve() == keep_dir.resolve():
+            continue
+        if rank < keep and mtime >= cutoff:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            logger.debug("Could not prune trace run %s", path, exc_info=True)
+            continue
+        removed.append(path)
+    return removed
 
 
 def mark_trace_for_retention() -> Path | None:
@@ -110,175 +192,6 @@ def reset_trace_state_for_testing() -> None:
     _TRACE_DIR = None
     _TRACE_KEEP = False
     _EXPLICIT_TRACE_DIR = False
-
-
-def _run_dir_byte_size(path: Path) -> int:
-    total = 0
-    try:
-        for child in path.rglob("*"):
-            if child.is_file():
-                try:
-                    total += child.stat().st_size
-                except OSError:
-                    continue
-    except OSError:
-        return total
-    return total
-
-
-def _is_empty_or_useless_run(path: Path) -> bool:
-    """True when a run dir has no meaningful artifacts (empty logs only)."""
-    if not path.is_dir():
-        return False
-    try:
-        children = list(path.iterdir())
-    except OSError:
-        return False
-    if not children:
-        return True
-    return _run_dir_byte_size(path) < _MIN_USEFUL_BYTES
-
-
-def garbage_collect_trace_runs(
-    *,
-    max_age_days: float | None = None,
-    max_runs: int | None = None,
-    now: float | None = None,
-) -> dict[str, int]:
-    """Delete stale empty trace-run dirs and enforce a simple retention cap.
-
-    Env overrides:
-    - ``LINKEDIN_TRACE_MAX_AGE_DAYS`` (default 7; 0 disables age-based GC)
-    - ``LINKEDIN_TRACE_MAX_RUNS`` (default 200; 0 disables count-based GC)
-
-    Never deletes the active process ``_TRACE_DIR`` or an explicit
-    ``LINKEDIN_DEBUG_TRACE_DIR`` target. Best-effort: IO errors are ignored.
-    """
-    if max_age_days is None:
-        raw_age = os.getenv("LINKEDIN_TRACE_MAX_AGE_DAYS", "").strip()
-        if raw_age:
-            try:
-                max_age_days = float(raw_age)
-            except ValueError:
-                max_age_days = _DEFAULT_TRACE_MAX_AGE_DAYS
-        else:
-            max_age_days = _DEFAULT_TRACE_MAX_AGE_DAYS
-
-    if max_runs is None:
-        raw_runs = os.getenv("LINKEDIN_TRACE_MAX_RUNS", "").strip()
-        if raw_runs:
-            try:
-                max_runs = int(raw_runs)
-            except ValueError:
-                max_runs = _DEFAULT_TRACE_MAX_RUNS
-        else:
-            max_runs = _DEFAULT_TRACE_MAX_RUNS
-
-    stats = {"scanned": 0, "deleted_empty": 0, "deleted_over_cap": 0}
-    try:
-        root = _trace_root()
-    except Exception:
-        return stats
-    if not root.is_dir():
-        return stats
-
-    protected: set[Path] = set()
-    if _TRACE_DIR is not None:
-        try:
-            protected.add(_TRACE_DIR.resolve())
-        except OSError:
-            protected.add(_TRACE_DIR)
-    explicit = os.getenv("LINKEDIN_DEBUG_TRACE_DIR", "").strip()
-    if explicit:
-        try:
-            protected.add(Path(explicit).expanduser().resolve())
-        except OSError:
-            pass
-
-    now_ts = now if now is not None else time.time()
-    age_cutoff = (
-        now_ts - (max_age_days * 86400.0) if max_age_days and max_age_days > 0 else None
-    )
-
-    try:
-        run_dirs = sorted(
-            (p for p in root.iterdir() if p.is_dir() and p.name.startswith("run-")),
-            key=lambda p: p.stat().st_mtime if p.exists() else 0.0,
-        )
-    except OSError:
-        return stats
-
-    stats["scanned"] = len(run_dirs)
-    remaining: list[Path] = []
-    for run_dir in run_dirs:
-        try:
-            resolved = run_dir.resolve()
-        except OSError:
-            remaining.append(run_dir)
-            continue
-        if resolved in protected:
-            remaining.append(run_dir)
-            continue
-        try:
-            mtime = run_dir.stat().st_mtime
-        except OSError:
-            remaining.append(run_dir)
-            continue
-        if (
-            age_cutoff is not None
-            and mtime < age_cutoff
-            and _is_empty_or_useless_run(run_dir)
-        ):
-            try:
-                shutil.rmtree(run_dir)
-                stats["deleted_empty"] += 1
-                continue
-            except OSError:
-                remaining.append(run_dir)
-                continue
-        remaining.append(run_dir)
-
-    if max_runs and max_runs > 0 and len(remaining) > max_runs:
-        # Drop oldest empty/useless dirs first, then oldest anything if still over.
-        overflow = len(remaining) - max_runs
-        candidates = sorted(
-            remaining,
-            key=lambda p: (
-                0 if _is_empty_or_useless_run(p) else 1,
-                p.stat().st_mtime if p.exists() else 0.0,
-            ),
-        )
-        for run_dir in candidates:
-            if overflow <= 0:
-                break
-            try:
-                resolved = run_dir.resolve()
-            except OSError:
-                continue
-            if resolved in protected:
-                continue
-            if not _is_empty_or_useless_run(run_dir):
-                # Prefer empty dirs; stop once only contentful runs remain under pressure
-                # unless still wildly over (2x cap).
-                if len(remaining) - stats["deleted_over_cap"] <= max_runs * 2:
-                    continue
-            try:
-                shutil.rmtree(run_dir)
-                stats["deleted_over_cap"] += 1
-                overflow -= 1
-                if run_dir in remaining:
-                    remaining.remove(run_dir)
-            except OSError:
-                continue
-
-    if stats["deleted_empty"] or stats["deleted_over_cap"]:
-        logger.info(
-            "Trace-run GC: scanned=%d deleted_empty=%d deleted_over_cap=%d",
-            stats["scanned"],
-            stats["deleted_empty"],
-            stats["deleted_over_cap"],
-        )
-    return stats
 
 
 def _slugify_step(step: str) -> str:

@@ -1,8 +1,15 @@
-"""MCP meta tools: health, ping, and linkedin_* aliases."""
+"""MCP meta tools: health, ping, and optional linkedin_* aliases.
+
+Neither meta tool drives Chromium. ``SequentialToolExecutionMiddleware`` lets
+them through without the scraper lock or the profile lease, so a health probe
+answers while another client holds the browser instead of queueing behind it.
+"""
 
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP
@@ -19,7 +26,7 @@ from linkedin_mcp_server.bootstrap import (
     initialize_bootstrap,
 )
 from linkedin_mcp_server.config import get_config
-from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.sequential_tool_middleware import LOCK_FREE_TOOL_NAMES
 from linkedin_mcp_server.drivers.browser import get_profile_dir, profile_exists
 from linkedin_mcp_server.session_state import (
     get_runtime_id,
@@ -30,39 +37,23 @@ from linkedin_mcp_server.session_state import (
 
 logger = logging.getLogger(__name__)
 
-# Legacy scraper tools registered without the linkedin_ prefix.
-LEGACY_TOOL_NAMES: tuple[str, ...] = (
-    "get_person_profile",
-    "get_my_profile",
-    "connect_with_person",
-    "get_sidebar_profiles",
-    "search_people",
-    "get_company_profile",
-    "get_company_posts",
-    "search_companies",
-    "get_company_employees",
-    "get_job_details",
-    "search_jobs",
-    "get_saved_jobs",
-    "get_inbox",
-    "get_conversation",
-    "search_conversations",
-    "send_message",
-    "get_pending_invitations",
-    "withdraw_invitation",
-    "get_feed",
-    "get_post_comments",
-    "search_posts",
-    "get_my_analytics",
-    "close_session",
-)
-
 META_PING_TIMEOUT_SECONDS = 10.0
 META_HEALTH_TIMEOUT_SECONDS = 30.0
-META_TOOL_NAMES: tuple[str, ...] = ("linkedin_health", "linkedin_ping")
+META_TOOL_NAMES: frozenset[str] = LOCK_FREE_TOOL_NAMES
+
+ALIAS_PREFIX = "linkedin_"
+# Opt-in, because every alias is a second copy of a tool schema in the client's
+# context. Clients that load every tool eagerly pay for all of them twice.
+TOOL_ALIASES_ENV = "LINKEDIN_MCP_TOOL_ALIASES"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
-def _session_auth_ready(profile_dir) -> bool:
+def tool_aliases_enabled() -> bool:
+    """Whether ``LINKEDIN_MCP_TOOL_ALIASES`` asks for linkedin_* aliases."""
+    return os.environ.get(TOOL_ALIASES_ENV, "").strip().lower() in _TRUTHY
+
+
+def _session_auth_ready(profile_dir: Path) -> bool:
     if not (
         profile_exists(profile_dir)
         and portable_cookie_path(profile_dir).exists()
@@ -70,27 +61,25 @@ def _session_auth_ready(profile_dir) -> bool:
     ):
         return False
     try:
-        get_authentication_source()
+        return bool(get_authentication_source())
     except Exception:
         return False
-    return True
 
 
-def _build_storage_paths(profile_dir) -> dict[str, str]:
-    auth_root = profile_dir.expanduser().resolve().parent
+def _build_storage_paths(profile_dir: Path) -> dict[str, str]:
+    resolved = profile_dir.expanduser().resolve()
     return {
-        "auth_root": str(auth_root),
-        "profile_dir": str(profile_dir.expanduser().resolve()),
+        "auth_root": str(resolved.parent),
+        "profile_dir": str(resolved),
         "cookies_json": str(portable_cookie_path(profile_dir)),
         "source_state_json": str(source_state_path(profile_dir)),
         "runtime_profiles_dir": str(runtime_profiles_root(profile_dir)),
         "patchright_browsers_dir": str(browsers_path()),
-        "playwright_browsers_path": str(browsers_path()),
     }
 
 
 def build_health_payload() -> dict[str, Any]:
-    """Return server health without launching browser tools."""
+    """Return server health without launching the browser."""
     initialize_bootstrap()
     config = get_config()
     profile_dir = get_profile_dir()
@@ -101,8 +90,8 @@ def build_health_payload() -> dict[str, Any]:
     warnings: list[str] = []
     if not browser_ready:
         warnings.append(
-            "Patchright Chromium is not installed or browser metadata is stale. "
-            "First scraper tool call triggers background install."
+            "Patchright Chromium is not installed or its metadata is stale. "
+            "The first scraping tool call installs it in the background."
         )
     if not auth_ready:
         warnings.append(
@@ -117,7 +106,6 @@ def build_health_payload() -> dict[str, Any]:
         "server": "linkedin-mcp",
         "version": __version__,
         "transport": config.server.transport,
-        "mask_error_details": True,
         "runtime_policy": get_runtime_policy().value,
         "runtime_id": get_runtime_id(),
         "bootstrap": {
@@ -131,14 +119,6 @@ def build_health_payload() -> dict[str, Any]:
             "cookies_present": portable_cookie_path(profile_dir).exists(),
             "source_state_present": source_state_path(profile_dir).exists(),
             "auth_ready": auth_ready,
-            "lifecycle": (
-                "Host login via --login writes ~/.linkedin-mcp/profile plus "
-                "cookies.json and source-state.json. Managed runtimes reuse the "
-                "source profile; Docker/container runtimes derive a fresh Linux "
-                "profile from exported cookies on startup. close_session (or "
-                "linkedin_close_session) closes the in-process browser; persistent "
-                "auth remains on disk until --logout."
-            ),
         },
         "storage": _build_storage_paths(profile_dir),
         "timeouts_seconds": {
@@ -152,18 +132,21 @@ def build_health_payload() -> dict[str, Any]:
 
 
 async def build_ping_payload(mcp: FastMCP) -> dict[str, Any]:
-    """Return capability discovery payload for linkedin_ping."""
+    """Return the capability-discovery payload for linkedin_ping."""
     config = get_config()
     tools = await mcp.list_tools(run_middleware=False)
     tool_list = [
         {"name": tool.name, "description": tool.description or ""}
         for tool in sorted(tools, key=lambda t: t.name)
     ]
-    legacy_names = set(LEGACY_TOOL_NAMES)
-    prefixed_aliases = [
-        t["name"] for t in tool_list if t["name"].startswith("linkedin_")
-    ]
-
+    names = {tool["name"] for tool in tool_list}
+    aliases = sorted(
+        name
+        for name in names
+        if name.startswith(ALIAS_PREFIX)
+        and name not in META_TOOL_NAMES
+        and name.removeprefix(ALIAS_PREFIX) in names
+    )
     return {
         "ok": True,
         "pong": True,
@@ -173,30 +156,24 @@ async def build_ping_payload(mcp: FastMCP) -> dict[str, Any]:
         "tools": tool_list,
         "tool_count": len(tool_list),
         "capabilities": {
-            "playwright_profile_persistence": True,
-            "patchright_chromium": True,
-            "stdio_default": config.server.transport == "stdio",
             "sequential_tool_execution": True,
-            "legacy_tool_names": sorted(legacy_names),
-            "prefixed_aliases": prefixed_aliases,
-            "meta_tools": ["linkedin_health", "linkedin_ping"],
+            "meta_tools": sorted(META_TOOL_NAMES),
+            "tool_aliases": aliases,
             "default_tool_timeout_seconds": config.server.tool_timeout_seconds,
         },
         "storage": _build_storage_paths(get_profile_dir()),
     }
 
 
-def _tools_by_name_from_local_provider(mcp: FastMCP) -> dict[str, Tool]:
-    """Best-effort map of registered tools without requiring async list APIs.
+def _local_tools(mcp: FastMCP) -> dict[str, Tool]:
+    """Registered local tools by name, read without the async list API.
 
-    FastMCP's public ``list_tools``/``get_tool`` are async, so during sync
-    server setup we read the local provider registry when available. If the
-    private layout changes, return an empty map so alias registration skips
-    instead of blocking server startup (PR review).
+    ``list_tools`` is async and alias registration runs during synchronous
+    server setup, so this reads the local provider's registry. If a FastMCP
+    release moves it, the map comes back empty and aliases are skipped rather
+    than stopping the server.
     """
     provider = getattr(mcp, "local_provider", None)
-    if provider is None:
-        return {}
     components = getattr(provider, "_components", None)
     if not isinstance(components, dict):
         return {}
@@ -207,54 +184,49 @@ def _tools_by_name_from_local_provider(mcp: FastMCP) -> dict[str, Tool]:
     }
 
 
-def register_tool_aliases(mcp: FastMCP) -> None:
-    """Register linkedin_* aliases alongside legacy tool names."""
-    try:
-        tools_by_name = _tools_by_name_from_local_provider(mcp)
-    except Exception:
-        logger.exception(
-            "Could not read registered tools for linkedin_* alias setup; "
-            "skipping aliases"
-        )
-        return
+def register_tool_aliases(mcp: FastMCP) -> list[str]:
+    """Register a ``linkedin_<name>`` copy of every local tool.
 
-    if not tools_by_name:
-        logger.warning(
-            "No local tool registry available for linkedin_* alias setup; "
-            "skipping aliases"
-        )
-        return
+    Call it after every other registration. Meta tools already carry the
+    prefix, and a name that is taken is left alone. Returns the aliases added.
+    """
+    tools = _local_tools(mcp)
+    if not tools:
+        logger.warning("No local tool registry available; skipping linkedin_* aliases")
+        return []
 
-    existing = set(tools_by_name)
-
-    for name in LEGACY_TOOL_NAMES:
-        alias = f"linkedin_{name}"
-        if name not in existing or alias in existing:
+    added: list[str] = []
+    for name, tool in sorted(tools.items()):
+        if name.startswith(ALIAS_PREFIX):
+            continue
+        alias = f"{ALIAS_PREFIX}{name}"
+        if alias in tools:
             continue
         try:
-            mcp.add_tool(Tool.from_tool(tools_by_name[name], name=alias))
-            existing.add(alias)
+            mcp.add_tool(Tool.from_tool(tool, name=alias))
         except Exception:
             logger.exception("Failed to register linkedin_* alias for %s", name)
+            continue
+        added.append(alias)
+    return added
 
 
-def register_meta_tools(
-    mcp: FastMCP,
-    *,
-    tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
-) -> None:
-    """Register linkedin_health and linkedin_ping meta tools."""
-    del tool_timeout  # meta tools use fixed shorter timeouts
+def register_meta_tools(mcp: FastMCP) -> None:
+    """Register the linkedin_health and linkedin_ping meta tools."""
 
     @mcp.tool(
         name="linkedin_health",
         timeout=META_HEALTH_TIMEOUT_SECONDS,
         title="LinkedIn MCP Health",
         annotations={"readOnlyHint": True},
-        tags={"meta", "health"},
+        tags={"meta"},
     )
     async def linkedin_health() -> dict[str, Any]:
-        """Return server version, storage paths, and browser/session readiness."""
+        """Report server version, storage paths, and browser/session readiness.
+
+        Never opens the browser and never waits for the scraper lock, so it
+        answers while another tool call or another MCP client is scraping.
+        """
         return build_health_payload()
 
     @mcp.tool(
@@ -262,8 +234,8 @@ def register_meta_tools(
         timeout=META_PING_TIMEOUT_SECONDS,
         title="LinkedIn MCP Ping",
         annotations={"readOnlyHint": True},
-        tags={"meta", "ping"},
+        tags={"meta"},
     )
     async def linkedin_ping() -> dict[str, Any]:
-        """Return server metadata, registered tools, and capabilities."""
+        """List the registered tools and server capabilities."""
         return await build_ping_payload(mcp)

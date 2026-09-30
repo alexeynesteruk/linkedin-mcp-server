@@ -22,6 +22,7 @@ touched for the browser we actually import from:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -36,15 +37,26 @@ from linkedin_mcp_server.browser_import.extract import (
     extract_linkedin_cookies,
     read_li_at_meta,
 )
-from linkedin_mcp_server.browser_import.user_agent import synthesize_user_agent
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_write_text
 
 from linkedin_mcp_server.exceptions import (
+    BrowserBusyError,
+    BrowserShutdownUnconfirmedError,
     CookieDecryptionError,
     NoLinkedInSessionFoundError,
 )
+from linkedin_mcp_server.process_tree import (
+    release_browser_guardian,
+    start_browser_guardian,
+)
+from linkedin_mcp_server.profile_lease import ProfileLease, get_profile_lease
+from linkedin_mcp_server.setup import UNGUARDED, a_peer_already_signed_in
 from linkedin_mcp_server.session_state import (
+    run_deferring_cancels,
     portable_cookie_path,
+    reset_source_profile,
+    restore_source_profile,
+    rotate_shielded,
     write_source_state,
 )
 
@@ -186,6 +198,8 @@ async def import_session_from_browser(
     browser: str | None,
     *,
     user_data_dir: Path,
+    superseded_by: str | None | object = UNGUARDED,
+    profile_wait_seconds: float = 0.0,
 ) -> bool:
     """Discover, rank, decrypt, validate and persist a browser LinkedIn session.
 
@@ -202,9 +216,11 @@ async def import_session_from_browser(
 
     Returns ``True`` on a validated, persisted session, ``False`` when a live
     ``li_at`` was found but no browser's session was accepted by LinkedIn.
-    """
-    from linkedin_mcp_server.drivers.browser import validate_imported_cookies
 
+    *profile_wait_seconds* bounds a wait for the profile at the import's first
+    lease gate, for a caller that has asked a shared browser to retire and
+    expects it to let go. Every other caller demands the profile at once.
+    """
     live, skipped = await asyncio.to_thread(_discover_and_rank, browser)
     if not live:
         raise _no_live_session_error(skipped)
@@ -216,20 +232,140 @@ async def import_session_from_browser(
     )
     cookie_path = portable_cookie_path(user_data_dir)
 
+    # An import seeds a session that may belong to a different account than the
+    # one already on disk, so the previous profile is retired rather than
+    # reused: Chromium keeps machine_id and friends for the life of a profile
+    # directory, which would present both accounts to LinkedIn as one device.
+    # Closing first so a later teardown cannot export the retired session's
+    # cookies over the freshly staged ones.
+    from linkedin_mcp_server.drivers.browser import close_browser
+
+    await close_browser()
+
+    # Validation launches Chromium on the source profile, so the import owns it
+    # for the whole rotate-validate-commit flow. Without this another process
+    # could launch against the profile the moment the staged cookies land.
+    lease = get_profile_lease(user_data_dir)
+    # Waited for here and nowhere later: this is the reference the whole import
+    # holds, and the nested exclusivity check inside rotation only counts it
+    # again. A wait placed there would never be reached by an import refused
+    # here first.
+    held = (
+        await lease.acquire(timeout=profile_wait_seconds)
+        if profile_wait_seconds > 0
+        else lease.try_acquire()
+    )
+    if not held:
+        raise BrowserBusyError(
+            "Another LinkedIn MCP client is using the browser, so a session "
+            "cannot be imported. Close it and try again."
+        )
+    release_profile = True
+    try:
+        # Checked with the profile in hand, for the same reason the login checks
+        # there: two clients meeting one bad session both decide to repair it,
+        # both queue, and the one that waited is acting on an answer formed before
+        # the winner finished. The rotation below does not ask whose session it is
+        # retiring. Measured with two real processes: the loser rotated away the
+        # session the winner had just imported.
+        if superseded_by is not UNGUARDED and a_peer_already_signed_in(
+            user_data_dir, superseded_by
+        ):
+            logger.info("Another client already signed in; keeping its session")
+            return True
+        return await _import_holding_the_profile(
+            live, cookie_path, user_data_dir, lease
+        )
+    except BrowserShutdownUnconfirmedError:
+        # A validation browser may still hold the profile, so keep the lease
+        # rather than letting the next process launch on top of it. The kernel
+        # frees the lock when this process exits.
+        release_profile = False
+        raise
+    finally:
+        if release_profile:
+            lease.release()
+
+
+async def _import_holding_the_profile(
+    live: list[tuple[BrowserProfile, LiAtMeta]],
+    cookie_path: Path,
+    user_data_dir: Path,
+    lease: ProfileLease,
+) -> bool:
+    """Rotate, validate and commit; the caller owns the profile throughout."""
+    # Rotation comes before the browser is marked open: the exclusivity check
+    # treats an open browser as a reason to refuse, so marking first would stop
+    # every re-import from retiring the profile it replaces.
+    retired = await rotate_shielded(user_data_dir)
+
+    # For the reason the login path starts one: validation launches Chromium
+    # through its own manager, so without a guardian a crash here would free the
+    # profile with that browser still running on it.
+    start_browser_guardian(lease.guardian_fd())
+
+    imported = False
+    shutdown_confirmed = True
+    lease.mark_browser_open()
+    try:
+        imported = await _import_first_accepted(live, cookie_path, user_data_dir)
+        return imported
+    except BrowserShutdownUnconfirmedError:
+        # A validation browser may still be running on this profile. Leave
+        # everything exactly as it is: the lease stays held and the retired
+        # session stays in quarantine until the operator restarts.
+        shutdown_confirmed = False
+        raise
+    finally:
+        if shutdown_confirmed:
+            # For the reason the login releases here: one guardian exists per
+            # process, so keeping this one past a proved teardown would leave
+            # every later launch reusing a guardian whose descriptor no longer
+            # locks anything.
+            release_browser_guardian()
+            lease.mark_browser_closed()
+            # The retirement happens before a replacement exists, so an import
+            # where every candidate is rejected — or that raises on
+            # undecryptable cookies — would otherwise leave the user logged out
+            # of a working session.
+            if retired is not None and not imported:
+                # Deferred cancellation: abandoning the worker mid move would
+                # leave the session split across quarantine and the live paths.
+                # Re-raised afterwards so the caller still sees the cancel.
+                restored, cancelled = await run_deferring_cancels(
+                    functools.partial(restore_source_profile, retired, user_data_dir)
+                )
+                if not restored:
+                    logger.warning(
+                        "Could not restore the previous session; it is kept at %s",
+                        retired,
+                    )
+                if cancelled:
+                    raise asyncio.CancelledError
+        elif retired is not None:
+            logger.warning(
+                "The previous session was not restored because a validation "
+                "browser did not shut down cleanly; it is kept at %s",
+                retired,
+            )
+
+
+async def _import_first_accepted(
+    live: list[tuple[BrowserProfile, LiAtMeta]],
+    cookie_path: Path,
+    user_data_dir: Path,
+) -> bool:
+    """Stage and validate candidates in order, keeping the first LinkedIn accepts."""
+    from linkedin_mcp_server.drivers.browser import validate_imported_cookies
+
     staged_any = False
     for profile, _meta in live:
         if not await asyncio.to_thread(_extract_and_stage, profile, cookie_path):
             continue
         staged_any = True
 
-        # Synthesize the source browser's UA so validation and every later
-        # runtime session replay the cookie under the fingerprint it was minted
-        # with (None keeps the runtime default; file I/O, so off the loop).
-        user_agent = await asyncio.to_thread(synthesize_user_agent, profile)
-        if await validate_imported_cookies(
-            cookie_path, user_data_dir, user_agent=user_agent
-        ):
-            write_source_state(user_data_dir, user_agent=user_agent)
+        if await validate_imported_cookies(cookie_path, user_data_dir):
+            write_source_state(user_data_dir)
             logger.info(
                 "Imported LinkedIn session from %s/%s",
                 profile.browser,
@@ -239,8 +375,7 @@ async def import_session_from_browser(
 
         # Cookie was present but LinkedIn rejected it (revoked/remote logout).
         # Drop the partial artifacts and try the next-freshest browser.
-        cookie_path.unlink(missing_ok=True)
-        _reset_profile_dir(user_data_dir)
+        reset_source_profile(user_data_dir)
         logger.info(
             "%s/%s had an li_at but LinkedIn rejected the session; trying the "
             "next browser",
@@ -259,10 +394,3 @@ async def import_session_from_browser(
             "app-bound encryption). Run --login to create a session instead."
         )
     return False
-
-
-def _reset_profile_dir(user_data_dir: Path) -> None:
-    """Clear the seeded profile between failed attempts so cookies don't mix."""
-    import shutil
-
-    shutil.rmtree(user_data_dir, ignore_errors=True)

@@ -2,7 +2,13 @@
 
 from urllib.parse import quote
 
+from linkedin_mcp_server.scraping.fields import (
+    ANALYTICS_SECTIONS,
+    COMPANY_SECTIONS,
+    PERSON_SECTIONS,
+)
 from linkedin_mcp_server.scraping.link_metadata import (
+    _REFERENCE_CAPS,
     RawReference,
     build_references,
     classify_link,
@@ -304,6 +310,30 @@ class TestBuildReferences:
             }
         ]
 
+    def test_rejects_invisible_hangul_filler_labels(self):
+        """Hangul fillers carry the Unicode word property but render as
+        nothing, so a label made only of them must not shadow the
+        aria-label fallback with invisible text."""
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/williamhgates/",
+                    "text": "\u115f\u1160\u3164\uffa0",
+                    "aria_label": "Bill Gates",
+                }
+            ],
+            "main_profile",
+        )
+
+        assert references == [
+            {
+                "kind": "person",
+                "url": "/in/williamhgates/",
+                "text": "Bill Gates",
+                "context": "top card",
+            }
+        ]
+
     def test_preserves_words_starting_with_view(self):
         references = build_references(
             [
@@ -343,6 +373,25 @@ class TestBuildReferences:
                 "text": "Original company post",
                 "context": "company post",
             }
+        ]
+
+    def test_comments_section_names_the_commented_post_and_its_author(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/feed/update/urn:li:activity:9/",
+                    "text": "A post I commented on",
+                },
+                {"href": "https://www.linkedin.com/in/bob/", "text": "Bob"},
+                {"href": "https://www.linkedin.com/company/aws/", "text": "AWS"},
+            ],
+            "comments",
+        )
+
+        assert [(r["kind"], r["context"]) for r in references] == [
+            ("feed_post", "commented post"),
+            ("person", "post author"),
+            ("company", "post attachment"),
         ]
 
     def test_drops_social_proof_company_labels(self):
@@ -402,6 +451,65 @@ class TestBuildReferences:
         assert len(references) == 12
         assert references[0]["url"] == "/company/test-0/"
         assert references[-1]["url"] == "/company/test-11/"
+
+    def test_a_post_thread_keeps_thirty_commenters_and_guesses_no_role(self):
+        raw: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/in/commenter-{idx}/",
+                "text": f"Commenter {idx}",
+            }
+            for idx in range(40)
+        ]
+
+        references = build_references(raw, "post")
+
+        assert len(references) == 30
+        assert references[-1]["url"] == "/in/commenter-29/"
+        assert {reference["context"] for reference in references} == {"post thread"}
+
+    def test_search_results_cap_can_be_disabled(self):
+        raw: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/jobs/view/{idx}/",
+                "text": f"Job {idx}",
+            }
+            for idx in range(20)
+        ]
+
+        capped = build_references(raw, "search_results")
+        uncapped = build_references(raw, "search_results", apply_cap=False)
+
+        assert len(capped) == 15
+        assert capped[-1]["url"] == "/jobs/view/14/"
+        assert len(uncapped) == 20
+        assert uncapped[-1]["url"] == "/jobs/view/19/"
+
+    def test_keeps_every_loaded_employee_card_past_the_company_links(self):
+        """The people page leads with the company's own links, and every
+        employee card after them has to survive the cap: agents may only
+        act on slugs they find here."""
+        header: list[RawReference] = [
+            {"href": "https://www.linkedin.com/company/acme/", "text": "Acme"},
+            {
+                "href": (
+                    "https://www.linkedin.com/search/results/people/"
+                    "?currentCompany=%5B%221234%22%5D"
+                ),
+                "text": "See all employees",
+            },
+        ]
+        cards: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/in/employee-{idx}/",
+                "text": f"Employee {idx}",
+            }
+            for idx in range(40)
+        ]
+
+        references = build_references(header + cards, "employees")
+
+        people = [ref["url"] for ref in references if ref["kind"] == "person"]
+        assert people == [f"/in/employee-{idx}/" for idx in range(40)]
 
     def test_caps_jobs_section_more_tightly(self):
         raw: list[RawReference] = [
@@ -504,6 +612,141 @@ class TestBuildReferences:
                 "context": "job posting",
             }
         ]
+
+    def test_every_more_jobs_card_on_a_posting_is_kept(self):
+        """Each card is one anchor around its whole content, measured live.
+
+        That text is too long to be a label, and a job without a label was
+        dropped. The dozen cards also sit below everything else on the page,
+        past a cap of 8 references.
+        """
+        header: list[RawReference] = [
+            {"href": "https://www.linkedin.com/company/acme/", "text": "Acme"},
+            {"href": "https://www.linkedin.com/jobs/view/100/", "text": "Easy Apply"},
+            {"href": "https://www.linkedin.com/in/recruiter/", "text": "Recruiter"},
+        ]
+        cards: list[RawReference] = [
+            {
+                "href": (
+                    "https://www.linkedin.com/jobs/search-results/?keywords=Data"
+                    f"&currentJobId={4458959200 + index}"
+                ),
+                "text": (
+                    "Product Manager Data H/F NEXTON Paris (On-site) 3 school "
+                    "alumni work here Promoted · Posted 2 weeks ago 2 weeks ago · "
+                    "Easy Apply"
+                ),
+            }
+            for index in range(12)
+        ]
+
+        references = build_references(header + cards, "job_posting")
+
+        assert references[3:] == [
+            {
+                "kind": "job",
+                "url": f"/jobs/view/{4458959200 + index}/",
+                "context": "job posting",
+            }
+            for index in range(12)
+        ]
+
+    def test_uses_person_detail_section_contexts(self):
+        """certifications, skills and projects joined PERSON_SECTIONS after
+        this table was written, so their references carried no context while
+        every sibling detail section named itself."""
+        for section in ("certifications", "skills", "projects"):
+            references = build_references(
+                [
+                    {
+                        "href": "https://www.linkedin.com/company/aws/",
+                        "text": "Amazon Web Services",
+                    }
+                ],
+                section,
+            )
+
+            assert references == [
+                {
+                    "kind": "company",
+                    "url": "/company/aws/",
+                    "text": "Amazon Web Services",
+                    "context": section,
+                }
+            ]
+
+    def test_uses_employees_context_for_company_people_pages(self):
+        references = build_references(
+            [
+                {
+                    "href": "https://www.linkedin.com/in/stickerdaniel/",
+                    "text": "Daniel Sticker",
+                }
+            ],
+            "employees",
+        )
+
+        assert references == [
+            {
+                "kind": "person",
+                "url": "/in/stickerdaniel/",
+                "text": "Daniel Sticker",
+                "context": "employees",
+            }
+        ]
+
+    def test_names_the_context_for_jobs_saved_jobs_and_feed(self):
+        """The structural guard below only proves a context key exists, so it
+        survives a wrong label. These are the values themselves."""
+        raw: list[RawReference] = [
+            {
+                "href": "https://www.linkedin.com/jobs/view/123/",
+                "text": "Senior Engineer",
+            }
+        ]
+
+        contexts = {
+            section: build_references(raw, section)[0]["context"]
+            for section in ("jobs", "saved_jobs", "feed")
+        }
+
+        assert contexts == {
+            "jobs": "jobs",
+            "saved_jobs": "saved jobs",
+            "feed": "feed",
+        }
+
+    def test_every_scraped_section_gives_its_references_a_context(self):
+        """Nothing tied the context table to the section tables, which is how
+        seven sections have now reached main without an entry. A context-less
+        reference also scores below every duplicate that has one, so it loses
+        cross-page dedupe ties it should win.
+
+        Section names are declared in three separate places, and `saved_jobs`
+        is declared in none of them -- it exists only as a literal in the
+        extractor -- so it is named here explicitly."""
+        raw: list[RawReference] = [
+            {
+                "href": "https://www.linkedin.com/company/aws/",
+                "text": "Amazon Web Services",
+            }
+        ]
+
+        sections = (
+            set(PERSON_SECTIONS)
+            | set(COMPANY_SECTIONS)
+            | set(_REFERENCE_CAPS)
+            | set(ANALYTICS_SECTIONS)
+            | {"saved_jobs"}
+        )
+
+        missing = sorted(
+            section
+            for section in sections
+            if "context" not in build_references(raw, section)[0]
+        )
+
+        assert missing == []
 
     def test_does_not_treat_lookalike_domains_as_linkedin(self):
         references = build_references(
@@ -690,6 +933,81 @@ class TestBuildReferences:
 
 
 class TestClassifyLink:
+    def test_a_slugged_job_url_keeps_its_id(self):
+        """LinkedIn serves a job under a bare id and under a slugged path.
+
+        Both 301 to the same page, so the slugged form is just as real, and
+        anchoring the id to the front of the segment dropped it: the link
+        vanished from ``references`` entirely.
+        """
+        assert classify_link(
+            "https://www.linkedin.com/jobs/view/senior-ai-engineer-at-acme-1967281839/"
+        ) == ("job", "/jobs/view/1967281839/")
+
+    def test_a_title_opening_with_a_number_is_not_the_job_id(self):
+        """The quiet half of the same bug, and the worse one.
+
+        A title starting with a year matched the front anchor, so the link
+        was kept and pointed at a different job. A dropped reference is
+        visibly missing; this one looks like a result.
+        """
+        assert classify_link(
+            "https://www.linkedin.com/jobs/view/2026-software-engineer-at-acme-4252026496/"
+        ) == ("job", "/jobs/view/4252026496/")
+
+    def test_unicode_digits_are_not_a_job_id(self):
+        """Python's ``\\d`` matches more than JavaScript's does.
+
+        Arabic-Indic digits pass ``\\d`` here and fail it in the two
+        JavaScript copies of this pattern, and ``normalize_job_id`` accepts
+        only ``[0-9]``. Classifying such a link produces a reference whose
+        very next use raises, so the digits are ASCII on purpose.
+        """
+        assert (
+            classify_link(
+                "https://www.linkedin.com/jobs/view/\u0645\u0647\u0646\u062f\u0633-"
+                "\u0664\u0662\u0665\u0662\u0660\u0662\u0666\u0664\u0669\u0666/"
+            )
+            is None
+        )
+
+    def test_a_bare_job_url_is_unchanged(self):
+        assert classify_link("https://www.linkedin.com/jobs/view/1967281839/") == (
+            "job",
+            "/jobs/view/1967281839/",
+        )
+
+    def test_a_search_link_selecting_a_job_is_that_job(self):
+        """The "More jobs" cards on a posting link here, never to the job.
+
+        Measured href shape, trimmed of its tracking parameters.
+        """
+        assert classify_link(
+            "https://www.linkedin.com/jobs/search-results/"
+            "?keywords=Product+Owner&origin=JobSearchOrigin_JOB_DETAILS_SIMILAR_JOBS_CARD"
+            "&currentJobId=4458959237&originToLandingJobPostings=4458959237"
+        ) == ("job", "/jobs/view/4458959237/")
+        assert classify_link(
+            "https://www.linkedin.com/jobs/search/?currentJobId=4458959237"
+        ) == ("job", "/jobs/view/4458959237/")
+
+    def test_a_search_link_without_a_selected_job_is_not_a_job(self):
+        """The module's "See more jobs like this" link is a search, not a job."""
+        assert (
+            classify_link(
+                "https://www.linkedin.com/jobs/search-results/"
+                "?keywords=Product+Owner&origin=JobSearchOrigin_JOB_DETAILS_SIMILAR_JOBS_SEE_MORE"
+            )
+            is None
+        )
+        assert (
+            classify_link(
+                "https://www.linkedin.com/jobs/search-results/"
+                "?currentJobId=%D9%A4%D9%A2%D9%A5"
+            )
+            is None
+        )
+
     def test_messaging_thread_url(self):
         result = classify_link(
             "https://www.linkedin.com/messaging/thread/2-NjAwMDAyMDEtZWVh/"

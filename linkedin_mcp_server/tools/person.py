@@ -11,53 +11,65 @@ from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from linkedin_mcp_server.callbacks import MCPContextProgressCallback
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
 from linkedin_mcp_server.scraping import parse_person_sections
-from linkedin_mcp_server.scraping.extractor import FilterValidationError
-from linkedin_mcp_server.scraping.usernames import normalize_linkedin_username
+from linkedin_mcp_server.scraping.contracts import FilterValidationError
+from linkedin_mcp_server.scraping.identifiers import normalize_person_identifier
+from linkedin_mcp_server.scraping.search_urls import build_people_search_url
 
 logger = logging.getLogger(__name__)
 
 
-def _require_username(value: str | None, *, tool_name: str) -> str:
-    """Normalize a LinkedIn vanity or raise ToolError for bad agent input."""
-    username = normalize_linkedin_username(value)
-    if username is None:
-        raise ToolError(
-            f"Invalid linkedin_username {value!r}. "
-            "Pass a bare vanity (e.g. 'williamhgates') or a full "
-            "https://www.linkedin.com/in/... profile URL."
-        )
-    return username
+def _coerce_str_list(value: Any) -> Any:
+    """Accept a string where a list of strings is declared.
 
+    ``network`` is published as ``anyOf: [array, null]``, which is a correct
+    JSON Schema. Some MCP clients collapse an ``anyOf``-with-null union to an
+    untyped ``{}`` and then transmit the value as a string, so the array the
+    caller wrote never arrives as one and pydantic rejects it (#739).
 
-def _coerce_str_list(value: list[str] | str | None) -> list[str] | None:
-    """Coerce a list-valued tool argument that a client sent as a string.
+    Coercing at the tool boundary keeps the transport quirk here and leaves
+    ``LinkedInExtractor.search_people`` strictly ``list[str]``. Only the
+    container shape is repaired; token values are still validated downstream,
+    so an invalid token fails with the same message it always did.
 
-    Some MCP clients flatten ``list[str] | None`` parameters to plain
-    strings (e.g. '["F"]' or "F" or "F,S"). Accept JSON-array strings,
-    comma-separated strings, and bare tokens; pass lists through unchanged.
+    Clients also send numeric ids (``geo_urn``) as JSON numbers, e.g. the
+    string ``'[101728296]'``. Integers become their decimal string; a bool,
+    float, null or nested value is left as it is so pydantic still rejects it.
     """
-    if value is None or isinstance(value, list):
+    if isinstance(value, list):
+        return _stringify_ids(value)
+    if not isinstance(value, str):
         return value
-    stripped = value.strip()
-    if not stripped:
-        return None
-    if stripped.startswith("["):
+
+    text = value.strip()
+    if text.startswith("["):
         try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, list):
-            return [str(item) for item in parsed]
-    return [token.strip() for token in stripped.split(",") if token.strip()]
+            decoded = json.loads(text)
+        except ValueError:
+            pass
+        else:
+            if isinstance(decoded, list):
+                return _stringify_ids(decoded)
+
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _stringify_ids(items: list[Any]) -> list[Any]:
+    """Turn integer elements into strings; leave everything else untouched."""
+    return [
+        str(item) if isinstance(item, int) and not isinstance(item, bool) else item
+        for item in items
+    ]
+
+
+StrList = Annotated[list[str], BeforeValidator(_coerce_str_list)]
 
 
 def register_person_tools(
@@ -76,13 +88,12 @@ def register_person_tools(
         ctx: Context,
         sections: str | None = None,
         max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
-        extractor: Any = extractor_depends("get_person_profile"),
     ) -> dict[str, Any]:
         """
         Get a specific person's LinkedIn profile.
 
         Args:
-            linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
+            linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates"). A full profile URL is accepted too and is reduced to the username.
             ctx: FastMCP context for progress reporting
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
@@ -90,40 +101,38 @@ def register_person_tools(
                 Examples: "experience,education", "contact_info", "skills,projects", "honors,languages", "posts", "comments"
                 Default (None) scrapes only the main profile page.
             max_scrolls: Maximum pagination attempts per section to load more content.
-                On most detail sections (experience, certifications, etc.) this is
-                the max number of "Show more" button clicks. The skills section
-                instead wheel-scrolls to load its full list (default budget 25);
-                activity/posts scroll to the bottom. Applies to all sections in
-                this call. Default (None) uses 5 for detail sections, 25 for
-                skills, and 10 for posts. Increase when a profile has many items
-                in a section (e.g., 30+ certifications, max_scrolls=20). To avoid
-                slowing down other sections, request heavy sections separately.
+                On detail sections (experience, certifications, skills, etc.) this
+                is the max number of "Show more" button clicks. On activity/posts/comments
+                it is the max scroll-to-bottom iterations. Applies to all sections
+                in this call. Default (None) uses 5 for detail sections and 10 for
+                posts. Increase when a profile has many items in a section
+                (e.g., 30+ certifications, max_scrolls=20). To avoid slowing down
+                other sections, request heavy sections in a separate call.
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
-            When "skills" is requested the full list is returned (not just the
-            top ~10 LinkedIn shows by default), and result["structured"]["skills"]
-            carries parsed records: {name, endorsements (int), endorsements_display
-            (str, e.g. "99+"), endorsers (list[str])}, in page order.
+            Dict with url, sections (name -> raw text), and optional references and section_errors.
             Sections may be absent if extraction yielded no content for that page.
-            Includes unknown_sections list when unrecognised names are passed.
+            contact_info is read only from an accepted contact-overlay root. If no such root
+            is found, the section is omitted and section_errors explains the failure;
+            underlying profile text and links are never substituted. Existing suspected
+            rate-limit retry and stop behavior is retained.
+            Includes unknown_sections when unrecognised names are passed.
             The LLM should parse the raw text in each section.
         """
         try:
-            username = _require_username(
-                linkedin_username, tool_name="get_person_profile"
-            )
+            linkedin_username = normalize_person_identifier(linkedin_username)
+            extractor = await get_ready_extractor(ctx, tool_name="get_person_profile")
             requested, unknown = parse_person_sections(sections)
 
             logger.info(
                 "Scraping profile: %s (sections=%s)",
-                username,
+                linkedin_username,
                 sections,
             )
 
             cb = MCPContextProgressCallback(ctx)
             result = await extractor.scrape_person(
-                username,
+                linkedin_username,
                 requested,
                 callbacks=cb,
                 max_scrolls=max_scrolls,
@@ -132,10 +141,8 @@ def register_person_tools(
             if unknown:
                 result["unknown_sections"] = unknown
 
-            return annotate_empty_scrape_result(result, tool_name="get_person_profile")
+            return result
 
-        except ToolError:
-            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
@@ -154,11 +161,10 @@ def register_person_tools(
         keywords: str,
         ctx: Context,
         location: str | None = None,
-        network: list[str] | str | None = None,
-        geo_urn: list[str] | str | None = None,
+        network: StrList | None = None,
         current_company: str | None = None,
+        geo_urn: StrList | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 1,
-        extractor: Any = extractor_depends("search_people"),
     ) -> dict[str, Any]:
         """
         Search for people on LinkedIn.
@@ -166,24 +172,13 @@ def register_person_tools(
         Args:
             keywords: Search keywords (e.g., "software engineer", "recruiter at Google")
             ctx: FastMCP context for progress reporting
-            location: Optional free-text location filter. WARNING: LinkedIn
-                frequently ignores this plain URL parameter and returns
-                unfiltered results. For reliable location filtering use
-                geo_urn instead.
+            location: Optional free-text location filter (e.g., "New York").
+                LinkedIn often ignores it; prefer geo_urn.
             network: Optional connection-degree filter. Each element is one of
                 "F" (1st-degree), "S" (2nd-degree), "O" (3rd-degree and beyond).
-                Example: ["F"] to only return 1st-degree connections.
-                Also accepts a JSON-array string ('["F"]') or comma-separated
-                string ("F,S") for clients that flatten list parameters.
-            geo_urn: Optional location facet filter - a list of numeric
-                LinkedIn geo URN ids (e.g. ["101728296"] for Russia,
-                ["101705918"] for Belarus). This is the facet LinkedIn's own
-                UI uses and it filters reliably, unlike the location text
-                parameter. To find an id: run a people search on
-                linkedin.com, apply the Locations filter in the UI, and copy
-                the geoUrn value from the result URL. Also accepts a
-                JSON-array or comma-separated string. Verify the first page
-                of results looks right before acting on them.
+                Example: ["F"] to only return 1st-degree connections. A single
+                token ("F") or a comma-separated string ("F,S") is also
+                accepted, for clients that cannot transmit an array.
             current_company: Optional current-employer filter. LinkedIn's
                 currentCompany facet only filters on the numeric company URN id
                 (e.g. "1115" for SAP); plain company names are accepted by the
@@ -192,25 +187,45 @@ def register_person_tools(
                 exposed under references["about"]. For company-wide employee
                 demographics (location/education/function breakdown) plus a
                 slug-based lookup, use get_company_employees instead.
-            max_pages: Maximum number of result pages to load (1-10, default 1).
-                Each page holds ~10 results. Pagination stops early once a page
-                returns no new people, so over-requesting pages is safe.
+            geo_urn: Optional location facet: numeric LinkedIn geo URN ids,
+                e.g. ["103644278"] for the United States. This is the filter
+                LinkedIn's own Locations facet applies. Find an id by applying
+                that filter on linkedin.com and copying geoUrn from the URL. A
+                single id or a comma-separated string is also accepted.
+            max_pages: Result pages to load, about 10 people each (1-10,
+                default 1). Stops early once a page adds no new profiles.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
-            The LLM should parse the raw text to extract individual people and their profiles.
+            With several pages, search_results separates them with a line
+            holding three dashes.
+            The LLM should parse the raw text to extract individual people and
+            their profiles, and should only take profile links from references.
         """
         try:
-            network = _coerce_str_list(network)
-            geo_urn = _coerce_str_list(geo_urn)
+            # The builder refuses a filter LinkedIn would ignore. Doing it here
+            # keeps that refusal off the browser: get_ready_extractor can install
+            # Chromium or rotate a login before this call would have failed.
+            build_people_search_url(
+                keywords,
+                location=location,
+                network=network,
+                current_company=current_company,
+                geo_urn=geo_urn,
+            )
+        except FilterValidationError as e:
+            raise ToolError(str(e)) from e
+
+        try:
+            extractor = await get_ready_extractor(ctx, tool_name="search_people")
             logger.info(
                 "Searching people: keywords='%s', location='%s', network=%s, "
-                "geo_urn=%s, current_company='%s', max_pages=%d",
+                "current_company='%s', geo_urn=%s, max_pages=%d",
                 keywords,
                 location,
                 network,
-                geo_urn,
                 current_company,
+                geo_urn,
                 max_pages,
             )
 
@@ -223,9 +238,10 @@ def register_person_tools(
                     keywords,
                     location,
                     network=network,
-                    geo_urn=geo_urn,
                     current_company=current_company,
+                    geo_urn=geo_urn,
                     max_pages=max_pages,
+                    tool_timeout=tool_timeout,
                 )
             except FilterValidationError as e:
                 # Validation messages carry actionable detail; surface
@@ -235,11 +251,7 @@ def register_person_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return annotate_empty_scrape_result(
-                result,
-                tool_name="search_people",
-                required_sections=("search_results",),
-            )
+            return result
 
         except ToolError:
             # Already a properly formatted client-facing error; do not
@@ -263,7 +275,6 @@ def register_person_tools(
         linkedin_username: str,
         ctx: Context,
         note: str | None = None,
-        extractor: Any = extractor_depends("connect_with_person"),
     ) -> dict[str, Any]:
         """
         Send a LinkedIn connection request or accept an incoming one.
@@ -272,36 +283,61 @@ def register_person_tools(
         prompt for user confirmation before execution.
 
         Args:
-            linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
+            linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates"). A full profile URL is accepted too and is reduced to the username.
             ctx: FastMCP context for progress reporting
-            note: Optional note to include with the invitation
+            note: Optional note to include with the invitation. LinkedIn takes at most 200 characters without Premium and 300 with it (an emoji counts as two); a longer note is refused as note_too_long and nothing is sent.
 
         Returns:
-            Dict with url, status, message, and note_sent.
-            Statuses: pending, already_connected, connect_unavailable,
-            note_required, unavailable, send_failed, note_not_supported,
-            custom_note_limit_reached, connected, accepted, or
-            incoming_request_ambiguous.
+            Dict with url, status, message, and note_sent, plus note_limit
+            when the invite dialog said how long a note it takes.
+            Statuses: pending, already_connected, follow_only,
+            connect_unavailable, unavailable, send_failed,
+            note_not_supported, custom_note_limit_reached, note_required,
+            note_too_long, incoming_request_ambiguous, connected, or
+            accepted.
 
-            Follow-primary / creator-mode profiles are attempted via the
-            custom-invite deeplink (they no longer stop at a ``follow_only``
-            status). When status is ``custom_note_limit_reached`` LinkedIn
-            rejected personalized invite notes because the free note quota
-            for the account is exhausted. The ``message`` is the raw Premium
-            dialog text read from LinkedIn. ``incoming_request_ambiguous``
-            means the profile's action row structurally matched an incoming
-            connection request, but a ``note`` was also provided (Accept
-            never takes one) and the row could not be disproven as a
-            mis-detected creator-mode profile - call again without a note
-            to accept, or verify manually.
+            ``connected`` means this call submitted the invitation and the
+            re-read profile no longer exposes Connect; it does not mean a
+            1st-degree connection. The ``message`` names the state read after
+            the send, normally pending. ``pending`` means an invitation was
+            already outstanding before the call, and ``accepted`` means an
+            incoming invitation was accepted.
+
+            When status is ``custom_note_limit_reached`` LinkedIn rejected
+            personalized invite notes because the free note quota for the
+            account is exhausted. The ``message`` is the raw Premium dialog
+            text read from LinkedIn.
+
+            ``note_required`` means LinkedIn only takes an invitation with a
+            note for this profile: the invite dialog kept Send disabled while
+            its note field was empty. Nothing was sent; call again with a
+            note.
+
+            ``note_too_long`` means the note did not fit. Over 300 characters
+            it is refused before any page is opened. Otherwise the invite
+            dialog's note field kept only part of it (LinkedIn cuts a note
+            to the account's limit without a sound), so the dialog was
+            closed without sending and ``note_limit`` gives the limit to
+            shorten to. ``note_sent`` is only ever True for a note the field
+            held whole.
+
+            ``incoming_request_ambiguous`` means the profile looks like an
+            incoming request but a note was given. Accept takes no note, and
+            a creator-mode profile's Follow button has the same shape, so
+            nothing was clicked. Call again without a note to accept.
+
+            A status of ``outcome_unknown`` comes from the transport rather
+            than the page: the browser process went away with the call in
+            flight, so whether the invitation was sent is unknown. It carries
+            ``retry_safe: False`` and no ``note_sent``; check the profile
+            before calling again, because a repeat may invite twice.
         """
         try:
-            username = _require_username(
-                linkedin_username, tool_name="connect_with_person"
-            )
+            linkedin_username = normalize_person_identifier(linkedin_username)
+            extractor = await get_ready_extractor(ctx, tool_name="connect_with_person")
             logger.info(
                 "Connecting with person: %s (note=%s)",
-                username,
+                linkedin_username,
                 note is not None,
             )
 
@@ -312,7 +348,7 @@ def register_person_tools(
             )
 
             result = await extractor.connect_with_person(
-                username,
+                linkedin_username,
                 note=note,
             )
 
@@ -320,8 +356,6 @@ def register_person_tools(
 
             return result
 
-        except ToolError:
-            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
@@ -339,7 +373,6 @@ def register_person_tools(
     async def get_sidebar_profiles(
         linkedin_username: str,
         ctx: Context,
-        extractor: Any = extractor_depends("get_sidebar_profiles"),
     ) -> dict[str, Any]:
         """
         Get profile links from sidebar recommendation sections on a LinkedIn profile page.
@@ -350,7 +383,7 @@ def register_person_tools(
         linkedin.com/premium are skipped.
 
         Args:
-            linkedin_username: LinkedIn username of the profile page to scrape
+            linkedin_username: LinkedIn username of the profile page to scrape; a full profile URL is accepted too
                 (e.g., "stickerdaniel", "williamhgates")
             ctx: FastMCP context for progress reporting
 
@@ -359,25 +392,20 @@ def register_person_tools(
             /in/username/ paths. Only sections present on the page are included.
         """
         try:
-            username = _require_username(
-                linkedin_username, tool_name="get_sidebar_profiles"
-            )
-            logger.info("Getting sidebar profiles for: %s", username)
+            linkedin_username = normalize_person_identifier(linkedin_username)
+            extractor = await get_ready_extractor(ctx, tool_name="get_sidebar_profiles")
+            logger.info("Getting sidebar profiles for: %s", linkedin_username)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Extracting sidebar profiles"
             )
 
-            result = await extractor.get_sidebar_profiles(username)
+            result = await extractor.get_sidebar_profiles(linkedin_username)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return annotate_empty_scrape_result(
-                result, tool_name="get_sidebar_profiles"
-            )
+            return result
 
-        except ToolError:
-            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
@@ -396,7 +424,6 @@ def register_person_tools(
         ctx: Context,
         sections: str | None = None,
         max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
-        extractor: Any = extractor_depends("get_my_profile"),
     ) -> dict[str, Any]:
         """
         Get the authenticated user's own LinkedIn profile.
@@ -410,18 +437,22 @@ def register_person_tools(
             sections: Comma-separated list of extra sections to scrape.
                 The main profile page is always included.
                 Available sections: experience, education, interests, honors, languages, certifications, skills, projects, contact_info, posts, comments
-                Examples: "experience,education", "contact_info", "posts,comments"
+                Examples: "experience,education", "contact_info", "skills,projects"
                 Default (None) scrapes only the main profile page.
             max_scrolls: Maximum pagination attempts per section (same as get_person_profile).
 
         Returns:
-            Dict with url, sections (name -> raw text), and optional references.
-            When "skills" is requested the full list is returned (not just the
-            top ~10), plus result["structured"]["skills"] with parsed records
-            {name, endorsements, endorsements_display, endorsers}.
+            Dict with url, sections (name -> raw text), and optional references and section_errors.
             The url field reflects the resolved profile URL, revealing the real username.
+            Sections may be absent if extraction yielded no content for that page.
+            contact_info is read only from an accepted contact-overlay root. If no such root
+            is found, the section is omitted and section_errors explains the failure;
+            underlying profile text and links are never substituted. Existing suspected
+            rate-limit retry and stop behavior is retained.
+            Includes unknown_sections when unrecognised names are passed.
         """
         try:
+            extractor = await get_ready_extractor(ctx, tool_name="get_my_profile")
             requested, unknown = parse_person_sections(sections)
 
             logger.info("Scraping own profile (sections=%s)", sections)
@@ -436,7 +467,7 @@ def register_person_tools(
             if unknown:
                 result["unknown_sections"] = unknown
 
-            return annotate_empty_scrape_result(result, tool_name="get_my_profile")
+            return result
 
         except AuthenticationError as e:
             try:

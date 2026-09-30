@@ -5,17 +5,18 @@ Uses innerText extraction for resilient job data capture.
 """
 
 import logging
+import time
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
 from pydantic import Field
 
-from linkedin_mcp_server.common_utils import apply_output_mode
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
+from linkedin_mcp_server.result_export import apply_output_mode, check_output_target
+from linkedin_mcp_server.scraping.identifiers import normalize_job_id
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +29,7 @@ def register_job_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Job Details",
-        annotations={
-            "readOnlyHint": False,
-            "destructiveHint": True,
-            "idempotentHint": False,
-            "openWorldHint": True,
-        },
+        annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
     )
     async def get_job_details(
@@ -41,7 +37,6 @@ def register_job_tools(
         ctx: Context,
         output_path: str | None = None,
         output_mode: Literal["display", "file", "both"] = "display",
-        extractor: Any = extractor_depends("get_job_details"),
     ) -> dict[str, Any]:
         """
         Get job details for a specific job posting on LinkedIn.
@@ -49,19 +44,32 @@ def register_job_tools(
         Args:
             job_id: LinkedIn job ID (e.g., "4252026496", "3856789012")
             ctx: FastMCP context for progress reporting
-            output_path: Export path for file/both mode. Relative paths resolve
-                under ~/.linkedin-mcp/exports; absolute paths must remain inside
-                that directory. Extension drives format: .json dumps the full
-                dict; anything else writes a readable text rendering.
-            output_mode: 'display' (default) returns content and writes nothing;
-                'file' writes to output_path and returns a compact confirmation;
-                'both' writes and returns the full content plus saved_path.
+            output_path: File to write the result to when output_mode is "file"
+                or "both". Relative paths resolve under
+                ~/.linkedin-mcp/exports; absolute paths must stay inside that
+                directory ("~" is expanded first). Parent folders are created.
+                An existing file is never overwritten. A .json name receives
+                the full result; any other name receives url, sections and
+                job ids as text.
+            output_mode: "display" (default) returns the result and writes
+                nothing; "file" writes it and returns only saved_path, url,
+                job_ids, total, promoted_job_ids, section_errors and
+                section_names; "both" returns the full result plus saved_path.
+                The path is checked before the browser starts.
 
         Returns:
             Dict with url, sections (name -> raw text), and optional references.
-            The LLM should parse the raw text to extract job details.
+            The LLM should parse the raw text to extract job details. Jobs in
+            the posting's "More jobs" list are references with context
+            "similar job"; their ids work with get_job_details.
+            section_errors.job_posting.error_type "description_missing" means
+            the captured text lacks the expected "About the job" heading.
+            The text is kept but may be incomplete; calling again may return more.
         """
         try:
+            job_id = normalize_job_id(job_id)
+            check_output_target(output_path, output_mode)
+            extractor = await get_ready_extractor(ctx, tool_name="get_job_details")
             logger.info("Scraping job: %s", job_id)
 
             await ctx.report_progress(
@@ -69,7 +77,6 @@ def register_job_tools(
             )
 
             result = await extractor.scrape_job(job_id)
-            annotate_empty_scrape_result(result, tool_name="get_job_details")
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -86,12 +93,7 @@ def register_job_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Search Jobs",
-        annotations={
-            "readOnlyHint": False,
-            "destructiveHint": True,
-            "idempotentHint": False,
-            "openWorldHint": True,
-        },
+        annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "search"},
     )
     async def search_jobs(
@@ -107,7 +109,6 @@ def register_job_tools(
         sort_by: str | None = None,
         output_path: str | None = None,
         output_mode: Literal["display", "file", "both"] = "display",
-        extractor: Any = extractor_depends("search_jobs"),
     ) -> dict[str, Any]:
         """
         Search for jobs on LinkedIn.
@@ -125,21 +126,39 @@ def register_job_tools(
             work_type: Filter by work type, comma-separated (on_site, remote, hybrid)
             easy_apply: Only show Easy Apply jobs (default false)
             sort_by: Sort results (date, relevance)
-            output_path: Export path for file/both mode. Relative paths resolve
-                under ~/.linkedin-mcp/exports; absolute paths must remain inside
-                that directory. Extension drives format: .json dumps the full
-                dict; anything else writes a readable text rendering.
-            output_mode: 'display' (default) returns content and writes nothing;
-                'file' writes and returns a compact confirmation (url + job_ids
-                + section names); 'both' returns full content plus saved_path.
+            output_path: File to write the result to when output_mode is "file"
+                or "both". Relative paths resolve under
+                ~/.linkedin-mcp/exports; absolute paths must stay inside that
+                directory ("~" is expanded first). Parent folders are created.
+                An existing file is never overwritten. A .json name receives
+                the full result; any other name receives url, sections and
+                job ids as text.
+            output_mode: "display" (default) returns the result and writes
+                nothing; "file" writes it and returns only saved_path, url,
+                job_ids, total, promoted_job_ids, section_errors and
+                section_names; "both" returns the full result plus saved_path.
+                The path is checked before the browser starts.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
-            numeric job ID strings usable with get_job_details),
-            job_listings (structured card metadata per result), and optional
-            references.
+            numeric job ID strings usable with get_job_details), and optional references.
+            total ({count, exact}) is the result count LinkedIn advertises,
+            with exact false for a lower bound such as "1,000+".
+            promoted_job_ids is the subset of job_ids LinkedIn marks as
+            promoted, present only when every page could be read.
+            A search with no matches returns empty job_ids and a
+            section_errors entry of type no_matching_jobs, rather than the
+            unrelated recommendations LinkedIn shows in its place.
         """
         try:
+            # Before the browser, because FastMCP is already timing this call
+            # and the extractor's budget is a fraction of the same figure. A
+            # cold start that spends three of ten seconds left it planning
+            # against eight it no longer had, and the call was cancelled with
+            # every page it had gathered.
+            check_output_target(output_path, output_mode)
+            started = time.monotonic()
+            extractor = await get_ready_extractor(ctx, tool_name="search_jobs")
             logger.info(
                 "Searching jobs: keywords='%s', location='%s', max_pages=%d",
                 keywords,
@@ -161,8 +180,9 @@ def register_job_tools(
                 work_type=work_type,
                 easy_apply=easy_apply,
                 sort_by=sort_by,
+                # What is left of the figure FastMCP cancels this call on.
+                tool_timeout=max(0.0, tool_timeout - (time.monotonic() - started)),
             )
-            annotate_empty_scrape_result(result, tool_name="search_jobs")
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
@@ -179,12 +199,7 @@ def register_job_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Saved Jobs",
-        annotations={
-            "readOnlyHint": False,
-            "destructiveHint": True,
-            "idempotentHint": False,
-            "openWorldHint": True,
-        },
+        annotations={"readOnlyHint": True, "openWorldHint": True},
         tags={"job", "scraping"},
     )
     async def get_saved_jobs(
@@ -192,7 +207,6 @@ def register_job_tools(
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
         output_path: str | None = None,
         output_mode: Literal["display", "file", "both"] = "display",
-        extractor: Any = extractor_depends("get_saved_jobs"),
     ) -> dict[str, Any]:
         """
         List job postings saved by the authenticated LinkedIn user.
@@ -202,20 +216,26 @@ def register_job_tools(
         Args:
             ctx: FastMCP context for progress reporting
             max_pages: Maximum number of saved-jobs pages to load (1-10, default 3)
-            output_path: Export path for file/both mode. Relative paths resolve
-                under ~/.linkedin-mcp/exports; absolute paths must remain inside
-                that directory. Extension drives format: .json dumps the full
-                dict; anything else writes a readable text rendering.
-            output_mode: 'display' (default) returns content and writes nothing;
-                'file' writes and returns a compact confirmation; 'both' returns
-                full content plus saved_path.
+            output_path: File to write the result to when output_mode is "file"
+                or "both". Relative paths resolve under
+                ~/.linkedin-mcp/exports; absolute paths must stay inside that
+                directory ("~" is expanded first). Parent folders are created.
+                An existing file is never overwritten. A .json name receives
+                the full result; any other name receives url, sections and
+                job ids as text.
+            output_mode: "display" (default) returns the result and writes
+                nothing; "file" writes it and returns only saved_path, url,
+                job_ids, total, promoted_job_ids, section_errors and
+                section_names; "both" returns the full result plus saved_path.
+                The path is checked before the browser starts.
 
         Returns:
             Dict with url, sections (name -> raw text), job_ids (list of
-            numeric job ID strings usable with get_job_details), and optional
-            references.
+            numeric job ID strings usable with get_job_details), and optional references.
         """
         try:
+            check_output_target(output_path, output_mode)
+            extractor = await get_ready_extractor(ctx, tool_name="get_saved_jobs")
             logger.info("Fetching saved jobs (max_pages=%d)", max_pages)
 
             await ctx.report_progress(
@@ -223,7 +243,6 @@ def register_job_tools(
             )
 
             result = await extractor.get_saved_jobs(max_pages=max_pages)
-            annotate_empty_scrape_result(result, tool_name="get_saved_jobs")
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 

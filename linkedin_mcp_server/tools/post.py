@@ -17,10 +17,9 @@ from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
-from linkedin_mcp_server.scraping.extractor import FilterValidationError
+from linkedin_mcp_server.scraping.contracts import FilterValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,6 @@ def register_post_tools(
         ctx: Context,
         date_posted: str | None = None,
         max_pages: Annotated[int, Field(ge=1, le=10)] = 3,
-        extractor: Any = extractor_depends("search_posts"),
     ) -> dict[str, Any]:
         """
         Search LinkedIn posts/content globally by keyword (the "Posts" tab).
@@ -56,8 +54,9 @@ def register_post_tools(
             keywords: Search keywords (e.g., "Buscamos Unity", "AI automation hiring")
             ctx: FastMCP context for progress reporting
             date_posted: Optional recency filter. One of "past-24h",
-                "past-week", "past-month" (underscore aliases like
-                "past_week" also accepted). Omit for any time.
+                "past-week", "past-month"; the "past_24_hours" / "past_week" /
+                "past_month" spellings used by search_jobs are accepted too.
+                Omit for any time.
             max_pages: Scroll depth as result "pages" of ~5 scrolls each
                 (1-10, default 3). Content search is an infinite scroll, so
                 this caps how far the page is scrolled rather than fetching
@@ -65,12 +64,17 @@ def register_post_tools(
 
         Returns:
             Dict with url, sections (search_results -> raw text), and optional
-            references (post permalinks, authors, companies) and section_errors.
-            The LLM should parse the raw text to extract each post's author,
+            references (post authors, companies, linked jobs, and kind
+            "feed_post" permalinks read from the page's payload responses —
+            /feed/update/<urn>/ or /posts/<slug>, both valid permalinks) and
+            section_errors. The DOM carries no per-post permalink anchors;
+            captured permalinks are not aligned to result order. The LLM
+            should parse the raw text to extract each post's author,
             headline/role, company, body, posted date, and reaction/comment
             counts.
         """
         try:
+            extractor = await get_ready_extractor(ctx, tool_name="search_posts")
             logger.info(
                 "Searching posts: keywords='%s', date_posted='%s', max_pages=%d",
                 keywords,
@@ -96,7 +100,7 @@ def register_post_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return annotate_empty_scrape_result(result, tool_name="search_posts")
+            return result
 
         except ToolError:
             # Already a properly formatted client-facing error; do not log it

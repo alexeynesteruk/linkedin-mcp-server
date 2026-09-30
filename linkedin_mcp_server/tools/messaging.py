@@ -8,36 +8,29 @@ import logging
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
-from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import (
     AuthenticationError,
-    LinkedInScraperException,
+    InvalidReferenceError,
 )
-from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
-from linkedin_mcp_server.scraping.usernames import normalize_linkedin_username
+from linkedin_mcp_server.scraping.contracts import (
+    SEND_INTERRUPTED_WARNING,
+    THREAD_REPLY_PROFILE_URN_REFUSAL,
+    refuse_an_invalid_message,
+    refuse_an_invalid_thread_message,
+)
+from linkedin_mcp_server.scraping.identifiers import (
+    normalize_person_identifier,
+    normalize_profile_urn,
+    normalize_reply_thread_id,
+    normalize_thread_id,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def _optional_username(value: str | None) -> str | None:
-    """Normalize an optional LinkedIn vanity; raise ToolError if non-empty but bad."""
-    if value is None:
-        return None
-    if not str(value).strip():
-        return None
-    username = normalize_linkedin_username(value)
-    if username is None:
-        raise ToolError(
-            f"Invalid linkedin_username {value!r}. "
-            "Pass a bare vanity (e.g. 'williamhgates') or a full "
-            "https://www.linkedin.com/in/... profile URL."
-        )
-    return username
 
 
 def register_messaging_tools(
@@ -57,26 +50,37 @@ def register_messaging_tools(
         inbox_filter: Literal[
             "none", "unread", "jobs", "connections", "inmail", "starred"
         ] = "none",
-        extractor: Any = extractor_depends("get_inbox"),
     ) -> dict[str, Any]:
         """
         List recent conversations from the LinkedIn messaging inbox.
 
+        The returned inbox text and result URL come from the ordinary messaging
+        inbox. Click-derived conversation references are collected separately
+        after requesting the compose page, which avoided inbox auto-opening on
+        the measured variant. A row contributes a click-derived reference only
+        after its click is followed by an observed different thread path. The
+        scan stops at its first unverifiable click. section_errors.inbox
+        reports that stop or unavailable scan rows; captured inbox text and
+        independently extracted anchors retain their normal handling. A known
+        thread_id can bypass row attribution when calling get_conversation.
+
         Args:
             ctx: FastMCP context for progress reporting
             limit: Maximum number of conversations to load (1-50, default 20)
-            inbox_filter: Filter conversations by category. Options: "none" (all
-                conversations), "unread", "jobs", "connections", "inmail",
-                "starred". Default "none". Filter buttons are matched against
-                LinkedIn's English UI text; non-English sessions (e.g. German,
-                where "Unread" is "Ungelesen") will not match, and the failure
-                is surfaced as a `filter_failed` entry in `section_errors`
-                rather than silently returning unfiltered results.
+            inbox_filter: Narrow the list to one category: "none" (all
+                conversations, the default), "unread", "jobs", "connections",
+                "inmail" or "starred". The filter pills are matched by their
+                English names. When a pill cannot be activated, the result is
+                the unfiltered inbox text with no click-derived references and
+                section_errors.inbox.error_type "inbox_filter_failed".
 
         Returns:
-            Dict with url, sections (inbox -> raw text), and optional references.
+            Dict with url, sections (inbox -> raw text), optional references, and
+            optional section_errors (inbox -> why click-derived references are
+            incomplete).
         """
         try:
+            extractor = await get_ready_extractor(ctx, tool_name="get_inbox")
             logger.info(
                 "Fetching inbox (limit=%d, inbox_filter=%s)", limit, inbox_filter
             )
@@ -85,15 +89,16 @@ def register_messaging_tools(
                 progress=0, total=100, message="Loading messaging inbox"
             )
 
-            result = await extractor.get_inbox(limit=limit, inbox_filter=inbox_filter)
+            if inbox_filter == "none":
+                result = await extractor.get_inbox(limit=limit)
+            else:
+                result = await extractor.get_inbox(
+                    limit=limit, inbox_filter=inbox_filter
+                )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return annotate_empty_scrape_result(
-                result,
-                tool_name="get_inbox",
-                required_sections=("inbox",),
-            )
+            return result
 
         except AuthenticationError as e:
             try:
@@ -106,7 +111,11 @@ def register_messaging_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Get Conversation",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        # Not read-only, though it reads: resolving a username enumerates the
+        # inbox by click-visiting rows, and LinkedIn marks a visited row as read.
+        # The docstring below has always said so. An unread message the user has
+        # not seen is state, and losing it is not something a reader should do.
+        annotations={"openWorldHint": True},
         tags={"messaging", "scraping"},
     )
     async def get_conversation(
@@ -114,7 +123,6 @@ def register_messaging_tools(
         linkedin_username: str | None = None,
         thread_id: str | None = None,
         index: Annotated[int, Field(ge=0)] = 0,
-        extractor: Any = extractor_depends("get_conversation"),
     ) -> dict[str, Any]:
         """
         Read a specific messaging conversation.
@@ -128,9 +136,18 @@ def register_messaging_tools(
         path. Each visit selects the row in the LinkedIn UI and may mark it
         as read. Pass thread_id directly to skip this enumeration.
 
+        Username resolution scans matching rows from a requested compose page
+        first. Its indexable sequence ends before the first unresolved click,
+        missing matching click target, or admitted row that fails the existing
+        exact display-name check. An index outside that verified prefix is
+        refused with its reason. Search is a fallback only when the inbox scan
+        has no observed matching result and no such barrier; it never
+        substitutes a result after a stopped or gapped inbox scan. Pass a known
+        thread_id to bypass username/index resolution.
+
         Args:
             ctx: FastMCP context for progress reporting
-            linkedin_username: LinkedIn username of the conversation participant
+            linkedin_username: LinkedIn username of the conversation participant; a full profile URL is accepted too
             thread_id: LinkedIn messaging thread ID
             index: 0-based selector for which thread to open when the
                 participant has multiple threads (e.g. an organic 1-on-1 plus
@@ -140,19 +157,22 @@ def register_messaging_tools(
         Returns:
             Dict with url, sections (conversation -> raw text), and optional references.
         """
+        if not linkedin_username and not thread_id:
+            raise_tool_error(
+                InvalidReferenceError(
+                    "Provide at least one of linkedin_username or thread_id"
+                ),
+                "get_conversation",
+            )
         try:
-            username = _optional_username(linkedin_username)
-            if not username and not thread_id:
-                raise_tool_error(
-                    LinkedInScraperException(
-                        "Provide at least one of linkedin_username or thread_id"
-                    ),
-                    "get_conversation",
-                )
-
+            if thread_id:
+                thread_id = normalize_thread_id(thread_id)
+            else:
+                linkedin_username = normalize_person_identifier(linkedin_username or "")
+            extractor = await get_ready_extractor(ctx, tool_name="get_conversation")
             logger.info(
                 "Fetching conversation: username=%s, thread_id=%s, index=%d",
-                username,
+                linkedin_username,
                 thread_id,
                 index,
             )
@@ -162,21 +182,15 @@ def register_messaging_tools(
             )
 
             result = await extractor.get_conversation(
-                linkedin_username=username,
+                linkedin_username=linkedin_username,
                 thread_id=thread_id,
                 index=index,
             )
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return annotate_empty_scrape_result(
-                result,
-                tool_name="get_conversation",
-                required_sections=("conversation",),
-            )
+            return result
 
-        except ToolError:
-            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)
@@ -188,17 +202,26 @@ def register_messaging_tools(
     @mcp.tool(
         timeout=tool_timeout,
         title="Search Conversations",
-        annotations={"readOnlyHint": True, "openWorldHint": True},
+        # Same reason as `get_conversation`: enumerating result rows selects them
+        # in LinkedIn's UI, which can mark them read. Its own `limit` argument is
+        # documented in those terms.
+        annotations={"openWorldHint": True},
         tags={"messaging", "search"},
     )
     async def search_conversations(
         keywords: str,
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=50)] = 20,
-        extractor: Any = extractor_depends("search_conversations"),
     ) -> dict[str, Any]:
         """
         Search messages by keyword.
+
+        Click-derived references require an observed different thread path
+        after each row click. The first unverifiable click stops further row
+        clicks and is reported in section_errors.search_results. Already-read
+        text and independently extracted anchors retain their normal handling.
+        A result without that diagnostic does not guarantee that every
+        conversation was enumerated.
 
         Args:
             keywords: Search keywords to filter conversations
@@ -209,9 +232,12 @@ def register_messaging_tools(
                 a low cap is preferable for noisy queries.
 
         Returns:
-            Dict with url, sections (search_results -> raw text), and optional references.
+            Dict with url, sections (search_results -> raw text), optional
+            references, and optional section_errors (search_results -> where
+            click-derived references stopped).
         """
         try:
+            extractor = await get_ready_extractor(ctx, tool_name="search_conversations")
             logger.info(
                 "Searching conversations: keywords='%s', limit=%d", keywords, limit
             )
@@ -224,11 +250,7 @@ def register_messaging_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return annotate_empty_scrape_result(
-                result,
-                tool_name="search_conversations",
-                required_sections=("search_results",),
-            )
+            return result
 
         except AuthenticationError as e:
             try:
@@ -251,69 +273,161 @@ def register_messaging_tools(
         ctx: Context,
         profile_urn: str | None = None,
         thread_id: str | None = None,
-        extractor: Any = extractor_depends("send_message"),
     ) -> dict[str, Any]:
         """
-        Send a message to a LinkedIn user or reply to an existing thread.
+        Send a new message to a LinkedIn user, or reply inside an existing thread.
 
-        When ``thread_id`` is provided, the tool replies inline to the existing
-        messaging thread — use this to reply to InMail/recruiter conversations.
-        When ``thread_id`` is omitted, the tool opens a profile compose overlay
-        to send a direct message. That profile-based path may create a separate
-        DM instead of replying to an existing thread (#483).
+        To reply in an existing conversation, such as a recruiter or InMail
+        thread, pass its thread_id. The reply is addressed by thread_id alone:
+        the tool opens /messaging/thread/<thread_id>/, stops unless LinkedIn
+        lands exactly there, and types only into the composer docked in that
+        thread's own pane. It never falls back to profile-based compose, so a
+        thread LinkedIn does not open returns ``thread_unavailable`` rather than
+        starting a separate DM. With thread_id, linkedin_username is ignored
+        (neither validated nor used; the schema still requires a value) and
+        profile_urn must be omitted. Thread IDs come from the
+        /messaging/thread/<id>/ references of get_inbox, get_conversation and
+        search_conversations; the reference itself is accepted.
 
-        The recipient must be directly messageable when using profile-based
-        sending. This is a write operation when confirm_send is True.
+        Without thread_id, profile-based targeting opens LinkedIn's compose
+        flow. It is not a safe reply path for an existing recruiter/InMail or
+        messaging thread: it may create a separate DM even after you inspect
+        that thread with get_conversation or search_conversations. Those tools
+        only read an existing thread; pass its thread_id here to reply in it.
+
+        The recipient must be directly messageable from the profile page. If
+        LinkedIn does not expose a normal Message action, use connect_with_person
+        first, then retry send_message only after the connection request is
+        accepted. A ``status`` of ``enter_to_send_enabled`` means the account
+        has LinkedIn's "Press Enter to Send" preference on, which hides the Send
+        button; relay the returned instructions to the user, who switches it to
+        "Click Send to send" before retrying. The dry run (confirm_send False)
+        reports it too. Recipient authorization comes from validating one
+        recipient-specific Message action carrying the target URN, then following
+        its browser navigation and pinning the exact final route. Visible profile
+        links or recipient URNs in the composer are optional corroboration; any
+        contradiction fails closed. A thread reply pins the thread route the same
+        way, and a local identity its pane header does not also show fails
+        closed. No Voyager or other private API is used. This is a write
+        operation when confirm_send is True.
+
+        A message may span several lines and paragraphs: write real line
+        breaks, not escape sequences. Each line break is entered with the
+        composer's line-break command, the one Shift+Enter runs, and never as a
+        key press, so it cannot trigger an Enter-to-send and the whole message
+        is sent as one message. A blank line between paragraphs is kept.
 
         Args:
-            linkedin_username: LinkedIn username of the recipient. Ignored when
-                thread_id is provided.
-            message: The message text to send
+            linkedin_username: LinkedIn username of the recipient; a full
+                profile URL is accepted too. Ignored when thread_id is given.
+            message: Message text to send. Line breaks (LF or CRLF) are kept, so
+                a multi-paragraph message is sent whole; blank lines before the
+                first line or after the last, and spaces at the end of a line,
+                are dropped. Every other C0 control character, including tab
+                and a CR outside CRLF, and DEL are rejected.
             confirm_send: Must be True to send the message
             ctx: FastMCP context for progress reporting
-            profile_urn: Optional profile URN (e.g. ACoAAB...) to construct the
-                compose URL directly. Ignored when thread_id is provided.
-            thread_id: Optional LinkedIn messaging thread ID. When provided, the
-                tool replies inline to the existing thread instead of creating
-                a new compose overlay. Obtain thread IDs via get_conversation
-                or search_conversations.
+            profile_urn: Optional profile URN (e.g. ACoAAB...) to verify against
+                the URN exposed by the loaded profile before opening its Message
+                action. It never bypasses recipient verification. Obtain via
+                get_person_profile. Refused together with thread_id. Note: inbox
+                may not always show all messages; use search_conversations as a
+                fallback.
+            thread_id: Optional id of an existing messaging thread to reply in,
+                or its /messaging/thread/<id>/ reference, exactly as get_inbox,
+                get_conversation or search_conversations returned it. When
+                given, the reply goes into that thread or nowhere:
+                linkedin_username is ignored and profile_urn must be omitted.
 
         Returns:
-            Dict with url, status, message, recipient_selected, and sent.
+            Dict with url, status, message, recipient_selected, sent, and
+            retry_safe. ``sent`` is true only after the thread shows the submitted
+            text under a new server message ID (or its DOM node gains a
+            different event ID); this does not claim delivery or read status.
+            It is false both where nothing was submitted and
+            where the outcome is unknown. ``retry_safe`` separates the two: it
+            is false from the moment a submission is attempted, and calling
+            again while it is
+            false can deliver the message twice. A ``status`` of
+            ``outcome_unknown`` is that same warning from the transport rather
+            than the page: the browser process went away with the call in
+            flight, so ``sent`` is absent instead of false and only LinkedIn
+            itself can say whether the message left. A ``status`` of
+            ``thread_unavailable`` means LinkedIn did not open the requested
+            thread and nothing was typed.
         """
         try:
-            # Normalize vanity when present. Required unless replying by thread_id.
-            username = _optional_username(linkedin_username)
-            if not thread_id and username is None:
-                raise ToolError(
-                    f"Invalid linkedin_username {linkedin_username!r}. "
-                    "Pass a bare vanity (e.g. 'williamhgates') or a full "
-                    "https://www.linkedin.com/in/... profile URL."
+            # Answered before a session is acquired. Caller-owned message
+            # validation needs no browser, and acquiring one can spend a login
+            # attempt and come back as an authentication error instead of the
+            # refusal the caller can act on. Inside the `try` because building
+            # the refusal normalizes the recipient, and an unusable one raises
+            # `InvalidReferenceError`; outside, that error would skip
+            # `raise_tool_error` and reach the caller masked by
+            # `mask_error_details` instead of naming the correction.
+            if thread_id is not None:
+                # A reply is addressed by its thread alone, so the username is
+                # not normalized: it plays no part and must not be able to
+                # refuse, or redirect, a reply.
+                if profile_urn is not None:
+                    raise InvalidReferenceError(THREAD_REPLY_PROFILE_URN_REFUSAL)
+                thread_id = normalize_reply_thread_id(thread_id)
+                refusal = refuse_an_invalid_thread_message(thread_id, message)
+                if refusal is not None:
+                    return refusal
+            else:
+                refusal = refuse_an_invalid_message(linkedin_username, message)
+                if refusal is not None:
+                    return refusal
+                linkedin_username = normalize_person_identifier(linkedin_username)
+                if profile_urn is not None:
+                    profile_urn = normalize_profile_urn(profile_urn)
+            extractor = await get_ready_extractor(ctx, tool_name="send_message")
+
+            if thread_id is not None:
+                logger.info(
+                    "Replying in thread %s (confirm_send=%s)", thread_id, confirm_send
+                )
+                await ctx.report_progress(
+                    progress=0, total=100, message="Replying in thread"
+                )
+                result = await extractor.send_message(
+                    linkedin_username,
+                    message,
+                    confirm_send=confirm_send,
+                    thread_id=thread_id,
+                )
+            else:
+                logger.info(
+                    "Sending message to %s (confirm_send=%s)",
+                    linkedin_username,
+                    confirm_send,
+                )
+                await ctx.report_progress(
+                    progress=0, total=100, message="Sending message"
+                )
+                result = await extractor.send_message(
+                    linkedin_username,
+                    message,
+                    confirm_send=confirm_send,
+                    profile_urn=profile_urn,
                 )
 
-            logger.info(
-                "Sending message to %s (confirm_send=%s, thread_id=%s)",
-                username or linkedin_username,
-                confirm_send,
-                thread_id,
-            )
-
-            await ctx.report_progress(progress=0, total=100, message="Sending message")
-
-            result = await extractor.send_message(
-                username or "",
-                message,
-                confirm_send=confirm_send,
-                profile_urn=profile_urn,
-                thread_id=thread_id,
-            )
-
-            await ctx.report_progress(progress=100, total=100, message="Complete")
+            try:
+                await ctx.report_progress(progress=100, total=100, message="Complete")
+            except BaseException:
+                # The send has already answered, and this notification is the
+                # last await inside FastMCP's `anyio.fail_after()`. A deadline
+                # landing here discards a result that may say the send was
+                # confirmed, and nothing can hand it back afterwards, so the
+                # log line is all that is left. Quiet where the result says a
+                # retry is safe, because then there is nothing to warn about.
+                if result.get("retry_safe") is False:
+                    logger.warning(SEND_INTERRUPTED_WARNING)
+                raise
 
             return result
 
-        except ToolError:
-            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)

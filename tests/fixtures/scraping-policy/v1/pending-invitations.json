@@ -1,0 +1,157 @@
+{
+  "call": {
+    "arguments": {
+      "kind": "sent",
+      "limit": 10
+    },
+    "method": "get_pending_invitations"
+  },
+  "events": [
+    {
+      "call": "get_pending_invitations",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.add",
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "extra": {
+        "target_url": "https://www.linkedin.com/mynetwork/invitation-manager/sent/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-before-goto",
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "kind": "navigate",
+      "landed_url": "https://www.linkedin.com/mynetwork/invitation-manager/sent/",
+      "requested_url": "https://www.linkedin.com/mynetwork/invitation-manager/sent/",
+      "section": "invitations",
+      "timeout_ms": 30000,
+      "wait_until": "domcontentloaded"
+    },
+    {
+      "call": "get_pending_invitations",
+      "description": "goto https://www.linkedin.com/mynetwork/invitation-manager/sent/",
+      "kind": "boundary.stabilize",
+      "result": null,
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "extra": {
+        "target_url": "https://www.linkedin.com/mynetwork/invitation-manager/sent/",
+        "wait_until": "domcontentloaded"
+      },
+      "kind": "boundary.trace",
+      "label": "extractor-after-goto",
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "kind": "boundary.auth_quick",
+      "result": null,
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "callback_id": "callback-1",
+      "event": "framenavigated",
+      "kind": "listener.remove",
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "kind": "boundary.rate_limit",
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "kind": "wait_for_selector",
+      "operation": "main",
+      "section": "invitations",
+      "selector": "main",
+      "state": "visible",
+      "timeout_ms": null
+    },
+    {
+      "call": "get_pending_invitations",
+      "dismissed": false,
+      "kind": "boundary.modal",
+      "section": "invitations"
+    },
+    {
+      "arg": null,
+      "call": "get_pending_invitations",
+      "kind": "wait_for_function",
+      "operation": "main_text_100",
+      "program_digest": "1e55b31a45f1",
+      "section": "invitations",
+      "timeout_ms": 10000
+    },
+    {
+      "call": "get_pending_invitations",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "a9ee35f8dcc7",
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 0.5,
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "kind": "evaluate",
+      "operation": "invitation_expand_notes",
+      "program_digest": "eb90f3f00d72",
+      "section": "invitations"
+    },
+    {
+      "arg": {
+        "selectors": [
+          "main"
+        ]
+      },
+      "call": "get_pending_invitations",
+      "kind": "evaluate",
+      "operation": "root_content",
+      "program_digest": "e8a0e21ac6f5",
+      "section": "invitations"
+    },
+    {
+      "call": "get_pending_invitations",
+      "kind": "evaluate",
+      "operation": "invitation_card_labels",
+      "program_digest": "7c7cd9e31c8e",
+      "section": "invitations"
+    }
+  ],
+  "result": {
+    "references": {
+      "invitations": [
+        {
+          "context": "invitation",
+          "kind": "person",
+          "text": "Ada Lovelace",
+          "url": "/in/ada-lovelace/"
+        }
+      ]
+    },
+    "section_names": [
+      "invitations"
+    ],
+    "sections": {
+      "invitations": "Ada Lovelace\nSent 2 days ago"
+    },
+    "url": "https://www.linkedin.com/mynetwork/invitation-manager/sent/"
+  },
+  "scenario": "get_pending_invitations__sent",
+  "schema_version": 1
+}

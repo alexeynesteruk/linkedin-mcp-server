@@ -1,44 +1,30 @@
 """
 LinkedIn network tools.
 
-Provides access to pending network invitations (received or sent) from
-``/mynetwork/invitation-manager/``, and withdrawing a sent invitation.
-Accept and ignore actions remain intentionally not exposed.
+Lists pending invitations (received or sent) and withdraws a sent one.
+Accepting or ignoring an invitation from the manager is deliberately not
+exposed; connect_with_person accepts an incoming request from the profile.
 """
 
 import logging
 from typing import Annotated, Any, Literal
 
 from fastmcp import Context, FastMCP
-from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
-from linkedin_mcp_server.scraping.usernames import normalize_linkedin_username
+from linkedin_mcp_server.scraping.identifiers import normalize_person_identifier
 
 logger = logging.getLogger(__name__)
-
-
-def _require_username(value: str | None, *, tool_name: str) -> str:
-    """Normalize a LinkedIn vanity or raise ToolError for bad agent input."""
-    username = normalize_linkedin_username(value)
-    if username is None:
-        raise ToolError(
-            f"Invalid linkedin_username {value!r}. "
-            "Pass a bare vanity (e.g. 'williamhgates') or a full "
-            "https://www.linkedin.com/in/... profile URL."
-        )
-    return username
 
 
 def register_network_tools(
     mcp: FastMCP, *, tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS
 ) -> None:
-    """Register all network-related tools with the MCP server."""
+    """Register the invitation tools with the MCP server."""
 
     @mcp.tool(
         timeout=tool_timeout,
@@ -50,29 +36,32 @@ def register_network_tools(
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=100)] = 20,
         kind: Literal["received", "sent"] = "received",
-        extractor: Any = extractor_depends("get_pending_invitations"),
     ) -> dict[str, Any]:
         """
-        List pending LinkedIn network invitations (received or sent).
+        List pending LinkedIn network invitations, received or sent.
 
-        Reads ``/mynetwork/invitation-manager/{received|sent}/`` and returns
-        the page's visible text plus references to inviter/invitee profiles.
-        Read-only - accepting or ignoring invitations is not exposed. To
-        withdraw a sent invitation, use ``withdraw_invitation``.
+        Reads /mynetwork/invitation-manager/{received|sent}/ and expands
+        truncated invitation notes first, so the text holds each full note.
+        Read-only: nothing is accepted, ignored or withdrawn. Use
+        withdraw_invitation to take back a sent invitation.
 
         Args:
             ctx: FastMCP context for progress reporting
-            limit: Maximum number of invitations to return (1-100, default 20).
-                References are capped exactly; readable text is trimmed at the
-                first omitted invitation when LinkedIn renders extra cards.
+            limit: Maximum invitations to return (1-100, default 20).
+                References are capped exactly; the text is cut where the first
+                omitted invitation begins.
             kind: "received" (default) for incoming invitations, "sent" for
-                outgoing ones awaiting the recipient's response.
+                outgoing ones still awaiting an answer.
 
         Returns:
             Dict with url, sections (invitations -> raw text), and optional
-            references.
+            references (inviter or invitee profiles) and section_errors. An
+            empty sections dict with no error means there are none pending.
         """
         try:
+            extractor = await get_ready_extractor(
+                ctx, tool_name="get_pending_invitations"
+            )
             logger.info("Fetching pending invitations (kind=%s, limit=%d)", kind, limit)
 
             await ctx.report_progress(
@@ -83,11 +72,7 @@ def register_network_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return annotate_empty_scrape_result(
-                result,
-                tool_name="get_pending_invitations",
-                required_sections=("invitations",),
-            )
+            return result
 
         except AuthenticationError as e:
             try:
@@ -106,45 +91,47 @@ def register_network_tools(
     async def withdraw_invitation(
         linkedin_username: str,
         ctx: Context,
-        extractor: Any = extractor_depends("withdraw_invitation"),
     ) -> dict[str, Any]:
         """
-        Withdraw a previously sent LinkedIn connection request.
+        Withdraw a connection request you sent that is still pending.
 
-        Navigates to the invitee's profile and only clicks Withdraw when a
-        fresh read confirms a connection request is actually pending there -
-        any other state (already withdrawn, already connected, self
-        profile, unavailable) is reported back without touching the page.
+        Opens the person's profile and clicks Withdraw only when a fresh read
+        of that profile shows the request as pending. Any other state is
+        reported back without touching the page. LinkedIn may block a new
+        invitation to the same person for a while after a withdrawal.
 
         Args:
-            linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates")
+            linkedin_username: LinkedIn username (e.g., "stickerdaniel", "williamhgates"). A full profile URL is accepted too and is reduced to the username.
             ctx: FastMCP context for progress reporting
 
         Returns:
             Dict with url, status, message, and optional profile.
             Statuses: withdrawn, not_pending, self_profile, unavailable,
-            withdraw_unavailable, withdraw_failed.
+            withdraw_unavailable, withdraw_failed. ``withdrawn`` means a
+            re-read of the profile no longer shows the request as pending; the
+            message names the state read after the withdrawal. A confirmed
+            dialog whose re-read could not be read is ``withdraw_failed`` with
+            a message saying the withdrawal is unverified.
+
+            A status of ``outcome_unknown`` comes from the transport rather
+            than the page: the browser process went away with the call in
+            flight. Check the profile before calling again.
         """
         try:
-            username = _require_username(
-                linkedin_username, tool_name="withdraw_invitation"
-            )
-            logger.info("Withdrawing invitation to: %s", username)
+            linkedin_username = normalize_person_identifier(linkedin_username)
+            extractor = await get_ready_extractor(ctx, tool_name="withdraw_invitation")
+            logger.info("Withdrawing invitation to %s", linkedin_username)
 
             await ctx.report_progress(
-                progress=0,
-                total=100,
-                message="Starting LinkedIn withdraw-invitation flow",
+                progress=0, total=100, message="Starting LinkedIn withdrawal flow"
             )
 
-            result = await extractor.withdraw_invitation(username)
+            result = await extractor.withdraw_invitation(linkedin_username)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
             return result
 
-        except ToolError:
-            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)

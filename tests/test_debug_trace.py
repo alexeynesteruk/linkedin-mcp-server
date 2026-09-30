@@ -7,7 +7,6 @@ import pytest
 from linkedin_mcp_server.debug_trace import (
     _safe_source_profile_dir,
     cleanup_trace_dir,
-    garbage_collect_trace_runs,
     get_trace_dir,
     mark_trace_for_retention,
     record_page_trace,
@@ -115,118 +114,156 @@ def test_safe_source_profile_dir_ignores_generic_env_fallback(monkeypatch):
     assert _safe_source_profile_dir() == Path("~/.linkedin-mcp/profile").expanduser()
 
 
-def test_garbage_collect_deletes_old_empty_runs(monkeypatch, tmp_path):
-    profile = tmp_path / "profile"
-    profile.mkdir()
-    monkeypatch.setenv("USER_DATA_DIR", str(profile))
-    reset_trace_state_for_testing()
+# --- pruning of old run directories -----------------------------------------
 
+import os  # noqa: E402
+import time  # noqa: E402
+
+from linkedin_mcp_server.debug_trace import prune_trace_runs  # noqa: E402
+from linkedin_mcp_server.profile_claim import ensure_profile_claim  # noqa: E402
+
+_DAY = 86400.0
+
+
+def _point_trace_at(monkeypatch, profile: Path) -> None:
+    """The conftest pins this module's view of the profile root; move it."""
+    monkeypatch.setattr(
+        "linkedin_mcp_server.debug_trace.get_source_profile_dir", lambda: profile
+    )
+
+
+def _claimed_root(monkeypatch, tmp_path) -> Path:
+    """An owned auth root with an existing trace-runs directory."""
+    profile = tmp_path / "profile"
+    monkeypatch.setenv("USER_DATA_DIR", str(profile))
+    _point_trace_at(monkeypatch, profile)
+    ensure_profile_claim(profile)
     root = tmp_path / "trace-runs"
     root.mkdir()
-    monkeypatch.setattr(
-        "linkedin_mcp_server.debug_trace._trace_root",
-        lambda: root,
-    )
-
-    old_empty = root / "run-old-empty"
-    old_empty.mkdir()
-    (old_empty / "server.log").write_text("")
-    # Age the directory
-    old_ts = 1_000_000.0
-    import os
-
-    os.utime(old_empty, (old_ts, old_ts))
-    os.utime(old_empty / "server.log", (old_ts, old_ts))
-
-    fresh_empty = root / "run-fresh-empty"
-    fresh_empty.mkdir()
-    (fresh_empty / "server.log").write_text("")
-
-    kept = root / "run-with-content"
-    kept.mkdir()
-    (kept / "server.log").write_text("x" * 200)
-    os.utime(kept, (old_ts, old_ts))
-
-    stats = garbage_collect_trace_runs(
-        max_age_days=1.0,
-        max_runs=200,
-        now=old_ts + 10 * 86400,
-    )
-
-    assert stats["deleted_empty"] == 1
-    assert not old_empty.exists()
-    assert fresh_empty.exists()
-    assert kept.exists()
+    return root
 
 
-def test_garbage_collect_respects_max_runs_preferring_empty(monkeypatch, tmp_path):
-    profile = tmp_path / "profile"
-    profile.mkdir()
-    monkeypatch.setenv("USER_DATA_DIR", str(profile))
-    reset_trace_state_for_testing()
-
-    root = tmp_path / "trace-runs"
-    root.mkdir()
-    monkeypatch.setattr(
-        "linkedin_mcp_server.debug_trace._trace_root",
-        lambda: root,
-    )
-
-    import os
-    import time
-
-    now = time.time()
-    for i in range(5):
-        d = root / f"run-e{i}"
-        d.mkdir()
-        (d / "server.log").write_text("")
-        os.utime(d, (now - (10 - i), now - (10 - i)))
-
-    content = root / "run-content"
-    content.mkdir()
-    (content / "server.log").write_text("payload" * 20)
-
-    stats = garbage_collect_trace_runs(max_age_days=0, max_runs=3, now=now)
-
-    assert stats["deleted_over_cap"] >= 2
-    assert content.exists()
-    remaining = list(root.iterdir())
-    assert len(remaining) <= 3
+def _run(root: Path, name: str, age_days: float) -> Path:
+    path = root / name
+    path.mkdir()
+    (path / "trace.jsonl").write_text("{}\n")
+    stamp = time.time() - age_days * _DAY
+    os.utime(path, (stamp, stamp))
+    return path
 
 
-def test_garbage_collect_skips_active_trace_dir(monkeypatch, tmp_path):
-    profile = tmp_path / "profile"
-    profile.mkdir()
-    monkeypatch.setenv("USER_DATA_DIR", str(profile))
-    reset_trace_state_for_testing()
+def test_prune_removes_runs_older_than_the_age_limit(monkeypatch, tmp_path):
+    root = _claimed_root(monkeypatch, tmp_path)
+    old = _run(root, "run-abcd1234", age_days=30)
+    fresh = _run(root, "run-wxyz_789", age_days=1)
 
-    root = tmp_path / "trace-runs"
-    root.mkdir()
-    monkeypatch.setattr(
-        "linkedin_mcp_server.debug_trace._trace_root",
-        lambda: root,
-    )
+    removed = prune_trace_runs(root)
 
-    active = get_trace_dir()
-    assert active is not None
-    # Force active under our root for the test
-    import linkedin_mcp_server.debug_trace as dt
-
-    protected = root / "run-active"
-    protected.mkdir()
-    (protected / "server.log").write_text("")
-    dt._TRACE_DIR = protected
-
-    old = root / "run-old"
-    old.mkdir()
-    (old / "server.log").write_text("")
-    import os
-
-    os.utime(old, (1_000_000.0, 1_000_000.0))
-
-    garbage_collect_trace_runs(
-        max_age_days=1.0, max_runs=200, now=1_000_000.0 + 20 * 86400
-    )
-
-    assert protected.exists()
+    assert removed == [old]
     assert not old.exists()
+    assert fresh.exists()
+
+
+def test_prune_keeps_only_the_newest_runs_by_count(monkeypatch, tmp_path):
+    root = _claimed_root(monkeypatch, tmp_path)
+    runs = [_run(root, f"run-aaaaaa{i:02d}", age_days=i / 10) for i in range(6)]
+
+    prune_trace_runs(root, keep=3)
+
+    assert [p.exists() for p in runs] == [True, True, True, False, False, False]
+
+
+def test_prune_never_removes_the_current_run(monkeypatch, tmp_path):
+    root = _claimed_root(monkeypatch, tmp_path)
+    current = _run(root, "run-current1", age_days=90)
+
+    assert prune_trace_runs(root, keep_dir=current) == []
+    assert current.exists()
+
+
+def test_prune_only_touches_directories_named_like_its_own(monkeypatch, tmp_path):
+    root = _claimed_root(monkeypatch, tmp_path)
+    lookalikes = [
+        _run(root, "run-abcd12345", age_days=90),  # nine characters
+        _run(root, "run-ABCD1234", age_days=90),  # outside mkdtemp's alphabet
+        _run(root, "keep-abcd1234", age_days=90),
+        _run(root, "run-abcd123", age_days=90),
+    ]
+    stray = root / "run-file0001"
+    stray.write_text("not a directory")
+    os.utime(stray, (0, 0))
+
+    assert prune_trace_runs(root) == []
+    assert all(p.exists() for p in [*lookalikes, stray])
+
+
+def test_prune_does_not_follow_or_remove_a_symlinked_run(monkeypatch, tmp_path):
+    root = _claimed_root(monkeypatch, tmp_path)
+    target = tmp_path / "precious"
+    target.mkdir()
+    (target / "keep.txt").write_text("data")
+    link = root / "run-linked01"
+    link.symlink_to(target, target_is_directory=True)
+
+    assert prune_trace_runs(root, max_age_days=0) == []
+    assert link.is_symlink()
+    assert (target / "keep.txt").read_text() == "data"
+
+
+def test_prune_refuses_a_symlinked_trace_root(monkeypatch, tmp_path):
+    root = _claimed_root(monkeypatch, tmp_path)
+    root.rmdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    old = _run(elsewhere, "run-abcd1234", age_days=90)
+    root.symlink_to(elsewhere, target_is_directory=True)
+
+    assert prune_trace_runs(root) == []
+    assert old.exists()
+
+
+def test_prune_ignores_a_directory_that_is_not_the_trace_root(monkeypatch, tmp_path):
+    _claimed_root(monkeypatch, tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    old = _run(other, "run-abcd1234", age_days=90)
+
+    assert prune_trace_runs(other) == []
+    assert old.exists()
+
+
+def test_prune_leaves_an_unowned_profile_root_alone(monkeypatch, tmp_path):
+    """No claim marker on this root: the ownership guard refuses, so nothing is
+    deleted. (The autouse fixture claims only its own tmp profile.)"""
+    foreign = tmp_path / "foreign"
+    foreign.mkdir()
+    (foreign / "somebody-elses-file").write_text("x")
+    monkeypatch.setenv("USER_DATA_DIR", str(foreign / "profile"))
+    _point_trace_at(monkeypatch, foreign / "profile")
+    root = foreign / "trace-runs"
+    root.mkdir()
+    old = _run(root, "run-abcd1234", age_days=90)
+
+    assert prune_trace_runs(root) == []
+    assert old.exists()
+
+
+def test_a_new_process_run_prunes_the_stale_ones(monkeypatch, tmp_path):
+    root = _claimed_root(monkeypatch, tmp_path)
+    old = _run(root, "run-abcd1234", age_days=90)
+
+    trace_dir = get_trace_dir()
+
+    assert trace_dir is not None and trace_dir.exists()
+    assert not old.exists()
+
+
+def test_a_prune_failure_never_breaks_trace_setup(monkeypatch, tmp_path):
+    _claimed_root(monkeypatch, tmp_path)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr("linkedin_mcp_server.debug_trace.prune_trace_runs", boom)
+
+    assert get_trace_dir() is not None

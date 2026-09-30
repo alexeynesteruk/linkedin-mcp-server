@@ -79,13 +79,28 @@ _SECTION_CONTEXTS = {
     "interests": "interests",
     "honors": "honors",
     "languages": "languages",
+    "certifications": "certifications",
+    "skills": "skills",
+    "projects": "projects",
     "contact_info": "contact info",
+    "employees": "employees",
     "job_posting": "job posting",
     "inbox": "inbox",
     "conversation": "conversation",
+    "jobs": "jobs",
+    "saved_jobs": "saved jobs",
+    "feed": "feed",
+    "invitations": "invitation",
+    "content": "analytics content",
+    "audience": "analytics audience",
+    "top_posts": "top posts",
+    "profile_views": "profile views",
+    "search_appearances": "search appearances",
+    "post": "post thread",
 }
 
 _DEFAULT_REFERENCE_CAP = 12
+_SEARCH_RESULTS_REFERENCE_CAP = 15
 _REFERENCE_CAPS = {
     "main_profile": 12,
     "about": 12,
@@ -94,28 +109,45 @@ _REFERENCE_CAPS = {
     "interests": 12,
     "honors": 12,
     "languages": 12,
+    "certifications": 12,
+    "skills": 12,
+    "projects": 12,
     "posts": 12,
     "comments": 12,
-    # A post permalink page carries one anchor per commenter plus the post
-    # author and attachments; headroom above the default keeps long comment
-    # threads' participants addressable.
-    "post": 30,
     "jobs": 8,
-    "search_results": 15,
-    "job_posting": 8,
+    # Every card on the people page is a candidate an agent may act on, and
+    # callers are told to take profile slugs from these references only. In
+    # page order the company's own link and its "See all employees" search
+    # take slots first, so a dozen stopped at about ten people while the text
+    # listed the rest of the loaded cards (reported live, 2026-09-24).
+    "employees": 60,
+    "search_results": _SEARCH_RESULTS_REFERENCE_CAP,
+    # The "More jobs" module sits at the bottom of a posting and lists a dozen
+    # jobs, so a cap applied in page order has to reach past everything above.
+    "job_posting": 25,
     "contact_info": 8,
     "inbox": 30,
     "conversation": 12,
     # Headroom for get_feed's num_posts ceiling (Field(ge=1, le=50)).
-    # Kept in sync with the literal cap=50 in extractor._build_feed_references
+    # Kept in sync with the literal cap=50 in feed_payload.build_feed_references
     # where SDUI-derived /posts/<slug> permalinks are appended.
     "feed": 50,
-    # Headroom for get_pending_invitations' limit ceiling (Field(ge=1, le=100)).
-    # The extractor trims to the per-call limit before returning, so this cap
-    # only governs the upper bound of how many inviter profiles can survive
-    # the dedupe pass - the request-level limit is the operative ceiling.
+    # Headroom for get_pending_invitations' limit ceiling (Field(ge=1, le=100));
+    # the reader slices to the requested limit itself.
     "invitations": 100,
+    # A permalink page lists the author, every loaded commenter and any posts
+    # they link to; get_post_comments paginates to at most 50 rounds.
+    "post": 30,
 }
+
+# A label must carry at least one letter or digit in any script, so the class is
+# Unicode-aware rather than ``[A-Za-z0-9]`` — otherwise every reference on a
+# Cyrillic, CJK or Arabic-script profile is dropped. The four Hangul fillers are
+# excluded because they carry the word property while rendering as nothing: a
+# label made only of them would pass as valid and yield an invisible reference
+# text, shadowing the aria-label fallback. They are the only invisible code
+# points in ``[^\W_]`` (verified by scanning the full Unicode range).
+_LABEL_CONTENT_RE = re.compile("[^\\W_\u115f\u1160\u3164\uffa0]")
 
 _URL_LIKE_RE = re.compile(r"^(?:https?://|/)\S+$", re.IGNORECASE)
 _DUPLICATE_HALVES_RE = re.compile(r"^(?P<value>.+?)\s+(?P=value)$")
@@ -124,7 +156,17 @@ _CONNECTIONS_FOLLOW_RE = re.compile(r"\bconnections follow this page\b", re.IGNO
 _COMPANY_PATH_RE = re.compile(r"^/company/([^/?#]+)")
 _PERSON_PATH_RE = re.compile(r"^/in/([^/?#]+)")
 _SCHOOL_PATH_RE = re.compile(r"^/school/([^/?#]+)")
-_JOB_PATH_RE = re.compile(r"^/jobs/view/(\d+)")
+# LinkedIn serves a job under both /jobs/view/<id>/ and
+# /jobs/view/<title>-at-<company>-<id>/, and both 301 to the same page, so the
+# id is the trailing number of the segment rather than its start. Anchoring to
+# the start dropped the slugged form, and matched the wrong number whenever a
+# title opened with one: "2026-software-engineer-at-acme-4252026496" read as
+# job 2026. Same shape as the pattern the job-id extraction uses, with one
+# difference that has to stay: `[0-9]` and not `\d`, because Python's `\d`
+# also matches Arabic-Indic and other Unicode decimal digits while
+# JavaScript's does not, and `normalize_job_id` refuses anything outside
+# `[0-9]`. Matching them here only produces a reference the next call rejects.
+JOB_PATH_RE = re.compile(r"^/jobs/view/(?:[^/?#]*-)?([0-9]+)(?=[/?#]|$)")
 _NEWSLETTER_PATH_RE = re.compile(r"^/newsletters/([^/?#]+)")
 _PULSE_PATH_RE = re.compile(r"^/pulse/([^/?#]+)")
 _FEED_PATH_RE = re.compile(r"^/feed/update/([^/?#]+)")
@@ -132,7 +174,7 @@ _MESSAGING_THREAD_PATH_RE = re.compile(r"^/messaging/thread/([^/?#]+)")
 _MAX_REDIRECT_UNWRAP_DEPTH = 5
 
 # Accept both quoted-string and bare-integer JSON list elements, e.g.
-# ``["1115","2573558"]`` (the form LinkedIn currently emits - verified live)
+# ``["1115","2573558"]`` (the form LinkedIn currently emits — verified live)
 # and ``[1115,2573558]`` (also valid JSON). Optional surrounding quote keeps
 # the matcher resilient if LinkedIn ever drops the string-typing.
 _FIRST_URN_RE = re.compile(r'\[\s*"?(\d+)"?')
@@ -156,9 +198,13 @@ def _first_company_urn_from_query(query: str) -> str | None:
 def build_references(
     raw_references: list[RawReference],
     section_name: str,
+    *,
+    apply_cap: bool = True,
 ) -> list[Reference]:
     """Filter and normalize raw DOM anchors into compact references."""
-    cap = _REFERENCE_CAPS.get(section_name, _DEFAULT_REFERENCE_CAP)
+    cap = (
+        _REFERENCE_CAPS.get(section_name, _DEFAULT_REFERENCE_CAP) if apply_cap else None
+    )
     normalized_references: list[Reference] = []
 
     for raw in raw_references:
@@ -191,11 +237,15 @@ def normalize_reference(
         text = None
     else:
         text = choose_reference_text(raw, kind)
+    # A job is kept without a label because its id is the useful part, and a
+    # card-wide anchor has none: the "More jobs" cards wrap title, company,
+    # location and insights in one link, which no label survives.
     if text is None and kind not in {
         "feed_post",
         "external",
         "conversation",
         "company_urn",
+        "job",
     }:
         return None
 
@@ -207,9 +257,9 @@ def normalize_reference(
     }
     if kind == "company_urn":
         # ``classify_link`` already extracted the urn while building the
-        # canonical url. Re-parsing here keeps that classifier internal -
+        # canonical url. Re-parsing here keeps that classifier internal —
         # callers of ``normalize_reference`` shouldn't have to know the
-        # url shape - and is cheap (the canonical url has a fixed
+        # url shape — and is cheap (the canonical url has a fixed
         # single-id form, so ``parse_qs`` is O(1) here).
         urn_id = _first_company_urn_from_query(urlparse(normalized_url).query)
         if urn_id:
@@ -289,8 +339,17 @@ def classify_link(href: str) -> tuple[ReferenceKind, str] | None:
     if match := _SCHOOL_PATH_RE.match(path):
         return "school", f"/school/{match.group(1)}/"
 
-    if match := _JOB_PATH_RE.match(path):
+    if match := JOB_PATH_RE.match(path):
         return "job", f"/jobs/view/{match.group(1)}/"
+
+    # A job card that opens inside a search links to the search with the job
+    # selected rather than to the job, as the "More jobs" cards on a posting
+    # do. Without this every one of them was dropped. ASCII digits for the
+    # same reason as `JOB_PATH_RE`.
+    if path.rstrip("/") in {"/jobs/search", "/jobs/search-results"}:
+        job_id = (parse_qs(parsed.query).get("currentJobId") or [""])[0]
+        if re.fullmatch(r"[0-9]+", job_id):
+            return "job", f"/jobs/view/{job_id}/"
 
     if match := _NEWSLETTER_PATH_RE.match(path):
         return "newsletter", f"/newsletters/{match.group(1)}/"
@@ -334,10 +393,9 @@ def choose_reference_text(
 def clean_label(value: str, kind: ReferenceKind) -> str | None:
     """Normalize and compact a candidate label.
 
-    A label must contain at least one letter or digit in any script -
-    ``[^\\W_]`` matches a Unicode word character that is not an
-    underscore, so Cyrillic (and other non-Latin) profile names survive
-    while punctuation-only strings are rejected.
+    Rejects the label when nothing visible survives normalization, so
+    non-Latin names are kept while punctuation-only strings are dropped.
+    See ``_LABEL_CONTENT_RE``.
     """
     value = _WHITESPACE_RE.sub(" ", value).strip()
     if not value:
@@ -374,7 +432,7 @@ def clean_label(value: str, kind: ReferenceKind) -> str | None:
         return None
     if len(value) > 80:
         return None
-    if not re.search(r"[^\W_]", value):
+    if not _LABEL_CONTENT_RE.search(value):
         return None
 
     return value
@@ -402,23 +460,13 @@ def derive_context(
         return "post attachment"
 
     if section_name == "comments":
-        # Comments activity page: feed_post anchors are the posts the person
-        # commented on; person anchors are the authors of those posts (and
-        # the commenter themselves).
-        if kind == "feed_post":
-            return "commented post"
+        # The member's recent comments: feed_post anchors are the posts they
+        # commented on, person anchors the authors of those posts (and the
+        # member themselves).
         if kind == "person":
             return "post author"
-        return "post attachment"
-
-    if section_name == "post":
-        # Post permalink page: person anchors mix the post author and
-        # commenters; the surrounding innerText carries the roles, so no
-        # context guess is made for them.
-        if kind == "person":
-            return None
         if kind == "feed_post":
-            return "post"
+            return "commented post"
         return "post attachment"
 
     if section_name in {"main_profile", "about"}:

@@ -53,14 +53,6 @@ class BrowserProfile:
 # token (``<safe_storage> Safe Storage``); it is a distinct token from both the
 # canonical key and the human label. Subpaths are relative to the per-OS base
 # directory resolved in ``_os_base_dirs``.
-#
-# ``chromium_versioned`` marks browsers whose on-disk version string leads with
-# the Chromium engine major (Chrome/Chromium/Edge/Arc report it directly, Brave
-# prefixes it, Helium tracks upstream) - the input user_agent.py needs to
-# synthesize the frozen UA for an imported session. Browsers that version
-# independently of the engine (Opera, Vivaldi, Yandex, Whale, Cốc Cốc) omit it
-# and get no synthesized UA. ``ua_brand_suffix`` is the extra brand token some
-# forks append to the frozen UA (Edge: ``Edg/<major>.0.0.0``).
 SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
     "chrome": {
         "label": "Google Chrome",
@@ -69,7 +61,6 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "linux_subpaths": ("google-chrome",),
         "linux_app_token": "chrome",
         "win_subpath": "Google/Chrome/User Data",
-        "chromium_versioned": True,
     },
     "chromium": {
         "label": "Chromium",
@@ -78,7 +69,6 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "linux_subpaths": ("chromium",),
         "linux_app_token": "chromium",
         "win_subpath": "Chromium/User Data",
-        "chromium_versioned": True,
     },
     "brave": {
         "label": "Brave",
@@ -87,7 +77,6 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "linux_subpaths": ("BraveSoftware/Brave-Browser",),
         "linux_app_token": "brave",
         "win_subpath": "BraveSoftware/Brave-Browser/User Data",
-        "chromium_versioned": True,
     },
     "edge": {
         "label": "Microsoft Edge",
@@ -96,8 +85,6 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "linux_subpaths": ("microsoft-edge",),
         "linux_app_token": "microsoft-edge",
         "win_subpath": "Microsoft/Edge/User Data",
-        "chromium_versioned": True,
-        "ua_brand_suffix": "Edg",
     },
     "arc": {
         "label": "Arc",
@@ -106,7 +93,6 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         # Arc has no stable Linux build; omit on Linux.
         "linux_subpaths": (),
         "win_subpath": "Arc/User Data",
-        "chromium_versioned": True,
     },
     "vivaldi": {
         "label": "Vivaldi",
@@ -130,7 +116,6 @@ SUPPORTED_BROWSERS: dict[str, dict[str, object]] = {
         "mac_subpath": "net.imput.helium",
         "linux_subpaths": (),
         "win_subpath": "net.imput.helium/User Data",
-        "chromium_versioned": True,
     },
     # Standard-Chromium browsers. Paths and keychain labels cross-checked against
     # yt-dlp (yt_dlp/cookies.py) and HackBrowserData (browser/browser_darwin.go):
@@ -359,50 +344,32 @@ def discover_profiles(browser: str | None = None) -> list[BrowserProfile]:
 
     Keeps only profiles with a resolvable Cookies DB. Does not decrypt; ``li_at``
     candidacy is decided later during extraction.
-
-    For browsers declared as ``layout="flat"`` (Opera, Opera GX) the flat root
-    is tried first; if no cookies DB is found there, the standard ``Default/``
-    profile layout is attempted as a fallback. Some Opera-on-Windows
-    installations use the standard Chromium profile subdirectory instead of
-    placing cookies at the user-data root.
     """
     discovered: list[BrowserProfile] = []
     for browser_key, root in browser_roots(browser):
         spec = SUPPORTED_BROWSERS[browser_key]
         layout = str(spec.get("layout", "profiles"))
-        # flat (Opera) first, then standard Default/ profile layout as fallback -
-        # some Opera-on-Windows installs use Chromium profile subdirs.
-        layouts_to_try: list[str] = (
-            ["flat", "profiles"] if layout == "flat" else [layout]
-        )
-        tried_layouts: set[str] = set()
-        for current_layout in layouts_to_try:
-            if current_layout in tried_layouts:
+        for dir_name, display_name in enumerate_profiles(root, layout=layout):
+            profile_path = root / dir_name  # root / "." == root for flat layout
+            cookies_db = resolve_cookies_db(profile_path)
+            if cookies_db is None:
                 continue
-            tried_layouts.add(current_layout)
-            for dir_name, display_name in enumerate_profiles(
-                root, layout=current_layout
-            ):
-                profile_path = root / dir_name
-                cookies_db = resolve_cookies_db(profile_path)
-                if cookies_db is None:
-                    continue
-                discovered.append(
-                    BrowserProfile(
-                        browser=browser_key,
-                        browser_label=str(spec["label"]),
-                        safe_storage_label=str(spec["safe_storage"]),
-                        profile_dir_name=dir_name,
-                        display_name=display_name,
-                        user_data_root=root,
-                        profile_path=profile_path,
-                        cookies_db=cookies_db,
-                        local_state_path=root / "Local State",
-                        mac_keychain_service=str(spec.get("mac_keychain_service", "")),
-                        mac_keychain_account=str(spec.get("mac_keychain_account", "")),
-                        layout=current_layout,
-                    )
+            discovered.append(
+                BrowserProfile(
+                    browser=browser_key,
+                    browser_label=str(spec["label"]),
+                    safe_storage_label=str(spec["safe_storage"]),
+                    profile_dir_name=dir_name,
+                    display_name=display_name,
+                    user_data_root=root,
+                    profile_path=profile_path,
+                    cookies_db=cookies_db,
+                    local_state_path=root / "Local State",
+                    mac_keychain_service=str(spec.get("mac_keychain_service", "")),
+                    mac_keychain_account=str(spec.get("mac_keychain_account", "")),
+                    layout=layout,
                 )
+            )
     logger.debug(
         "Discovered %d browser profile(s)%s",
         len(discovered),

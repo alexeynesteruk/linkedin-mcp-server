@@ -4,18 +4,36 @@ name: CI
 on:
   push:
     branches: [main]
+  # Every pull request, not only those targeting main. A stacked pull request
+  # is based on the branch below it, so filtering by base branch skipped CI
+  # entirely for the stacks this repository's workflow produces.
   pull_request:
-    branches: [main]
+
+# One run per pull request branch. Restacking a stacked pull request pushes
+# every branch in the stack, and without this every superseded push kept its
+# whole matrix alive to completion, Windows legs included. Those are the ones
+# that cost anything: macOS and Linux bill at zero here while Windows is the
+# entire spend.
+#
+# Pushes to main get a group of their own per run, never a shared one. A shared
+# group does not merely decline to cancel the running job; GitHub also evicts
+# whichever run is already waiting when a newer one arrives, so merging three
+# pull requests in quick succession would leave the middle commit with no CI
+# result at all. Keying on run_id makes every main run its own group, which is
+# the only arrangement where each commit on main keeps a result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint-and-check:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
@@ -30,18 +48,722 @@ jobs:
       - name: Optimize uv cache for CI
         run: uv cache prune --ci
 
-  test:
+  dependency-review:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Review dependency changes
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: high
+          fail-on-scopes: runtime, development, unknown
+          retry-on-snapshot-warnings: true
+          retry-on-snapshot-warnings-timeout: 120
 
-      - uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+      # The action reports snapshot warnings after its retry window but does not
+      # fail on them. That can make a missing head snapshot look like an empty
+      # dependency diff, so query the same comparison and reject any warning.
+      - name: Require complete dependency snapshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          response="$RUNNER_TEMP/dependency-comparison"
+          gh api --include \
+            "repos/${GITHUB_REPOSITORY}/dependency-graph/compare/${BASE_SHA}...${HEAD_SHA}?per_page=100" \
+            > "$response"
+          python3 - "$response" <<'PY'
+          import sys
+          from pathlib import Path
+
+          header = "x-github-dependency-graph-snapshot-warnings:"
+          for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+              if not line:
+                  break
+              if line.lower().startswith(header) and line[len(header) :].strip():
+                  raise SystemExit("Dependency comparison returned snapshot warnings")
+          PY
+
+  windows-daemon:
+    name: Windows daemon (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    # FastMCP 4's camelCase read shims off for every test run, set before
+    # Python starts so the settings fastmcp reads at import already see it.
+    # tests/conftest.py sets the same for local runs, and
+    # tests/test_fastmcp_compatibility.py fails if it did not take effect.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12.4 exactly, because it is the declared floor, the one version
+        # where private state creation on Windows became possible at all, and it
+        # carries the eight-client election stress again. 3.12.10 historically
+        # crashed a frontend with 0xC0000005 while 3.12.4, 3.13 and 3.14 passed.
+        # That incident is why no version here may be dropped on the argument
+        # that a middle release can only fail where an endpoint already does: in
+        # this subsystem one demonstrably did. The floating `3.12` entry remains
+        # absent so product CI does not silently move between patch releases.
+        python-version: ["3.12.4", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+
+      - run: uv sync --group dev
+
+      # #838: a frontend in this job has twice exited 0xC0000005 with no fault
+      # location. `faulthandler` cannot always supply one, because the report
+      # is written by the process that is already failing; Windows Error
+      # Reporting writes from outside it, so a dump survives what the process
+      # could not report. `DumpType` 1 is a minidump: the faulting stack is the
+      # missing evidence, and a full heap dump of eight Python processes is
+      # hundreds of megabytes per crash. Costs nothing on a green run, which is
+      # every run since the crashing interpreter left the matrix.
+      - name: Arm a crash dump for #838
+        shell: pwsh
+        run: |
+          $folder = Join-Path $env:RUNNER_TEMP 'crash-dumps'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+          New-Item -Path $key -Force | Out-Null
+          Set-ItemProperty -Path $key -Name DumpFolder -Value $folder -Type ExpandString
+          Set-ItemProperty -Path $key -Name DumpCount -Value 16 -Type DWord
+          Set-ItemProperty -Path $key -Name DumpType -Value 1 -Type DWord
+
+      - name: Run daemon protocol and containment tests
+        run: >-
+          uv run pytest
+          tests/test_daemon_election.py::TestAtomicStartupCommit
+          tests/test_daemon_election.py::TestElectionSettlement
+          tests/test_daemon_election.py::TestOwnerBootstrapOrdering
+          tests/test_daemon_election.py::TestPublishingLast
+          tests/test_daemon_election.py::TestRealOwner::test_an_owner_is_started_and_answers
+          tests/test_daemon_election.py::TestRealOwner::test_a_crashed_owner_is_replaced
+          tests/test_daemon_election.py::TestRealOwner::test_many_clients_starting_at_once_elect_exactly_one_owner
+          tests/test_daemon_election.py::TestRealOwner::test_launch_barrier_timeout_exits_without_electing
+          tests/test_daemon_election.py::TestRealOwner::test_launch_barrier_failure_collects_started_frontends
+          tests/test_daemon_election.py::TestAForwardedCallThroughTheRealOwner
+          tests/test_daemon_proxy.py::TestAnOwnerProcessKilledMidCall
+          tests/test_bootstrap.py::TestInstallerSupervisorLaunch::test_real_cpython_wait_unregister_contract
+          tests/test_daemon_descriptor.py::TestPreparedCommit
+          tests/test_daemon_descriptor.py::TestStateLocation
+          tests/test_daemon_lock.py
+          tests/test_installer_supervisor.py
+          tests/test_installer_worker.py
+          tests/test_process_tree.py
+          tests/test_daemon_regression_witnesses.py
+          tests/test_windows_guardian_probe.py
+          tests/test_private_state.py
+          tests/test_storage_class.py
+
+      # Only on failure, and tolerant of an empty folder: a Python exception
+      # fails this job without ever reaching Windows Error Reporting, and that
+      # is the ordinary red run.
+      - name: Upload the crash dump
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crash-dumps-${{ matrix.python-version }}
+          path: ${{ runner.temp }}/crash-dumps
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - run: uv cache prune --ci
+
+  # Branch protection on `main` requires `lint-and-check` and `test` only, and
+  # that list is a repository setting no workflow file can edit. So this job is
+  # where a contract that has to block a merge gets attached: it fails unless
+  # every job it names succeeded, which makes those jobs required without
+  # renaming anything. `if: always()` so a failure upstream still reaches the
+  # check below rather than skipping it, because a skipped required check is a
+  # green one.
+  test:
+    needs: [dependency-review, windows-daemon, platform-behaviour]
+    if: always()
+    runs-on: ubuntu-latest
+    # The camelCase read shims off, for the reason given at `windows-daemon`.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+    steps:
+      # The review job is intentionally skipped for pushes to main. On pull
+      # requests it joins this existing required check instead of adding a new
+      # branch-protection context.
+      - name: Require dependency review on pull requests
+        if: github.event_name == 'pull_request'
+        run: test '${{ needs.dependency-review.result }}' = success
+
+      - name: Require the Windows daemon tests
+        run: test '${{ needs.windows-daemon.result }}' = success
+
+      # Real browser containment on Windows and macOS runs nowhere else: the
+      # POSIX environment marker and the Windows Job a Chromium joins are
+      # facts only those platforms can confirm, and the lease and owner-only
+      # storage are a different implementation on each. Reading the result of
+      # the whole matrix, so one red leg fails this.
+      - name: Require the platform behaviour tests
+        run: test '${{ needs.platform-behaviour.result }}' = success
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           enable-cache: true
 
       - run: uv sync --group dev
 
+      # The browser is keyed on the resolved patchright version, because that
+      # is what decides which Chromium revision `install` fetches. Read from
+      # the synced environment rather than from `pyproject.toml`, which names
+      # a floor and not the version in use.
+      - name: Resolve the patchright version
+        id: patchright
+        run: |
+          version=$(uv run python -c 'from importlib.metadata import version; print(version("patchright"))')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the browser
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ steps.patchright.outputs.version }}
+
+      # `--no-shell`, the same install the server performs: the headless shell
+      # is a different product with no plugins and no `window.chrome`, and
+      # nothing here launches it. `--with-deps` runs on a cache hit too, since
+      # the cache holds the browser and not the apt packages it links against;
+      # it also brings Xvfb, which is in playwright's `tools` dependency group.
+      - name: Install the browser
+        run: uv run patchright install --with-deps chromium --no-shell
+
+      # A headed browser needs a display. The default mode does not on Linux,
+      # where the hidden target is unsupported and Chromium's own headless mode
+      # runs instead, but the identity gate launches headed as well and that is
+      # the mode where the headless token has to be absent.
+      - name: Start a display
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          for _ in $(seq 1 100); do
+            if [ -S /tmp/.X11-unix/X99 ]; then exit 0; fi
+            sleep 0.1
+          done
+          echo "Xvfb never created /tmp/.X11-unix/X99:" >&2
+          cat /tmp/xvfb.log >&2
+          exit 1
+
+      # An unsupported group flag is reported as UNSUPPORTED, not readiness.
+      - name: Measure retained leader pidfd group signaling
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/test_pidfd_group_signal.py::test_retained_leader_pidfd_signals_its_group_after_reaping
+
+      # `--dist loadgroup` keeps every test that launches Chromium on one
+      # worker. The identity cases share two cached launches; the DOM and auth
+      # contracts launch per case, and the DOM timers use wall-clock deadlines
+      # that concurrent browser startups made flaky. Tests without the group
+      # mark are distributed exactly as before.
       - name: Run tests
-        run: uv run pytest --cov --cov-report=term-missing -n auto -v -s
+        env:
+          DISPLAY: ":99"
+        run: uv run pytest --cov --cov-report=term-missing -n auto --dist loadgroup -v -s
+
+      # Release gate 1 of the default-on contract
+      # (docs/decisions/2026-09-26-daemon-default-on-contract.md): does the
+      # bundled browser accept a synthetic www.linkedin.com whose CA only this
+      # runner trusts? After the suite, so nothing above runs with an extra root
+      # in the store. The CA's key never leaves the issuing process, the CA is
+      # name-constrained to the synthetic names, and it expires within a day.
+      - name: Issue the synthetic origin certificates
+        run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
+
+      # The runner account's NSS database, which is where Chromium on Linux
+      # reads locally trusted roots. `~/.pki/nssdb` rather than the newer
+      # `~/.local/share/pki/nssdb`: since M146 Chromium prefers the old path
+      # whenever that directory exists, and older builds read nothing else, so
+      # creating it settles which database both read. The same step maps the
+      # synthetic names to loopback in the hosts file, so a browser that
+      # stopped using the proxy would reach a closed local port rather than
+      # LinkedIn. The guard refuses any machine that is not a disposable
+      # GitHub-hosted runner, `act` included.
+      - name: Trust the synthetic CA and fence off the real names
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to change a trust store outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v certutil >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libnss3-tools
+          fi
+          db="$HOME/.pki/nssdb"
+          mkdir -p "$db"
+          if [ ! -f "$db/cert9.db" ]; then
+            certutil -d "sql:$db" -N --empty-password
+          fi
+          certutil -d "sql:$db" -A -t "C,," -n "linkedin-mcp synthetic origin test CA" -i "$RUNNER_TEMP/synthetic-origin/ca.pem"
+          echo "Trust store: NSS sql:$db"
+          certutil -d "sql:$db" -L
+          hosts="$(printf '\n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test\n::1 www.linkedin.com static.licdn.com synthetic-canary.test\n')"
+          printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
+          echo "Hosts file:"; cat /etc/hosts
+
+      # The only step that opts in. A pass says the synthetic names resolved to
+      # loopback for the system and for an unproxied browser, the proxy refused
+      # a name it does not route before www.linkedin.com was named, the feed
+      # loaded under this run's CA, and a CA nobody trusted was still refused.
+      - name: Load the synthetic origin through the proxy
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+        timeout-minutes: 10
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
+
+      # Row H-R1 of the differential harness: one host starts the server, calls
+      # one read tool and quits, run Direct (K1), through the shared owner (K3),
+      # and through the owner again (K0), then K3 is held to K1 on O1 and O4.
+      # After the feasibility row, whose pass is what says this runner's fence
+      # and trust hold, and opted in the same way.
+      - name: Compare Direct and daemon on one host start and quit
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+        timeout-minutes: 20
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
+
+      # The frozen baseline (tests/differential/baseline.py): the pinned
+      # pre-default-on revision in a worktree of its own, with its own
+      # `uv sync` venv (runtime dependencies only, from its own lock) and its
+      # own `patchright install` into a browser cache of its own, so none of it
+      # is this checkout's. Refused unless HEAD is the pin and the worktree is
+      # clean. The system libraries `--with-deps` installed above serve its
+      # Chromium too.
+      - name: Prepare the frozen baseline
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+        timeout-minutes: 15
+        run: uv run python tests/differential/baseline.py "$RUNNER_TEMP/differential-baseline"
+
+      # K1 frozen on H-R1, and H-R12 (custom browser) in K1 frozen, K2 and K3.
+      # Its own pytest run, so its packet is its own run directory next to the
+      # H-R1 one in the evidence upload below.
+      - name: Compare the frozen baseline and a custom browser
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
+
+      # The signal oracle for H-R6 (tests/differential/signals.py): strace,
+      # attached to the killed server or owner and its guardian. Ubuntu's
+      # default kernel.yama.ptrace_scope is 1, which lets a tracer attach only
+      # to its descendants, and strace is not an ancestor of the owner, so the
+      # oracle runs `sudo -n strace`. Only here, behind the trust step's guard.
+      # H-R6 requires it on Linux: an oracle that cannot attach fails the row.
+      - name: Install the signal oracle
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq strace
+          fi
+          strace -V | head -1
+          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
+          sudo -n true
+
+      # Row H-R6, owner killed: K1 frozen (the Direct server killed), K2 (the
+      # baseline owner killed, whose guardian must be seen killing the owner's
+      # group) and K3 (the candidate owner killed, drained and recovered).
+      - name: Kill the owner and the Direct server
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
+
+      # Row H-R7, a close the product cannot confirm: every actor starts from
+      # a fault overlay (tests/differential/fault_overlay.py) whose declared
+      # fault hands one selected drain's True back as False. K0 twice (the
+      # plain runtime and the inert overlay), then K1 frozen, K2 and K3 three
+      # times each, with the strace oracle above, then their composition with
+      # the source model. A product-free child killing its own group under
+      # this runner's strace calibrates K2's witness first.
+      - name: Leave a close unconfirmed
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_unconfirmed_close_row.py
+
+      # The row's evidence packet: events, counts, watcher output, failures
+      # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
+      # The certificates sit in another directory and are never included.
+      # Always, so a red row keeps what made it red.
+      - name: Keep the differential evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: differential-evidence-ubuntu-latest
+          path: ${{ runner.temp }}/differential-evidence
+          if-no-files-found: warn
+          retention-days: 14
+
+      - run: uv cache prune --ci
+
+  # Everything here coordinates, protects or queries state through the operating
+  # system rather than through Python, so each platform runs a different
+  # implementation: the lease locks with flock or with LockFileEx, and
+  # owner-only storage is a permission bit or an access control list. The
+  # Ubuntu job above executes neither Windows path. Serial by choice: the lease
+  # tests spawn their own competing processes, and xdist would only add
+  # scheduling noise on top of that.
+  platform-behaviour:
+    name: Platform behaviour (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # The camelCase read shims off, for the reason given at `windows-daemon`.
+    env:
+      FASTMCP_MCP_CAMELCASE_COMPAT: "false"
+    # Long enough for a cold browser download and far short of the six hours
+    # a job without one is allowed to sit. These tests spawn real processes
+    # and wait on them, so a contract that stops holding turns into a wedged
+    # job rather than a red one, and a wedged job reads as work in progress
+    # for as long as anyone is willing to wait. Raised from 25 for the
+    # differential row at the end, whose own step bound is 20, and from 45
+    # for the frozen baseline after it: a second venv and browser download
+    # (bound 15) and five more native rows, three of them with an owner that
+    # leaves through its idle exit (bound 25), and from 75 for H-R6 after
+    # them: three more rows, two of them waiting out a recovered owner's idle
+    # exit (bound 25), and from 100 for H-R11 on Windows: two shim venvs and
+    # three rows, one waiting out a successor's idle exit (bound 25). Windows is
+    # the slowest leg. Raised from 125 for H-R7 on Linux arm64: two overlays
+    # and eleven rows (bound 45).
+    timeout-minutes: 170
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            browsers: ~/Library/Caches/ms-playwright
+          - os: windows-latest
+            browsers: ~\AppData\Local\ms-playwright
+          # Here for the browser rather than for the operating system. The
+          # release publishes an arm64 image, and its browser is a separate
+          # build from every other leg's: Chrome for Testing for linux-arm64
+          # at the lock, Playwright's own Chromium through patchright 1.61.2.
+          # Without this leg an identity regression in that build reaches the
+          # container with both other jobs green.
+          - os: ubuntu-24.04-arm
+            browsers: ~/.cache/ms-playwright
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: true
+
+      - run: uv sync --group dev
+
+      # ``faulthandler_timeout`` rather than a plugin: it is pytest's own, and
+      # what it buys is the stack of every thread at the moment a test stops
+      # making progress. These tests wait on processes they started, so the
+      # difference between a slow one and a stuck one is not visible from the
+      # outside and the report is the only way to tell them apart.
+      - name: Run platform behaviour tests
+        run: >-
+          uv run pytest -v -o faulthandler_timeout=120
+          tests/test_profile_lease.py
+          tests/test_profile_lease_integration.py
+          tests/test_private_state.py
+          tests/test_session_state.py::test_the_native_machine_api_answers_on_windows
+          tests/test_daemon_lock.py
+          tests/test_process_tree.py
+          tests/test_daemon_regression_witnesses.py
+          tests/test_greenlet_runtime.py
+          tests/test_storage_class.py
+          tests/differential/test_watcher.py
+          tests/differential/test_host_stub.py
+          tests/differential/test_preservation_gate.py
+          tests/differential/test_baseline.py
+          tests/differential/test_signals.py
+          tests/differential/test_failed_job_query.py
+
+      # The identity gate runs on every leg, because every leg's browser is a
+      # different one from the Ubuntu job's. macOS is the only platform with a
+      # hidden target, which is the whole reason the default mode can run
+      # without announcing itself as headless. Linux arm64 runs the browser
+      # build the arm64 image ships. Windows has its own binary, its own window
+      # manager and its own DPI handling, and the gate measures a headed window against the screen
+      # it stands on -- which is exactly where those differ. An earlier version
+      # of this file left Windows out on the grounds that it falls back to
+      # headless mode like Linux does; that is true of one case in that file
+      # and says nothing about the rest of them.
+      #
+      # Every leg blocks a merge, through `test` rather than by name. Branch
+      # protection requires `lint-and-check` and `test`, and `test` fails
+      # unless this whole matrix succeeded, so the required list stays as it is
+      # while a red leg here stops the merge. Before that it did not: this job
+      # held the only real browser containment run on Windows and macOS and
+      # nothing depended on it, so those contracts were advisory.
+      #
+      # `shell: bash` because one of the legs is Windows, where the default is
+      # PowerShell and none of the syntax below means anything.
+      - name: Resolve the patchright version
+        id: patchright
+        shell: bash
+        run: |
+          version=$(uv run python -c 'from importlib.metadata import version; print(version("patchright"))')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the browser
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ matrix.browsers }}
+          key: ms-playwright-${{ matrix.os }}-${{ steps.patchright.outputs.version }}
+
+      # `--with-deps` on Linux only. It is the platform where a missing
+      # system library stops Chromium starting at all, and the runner image
+      # makes no promise about them. macOS needs none, and on Windows the
+      # switch installs a Media Pack through a script that wants privileges
+      # this job has no reason to take.
+      - name: Install the browser
+        run: uv run patchright install ${{ runner.os == 'Linux' && '--with-deps' || '' }} chromium --no-shell
+
+      # Same reason as the Ubuntu job: the headed half of the gate needs
+      # somewhere to put a window, and the default half does not.
+      - name: Start a display
+        if: runner.os == 'Linux'
+        run: |
+          Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
+          for _ in $(seq 1 100); do
+            if [ -S /tmp/.X11-unix/X99 ]; then exit 0; fi
+            sleep 0.1
+          done
+          echo "Xvfb never created /tmp/.X11-unix/X99:" >&2
+          cat /tmp/xvfb.log >&2
+          exit 1
+
+      # Separate from the process tests above, which run before a browser
+      # exists and would skip this. It belongs on every leg because the
+      # attribution differs per platform: POSIX scans for an environment
+      # marker the browser carries, while Windows has no such marker and
+      # depends on Chromium joining the Job its Node driver was assigned to
+      # -- a fact about Windows that only Windows can confirm.
+      - name: Run the browser containment test
+        run: uv run pytest tests/test_browser_containment.py
+
+      - name: Run the Windows browser launch evidence
+        if: runner.os == 'Windows'
+        env:
+          UV_PYTHON: "3.13"
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/test_windows_browser_launch_evidence.py
+
+      - name: Run the identity gate
+        env:
+          # Only where one was started. macOS ignores it, but naming a display
+          # that does not exist is the kind of thing someone later debugs.
+          DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+        run: uv run pytest tests/test_browser_identity.py
+
+      # The synthetic origin gate from the Ubuntu job, on every other browser
+      # build. Last, so the containment and identity tests above run against an
+      # unmodified trust store.
+      - name: Issue the synthetic origin certificates
+        shell: bash
+        run: uv run python tests/differential/synthetic_origin.py "$RUNNER_TEMP/synthetic-origin"
+
+      # One store per platform, the one the bundled browser reads locally
+      # trusted roots from. Linux: the runner account's NSS database, for the
+      # reason given in the Ubuntu job. macOS: the admin trust domain in the
+      # System keychain; the user domain asks for interactive authorisation,
+      # which a runner cannot give, and passwordless sudo is what lets the
+      # admin domain through. Windows: LocalMachine\Root; adding to the
+      # CurrentUser root store raises a confirmation dialog nobody is there to
+      # answer. The two machine-wide stores, and the hosts file, are acceptable
+      # only because the guard admits nothing but a disposable GitHub-hosted
+      # runner.
+      - name: Trust the synthetic CA and fence off the real names
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to change a trust store outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          ca="$RUNNER_TEMP/synthetic-origin/ca.pem"
+          name="linkedin-mcp synthetic origin test CA"
+          case "$RUNNER_OS" in
+            Linux)
+              if ! command -v certutil >/dev/null; then
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq libnss3-tools
+              fi
+              db="$HOME/.pki/nssdb"
+              mkdir -p "$db"
+              if [ ! -f "$db/cert9.db" ]; then
+                certutil -d "sql:$db" -N --empty-password
+              fi
+              certutil -d "sql:$db" -A -t "C,," -n "$name" -i "$ca"
+              echo "Trust store: NSS sql:$db"
+              certutil -d "sql:$db" -L
+              ;;
+            macOS)
+              sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$ca"
+              echo "Trust store: admin trust settings, /Library/Keychains/System.keychain"
+              security dump-trust-settings -d | grep -F -A4 "$name"
+              ;;
+            Windows)
+              certutil.exe -addstore -f Root "$(cygpath -w "$ca")"
+              echo "Trust store: LocalMachine\\Root"
+              certutil.exe -store Root "$name"
+              ;;
+            *)
+              echo "No trust step for $RUNNER_OS" >&2
+              exit 1
+              ;;
+          esac
+          # The fence from the Ubuntu job. Each platform's resolver caches, so
+          # each is flushed after the hosts file changes.
+          hosts="$(printf '\n127.0.0.1 www.linkedin.com static.licdn.com synthetic-canary.test\n::1 www.linkedin.com static.licdn.com synthetic-canary.test\n')"
+          case "$RUNNER_OS" in
+            Linux)
+              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
+              cat /etc/hosts
+              ;;
+            macOS)
+              printf '%s\n' "$hosts" | sudo tee -a /etc/hosts >/dev/null
+              sudo dscacheutil -flushcache
+              sudo killall -HUP mDNSResponder
+              cat /etc/hosts
+              ;;
+            Windows)
+              hosts_file=/c/Windows/System32/drivers/etc/hosts
+              printf '%s\n' "$hosts" >> "$hosts_file"
+              MSYS_NO_PATHCONV=1 ipconfig.exe /flushdns
+              cat "$hosts_file"
+              ;;
+          esac
+
+      - name: Load the synthetic origin through the proxy
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+        timeout-minutes: 10
+        run: uv run pytest -v -s -o faulthandler_timeout=120 tests/differential/test_synthetic_origin.py
+
+      # Row H-R1, as in the Ubuntu job.
+      - name: Compare Direct and daemon on one host start and quit
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+        timeout-minutes: 20
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_host_quit_row.py
+
+      # The frozen baseline and its rows, as in the Ubuntu job.
+      - name: Prepare the frozen baseline
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+        timeout-minutes: 15
+        shell: bash
+        run: uv run python tests/differential/baseline.py "$RUNNER_TEMP/differential-baseline"
+
+      - name: Compare the frozen baseline and a custom browser
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_frozen_rows.py
+
+      # The signal oracle and row H-R6, as in the Ubuntu job. The oracle runs
+      # on Linux only, where H-R6 requires it; macOS and Windows record it as
+      # unavailable.
+      - name: Install the signal oracle
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_ACTIONS:-}" != true ] || [ "${RUNNER_ENVIRONMENT:-}" != github-hosted ] || [ -n "${ACT:-}" ]; then
+            echo "Refusing to trace processes outside a disposable GitHub-hosted runner" >&2
+            exit 1
+          fi
+          if ! command -v strace >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq strace
+          fi
+          strace -V | head -1
+          echo "kernel.yama.ptrace_scope: $(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)"
+          sudo -n true
+
+      - name: Kill the owner and the Direct server
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_owner_killed_rows.py
+
+      # Row H-R11, a failed Job-membership query at a routine close, Windows
+      # only: K1 frozen, K2 (the baseline owner reaches the failed query in
+      # its close) and K3 (the candidate reaches it, stands down, and a
+      # successor serves), then their composition with the source model of
+      # the branch each routine takes. Each runs from a venv with one declared
+      # shim (tests/differential/job_query.py), whose hash the evidence
+      # records; no native evidence names the caller that ended an installer.
+      - name: Fail the drain's Job query
+        if: runner.os == 'Windows'
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 25
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_failed_job_query_row.py
+
+      # Row H-R7, as in the Ubuntu job; here it is the arm64 leg's. macOS and
+      # Windows run it too, and every case is counted as skipped there.
+      - name: Leave a close unconfirmed
+        env:
+          LINKEDIN_MCP_DIFFERENTIAL_CI: "1"
+          LINKEDIN_MCP_DIFFERENTIAL_CA_DIR: ${{ runner.temp }}/synthetic-origin
+          LINKEDIN_MCP_DIFFERENTIAL_OUT: ${{ runner.temp }}/differential-evidence
+          LINKEDIN_MCP_DIFFERENTIAL_BASELINE: ${{ runner.temp }}/differential-baseline
+        timeout-minutes: 45
+        run: uv run pytest -v -s -o faulthandler_timeout=300 tests/differential/test_unconfirmed_close_row.py
+
+      # The row's evidence packet: events, counts, watcher output, failures
+      # and the runtime identity, and nothing else (``events.PUBLISHED_FILES``).
+      # The certificates sit in another directory and are never included.
+      # Always, so a red row keeps what made it red.
+      - name: Keep the differential evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: differential-evidence-${{ matrix.os }}
+          path: ${{ runner.temp }}/differential-evidence
+          if-no-files-found: warn
+          retention-days: 14
 
       - run: uv cache prune --ci

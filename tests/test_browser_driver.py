@@ -1,15 +1,22 @@
 """Tests for linkedin_mcp_server.drivers.browser runtime-aware auth startup."""
 
+import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
-from linkedin_mcp_server.core import NetworkError
+from linkedin_mcp_server.core.exceptions import (
+    AccountRestrictedError,
+    AuthenticationError,
+    NetworkError,
+    ProxyConnectionError,
+)
+from linkedin_mcp_server.exceptions import BrowserShutdownUnconfirmedError
 from linkedin_mcp_server.drivers.browser import (
     _feed_auth_succeeds,
-    _is_transient_network_error,
     get_or_create_browser,
     reset_browser_for_testing,
     validate_imported_cookies,
@@ -153,6 +160,38 @@ async def test_same_runtime_uses_source_profile(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_restricted_account_stops_the_startup_feed_check(tmp_path):
+    """Not a dead session: the caller must not retire it and log in again."""
+    profile_dir = _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+    source_browser = _make_mock_browser()
+    source_browser.page.url = (
+        "https://www.linkedin.com/flagship-web/login/login-restriction/"
+    )
+
+    with (
+        patch(
+            "linkedin_mcp_server.drivers.browser.get_runtime_id",
+            return_value="macos-arm64-host",
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.BrowserManager",
+            return_value=source_browser,
+        ),
+        patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ),
+        pytest.raises(AccountRestrictedError, match="identity verification"),
+    ):
+        await get_or_create_browser()
+
+    source_browser.close.assert_awaited()
+    assert source_state_path(profile_dir).exists()
+    assert (profile_dir / "Default" / "Cookies").exists()
+
+
+@pytest.mark.asyncio
 async def test_same_runtime_clicks_remember_me_during_feed_validation(tmp_path):
     _write_source_state(tmp_path, runtime_id="macos-arm64-host")
     source_browser = _make_mock_browser()
@@ -237,116 +276,6 @@ async def test_feed_auth_records_single_post_recovery_trace():
     steps = [call.args[1] for call in record_page_trace.await_args_list]
     assert "feed-after-remember-me-error-recovery" in steps
     assert "feed-navigation-error-before-remember-me-retry" not in steps
-
-
-def test_is_transient_network_error_detects_dns_and_connectivity():
-    assert _is_transient_network_error(
-        Exception("Page.goto: net::ERR_NAME_NOT_RESOLVED at https://...")
-    )
-    assert _is_transient_network_error(Exception("net::ERR_INTERNET_DISCONNECTED"))
-    assert _is_transient_network_error(Exception("net::ERR_CONNECTION_RESET"))
-    # Playwright navigation timeout (Greptile P1) must also be retriable.
-    assert _is_transient_network_error(
-        Exception("Page.goto: Timeout 30000ms exceeded.")
-    )
-    # An auth barrier / redirect is NOT a network error - must stay quarantinable.
-    assert not _is_transient_network_error(Exception("net::ERR_TOO_MANY_REDIRECTS"))
-    assert not _is_transient_network_error(Exception("auth barrier URL: /login"))
-
-
-@pytest.mark.asyncio
-async def test_feed_auth_raises_network_error_on_dns_failure():
-    """A DNS/connectivity failure must raise NetworkError, not return False.
-
-    Returning False is read by callers as "session invalid" and quarantines a
-    valid login. NetworkError is surfaced as retriable and preserves the session.
-    """
-    browser = _make_mock_browser()
-    browser.page.goto = AsyncMock(
-        side_effect=Exception(
-            "Page.goto: net::ERR_NAME_NOT_RESOLVED at https://www.linkedin.com/feed/"
-        )
-    )
-
-    with (
-        patch(
-            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
-            new_callable=AsyncMock,
-            return_value=False,
-        ),
-        patch(
-            "linkedin_mcp_server.drivers.browser.record_page_trace",
-            new_callable=AsyncMock,
-        ),
-    ):
-        with pytest.raises(NetworkError):
-            await _feed_auth_succeeds(browser)
-
-
-@pytest.mark.asyncio
-async def test_feed_auth_raises_network_error_on_navigation_timeout():
-    """A slow /feed/ load must not quarantine a valid session (Greptile P1)."""
-    browser = _make_mock_browser()
-    browser.page.goto = AsyncMock(
-        side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
-    )
-
-    with (
-        patch(
-            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
-            new_callable=AsyncMock,
-            return_value=False,
-        ),
-        patch(
-            "linkedin_mcp_server.drivers.browser.record_page_trace",
-            new_callable=AsyncMock,
-        ),
-    ):
-        with pytest.raises(NetworkError):
-            await _feed_auth_succeeds(browser)
-
-
-@pytest.mark.asyncio
-async def test_bridge_network_error_does_not_clear_runtime_profile(
-    tmp_path, monkeypatch
-):
-    """Greptile P1: NetworkError during bridge must not wipe derived runtime.
-
-    ``_bridge_runtime_profile`` always clears once at entry (fresh bridge).
-    The bug was a second clear in the broad ``except Exception`` path, which
-    could discard a nearly-committed profile on a transient DNS/timeout blip.
-    """
-    _write_source_state(
-        tmp_path, runtime_id="macos-arm64-host", login_generation="gen-2"
-    )
-    first_browser = _make_mock_browser()
-    first_browser.import_cookies = AsyncMock(return_value=True)
-    monkeypatch.setenv("LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION", "1")
-
-    with (
-        patch(
-            "linkedin_mcp_server.drivers.browser.get_runtime_id",
-            return_value="linux-amd64-container",
-        ),
-        patch(
-            "linkedin_mcp_server.drivers.browser.BrowserManager",
-            return_value=first_browser,
-        ),
-        patch(
-            "linkedin_mcp_server.drivers.browser._feed_auth_succeeds",
-            new_callable=AsyncMock,
-            side_effect=NetworkError("DNS blip"),
-        ),
-        patch(
-            "linkedin_mcp_server.drivers.browser.clear_runtime_profile",
-        ) as mock_clear,
-        pytest.raises(NetworkError),
-    ):
-        await get_or_create_browser()
-
-    # Entry clear only - no second clear from the NetworkError cleanup path.
-    assert mock_clear.call_count == 1
-    first_browser.close.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1008,3 +937,574 @@ async def test_concurrent_get_or_create_creates_single_browser(monkeypatch):
     )
     assert first is sentinel and second is sentinel
     assert calls["n"] == 1
+
+
+class TestRepeatedCancelsDuringStartupCleanup:
+    """A second cancel must not walk out of a cleanup carrying no verdict.
+
+    ``BrowserManager.close()`` takes its handles before its first await, so a
+    cancel landing inside it leaves the manager empty with Chromium possibly
+    still on the profile. The startup cleanups used to await it bare: the first
+    cancel failed the startup and entered the cleanup, the second escaped it,
+    ``_create_browser`` released the crash guardian and the profile lease on the
+    way out, and the next launch was free to open a second browser on a profile
+    the first may still have been holding. One cancel is a tool timeout, the
+    second is server shutdown racing it; neither is exotic.
+    """
+
+    @staticmethod
+    def _wire(tmp_path, monkeypatch, *, close_proves: bool):
+        _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+        browser = _make_mock_browser()
+        in_cleanup = asyncio.Event()
+        may_finish = asyncio.Event()
+        closes: list[bool] = []
+
+        async def close() -> bool:
+            in_cleanup.set()
+            await may_finish.wait()
+            closes.append(close_proves)
+            return close_proves
+
+        browser.close = AsyncMock(side_effect=close)
+
+        async def cancelled_feed_check(*_args, **_kwargs) -> bool:
+            raise asyncio.CancelledError
+
+        released: list[str] = []
+        monkeypatch.setattr(browser_module, "start_browser_guardian", lambda _fd: None)
+        monkeypatch.setattr(
+            browser_module, "release_browser_guardian", lambda: released.append("go")
+        )
+        monkeypatch.setattr(browser_module, "_feed_auth_succeeds", cancelled_feed_check)
+        monkeypatch.setattr(
+            browser_module, "get_runtime_id", lambda: "macos-arm64-host"
+        )
+        monkeypatch.setattr(browser_module, "BrowserManager", lambda **_kw: browser)
+        return browser, in_cleanup, may_finish, closes, released
+
+    @staticmethod
+    async def _two_cancels(task: asyncio.Task, may_finish: asyncio.Event) -> None:
+        """Land two cancels inside the cleanup and prove neither got out."""
+        for _ in range(2):
+            task.cancel()
+            for _ in range(4):
+                await asyncio.sleep(0)
+            assert not task.done(), "a cancel escaped the cleanup"
+        may_finish.set()
+
+    async def test_an_unproven_close_keeps_the_lease_and_the_guardian(
+        self, tmp_path, monkeypatch
+    ):
+        browser, in_cleanup, may_finish, closes, released = self._wire(
+            tmp_path, monkeypatch, close_proves=False
+        )
+
+        task = asyncio.ensure_future(get_or_create_browser())
+        await in_cleanup.wait()
+        await self._two_cancels(task, may_finish)
+
+        with pytest.raises(BrowserShutdownUnconfirmedError):
+            await task
+
+        assert closes == [False], "the close verdict was never obtained"
+        assert browser_module._browser is None, "the manager became the singleton"
+        assert released == [], "the crash guardian was released without a verdict"
+        lease = browser_module._browser_lease
+        assert lease is not None, "the profile was handed back unproven"
+        assert lease.browser_open is True
+
+    async def test_a_proved_close_still_re_raises_the_original_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """Nothing is swallowed: the cancellation that failed the startup is it."""
+        browser, in_cleanup, may_finish, closes, released = self._wire(
+            tmp_path, monkeypatch, close_proves=True
+        )
+
+        task = asyncio.ensure_future(get_or_create_browser())
+        await in_cleanup.wait()
+        await self._two_cancels(task, may_finish)
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert closes == [True]
+        assert browser_module._browser is None
+        # Proved gone, so the profile may go back -- and only now.
+        assert released == ["go"]
+        assert browser_module._browser_lease is None
+
+
+class TestProxyLaunchOptions:
+    """The proxy must reach every browser this module launches."""
+
+    def test_no_proxy_omits_the_key(self):
+        launch_options, _ = browser_module._launch_options()
+        assert "proxy" not in launch_options
+
+    def test_configured_proxy_is_passed_through(self):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        browser_module.get_config().browser.proxy_username = "user"
+        browser_module.get_config().browser.proxy_password = "pw"
+        launch_options, _ = browser_module._launch_options()
+        assert launch_options["proxy"] == {
+            "server": "http://gate.example:7000",
+            "username": "user",
+            "password": "pw",
+        }
+
+    def test_credentials_are_not_logged(self, caplog):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        browser_module.get_config().browser.proxy_username = "user"
+        browser_module.get_config().browser.proxy_password = "s3cr3t"
+        with caplog.at_level(logging.INFO):
+            browser_module._launch_options()
+        assert "gate.example" in caplog.text
+        assert "s3cr3t" not in caplog.text
+
+    def test_a_proxy_keeps_webrtc_off_the_direct_route(self):
+        """Without this, WebRTC hands the page the real address over UDP.
+
+        Measured against a real STUN server: the page saw the proxy's address
+        in the HTTP request and the machine's real IPv4 and IPv6 in the ICE
+        candidates simultaneously, which makes the proxy pointless against
+        anyone who correlates the two.
+        """
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        launch_options, _ = browser_module._launch_options()
+
+        args = launch_options["args"]
+        assert "--webrtc-ip-handling-policy=disable_non_proxied_udp" in args
+        # Both spellings: full Chrome reads the plain one through the
+        # command-line pref store, chrome-headless-shell reads only the
+        # --force- variant. Passing one covers half the browser ladder.
+        assert "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" in args
+
+    def test_no_proxy_leaves_webrtc_alone(self):
+        """With a direct connection there is no bypass to prevent.
+
+        The switches do not merely mask the address, they stop ICE from
+        producing candidates at all, so applying them unconditionally would
+        disable a working browser capability for no benefit.
+        """
+        launch_options, _ = browser_module._launch_options()
+        assert "args" not in launch_options
+
+    @pytest.mark.asyncio
+    async def test_proxy_reaches_the_browser_manager(self, tmp_path):
+        _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        source_browser = _make_mock_browser()
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.get_runtime_id",
+                return_value="macos-arm64-host",
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.BrowserManager",
+                return_value=source_browser,
+            ) as ctor,
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await get_or_create_browser()
+
+        assert ctor.call_args.kwargs["proxy"] == {"server": "http://gate.example:7000"}
+
+
+class TestProxyFailureIsNotAnAuthFailure:
+    """A dead proxy must not be reported as an expired LinkedIn session.
+
+    Without this the feed check swallows the navigation error, the caller
+    concludes the stored profile is invalid, and the user is told to run
+    --login: advice that cannot fix a proxy and that retires a good profile.
+    """
+
+    @pytest.mark.asyncio
+    async def test_proxy_navigation_error_raises_proxy_error(self, monkeypatch):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config",
+            browser_module.get_config,
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_PROXY_CONNECTION_FAILED at …")
+        )
+
+        with pytest.raises(ProxyConnectionError, match="gate.example"):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    async def test_proxy_error_survives_the_remember_me_retry(self, monkeypatch):
+        # The recursive retries run inside the same try, so an inner
+        # ProxyConnectionError would otherwise be caught by the outer except.
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config",
+            browser_module.get_config,
+        )
+        browser = _make_mock_browser()
+        # The first navigation must succeed so the remember-me branch is taken
+        # and _feed_auth_succeeds calls itself; only the retry hits the proxy
+        # fault. Failing on the first call would never reach the recursion and
+        # would silently duplicate the test above.
+        browser.page.goto = AsyncMock(
+            side_effect=[None, Exception("net::ERR_TUNNEL_CONNECTION_FAILED")]
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=True,
+            ) as resolver,
+            pytest.raises(ProxyConnectionError),
+        ):
+            await _feed_auth_succeeds(browser)
+
+        assert browser.page.goto.await_count == 2
+        resolver.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_proxy_password_is_not_in_the_message(self, monkeypatch):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        browser_module.get_config().browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config",
+            browser_module.get_config,
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_PROXY_CONNECTION_FAILED user:s3cr3t@gate")
+        )
+
+        with pytest.raises(ProxyConnectionError) as excinfo:
+            await _feed_auth_succeeds(browser)
+        assert "s3cr3t" not in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_ordinary_navigation_error_still_returns_false(self, monkeypatch):
+        # The existing behaviour for a genuinely broken session is unchanged.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config",
+            browser_module.get_config,
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_TOO_MANY_REDIRECTS")
+        )
+
+        with patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+
+class TestUnreachableLinkedInKeepsTheSession:
+    """No network is not a dead session (fork 7fba0ad, upstream issue #521).
+
+    The feed check runs on every browser start, including the first call after
+    each idle close, so a Mac waking from sleep or a VPN reconnecting meets it
+    first. Reported as an invalid session, the recovery moves the stored
+    profile aside and asks for a login over a network that is merely down.
+    """
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "net::ERR_INTERNET_DISCONNECTED",
+            "net::ERR_NAME_NOT_RESOLVED",
+            "net::ERR_NETWORK_CHANGED",
+            "net::ERR_NETWORK_IO_SUSPENDED",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_an_unreachable_linkedin_raises_a_network_error(
+        self, monkeypatch, code
+    ):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception(f"Page.goto: {code} at https://www.linkedin.com/")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(NetworkError, match=code) as excinfo,
+        ):
+            await _feed_auth_succeeds(browser)
+        assert not isinstance(excinfo.value, ProxyConnectionError)
+
+    @pytest.mark.asyncio
+    async def test_a_barrier_still_outranks_the_network_error(self, monkeypatch):
+        # A redirect to /login that merely missed its load event is evidence
+        # about the session, whatever the navigation error said.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(side_effect=Exception("net::ERR_NETWORK_CHANGED"))
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value="login page",
+            ),
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+    @pytest.mark.asyncio
+    async def test_startup_offline_keeps_the_source_profile(self, tmp_path):
+        profile_dir = _write_source_state(tmp_path, runtime_id="macos-arm64-host")
+        source_browser = _make_mock_browser()
+        source_browser.page.goto = AsyncMock(
+            side_effect=Exception("net::ERR_INTERNET_DISCONNECTED")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.get_runtime_id",
+                return_value="macos-arm64-host",
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.BrowserManager",
+                return_value=source_browser,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            pytest.raises(NetworkError) as excinfo,
+        ):
+            await get_or_create_browser()
+
+        assert not isinstance(excinfo.value, AuthenticationError)
+        source_browser.close.assert_awaited()
+        assert source_state_path(profile_dir).exists()
+        assert (profile_dir / "Default" / "Cookies").exists()
+
+
+class TestAmbiguousProxyFailureKeepsTheSession:
+    """A navigation that fails outright under a proxy is not a dead session.
+
+    Wrong proxy credentials produce no proxy error code: Chromium retries the
+    challenge until the page times out. Reading that as an invalid session
+    hands the caller an AuthenticationError, whose recovery moves the stored
+    profile aside and reruns login through the same broken proxy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_timeout_under_a_proxy_raises_instead_of_false(self, monkeypatch):
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
+        )
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            pytest.raises(ProxyConnectionError, match="gate.example"),
+        ):
+            await _feed_auth_succeeds(browser)
+
+    @pytest.mark.asyncio
+    async def test_the_same_timeout_without_a_proxy_still_returns_false(
+        self, monkeypatch
+    ):
+        # Unchanged behaviour when no proxy is configured: a broken session
+        # must still be reported as one.
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
+        )
+
+        with patch(
+            "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+            new_callable=AsyncMock,
+            return_value=False,
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+    @pytest.mark.asyncio
+    async def test_an_auth_barrier_under_a_proxy_still_reports_false(self, monkeypatch):
+        # A barrier means a page loaded and LinkedIn refused it, which is real
+        # evidence about the session, so the proxy must not mask it.
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value="login_wall",
+            ),
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+    @pytest.mark.asyncio
+    async def test_a_barrier_behind_a_failed_navigation_still_reports_false(
+        self, monkeypatch
+    ):
+        # The sharp case: an expired session redirects /feed/ to /login and the
+        # load event then times out. A URL and title survive that, so the
+        # barrier is real evidence and must outrank the proxy explanation --
+        # otherwise the derived-runtime re-bridge, which only catches
+        # AuthenticationError, is skipped for a genuinely dead session.
+        browser_module.get_config().browser.proxy_server = "http://gate.example:7000"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        browser.page.goto = AsyncMock(
+            side_effect=Exception("Page.goto: Timeout 30000ms exceeded.")
+        )
+        browser.page.url = "https://www.linkedin.com/login"
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value="auth blocker URL: /login",
+            ),
+        ):
+            assert await _feed_auth_succeeds(browser) is False
+
+
+class TestFeedFailureDoesNotLeakCredentials:
+    """The trace and the log outlive the call, so both must be redacted.
+
+    A driver error can quote the proxy URL. The trace is written to disk and
+    the log is what users paste into issue reports, so redacting only the
+    user-facing exception message is not enough.
+    """
+
+    @pytest.mark.asyncio
+    async def test_trace_and_log_are_redacted(self, monkeypatch, caplog):
+        config = browser_module.get_config()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_username = "acctzone9"
+        config.browser.proxy_password = "s3cr3t"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.config.get_config", browser_module.get_config
+        )
+        browser = _make_mock_browser()
+        # No proxy marker, so it reaches the trace and log below rather than
+        # being converted straight away.
+        browser.page.goto = AsyncMock(
+            side_effect=Exception(
+                "failed via http://acctzone9:s3cr3t@gate.example:7000"
+            )
+        )
+
+        traces: list[str] = []
+
+        async def capture_trace(_page, _step, extra=None):
+            traces.append(str(extra))
+
+        with (
+            patch(
+                "linkedin_mcp_server.drivers.browser.resolve_remember_me_prompt",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.detect_auth_barrier_quick",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.drivers.browser.record_page_trace", capture_trace
+            ),
+            caplog.at_level(logging.WARNING),
+            pytest.raises(ProxyConnectionError),
+        ):
+            await _feed_auth_succeeds(browser)
+
+        assert not any("s3cr3t" in trace for trace in traces)
+        assert "s3cr3t" not in caplog.text
+        assert "acctzone9" not in caplog.text
+
+
+class TestTheCookieExportCannotStrandTheProfile:
+    """Closing runs the export first, and it used to be able to hang there.
+
+    ``export_cookies`` awaits a protocol call that has no deadline of its own,
+    and on close it runs before the bounded teardown, with the singleton already
+    cleared and the profile lease still held, inside a section that defers
+    cancellation. A call that never answered therefore stranded the profile
+    before anything bounded was reached and raised nothing for anyone to act on:
+    no close result, no exception, no stand-down.
+    """
+
+    async def test_an_export_that_never_answers_gives_up(self):
+        from unittest.mock import MagicMock, patch
+
+        from linkedin_mcp_server.core import browser as core
+
+        manager = core.BrowserManager.__new__(core.BrowserManager)
+        context = MagicMock()
+
+        async def never_answers():
+            await asyncio.sleep(3600)
+
+        context.cookies = never_answers
+        manager._context = context
+
+        with patch.object(core, "_CLEANUP_TIMEOUT_SECONDS", 0.2):
+            began = asyncio.get_running_loop().time()
+            exported = await manager.export_cookies("/tmp/never-written.json")
+            took = asyncio.get_running_loop().time() - began
+
+        # Reported as a failed export, not raised: the caller logs it and carries
+        # on to the teardown, which is the part that must not be skipped.
+        assert exported is False
+        assert took < 2, f"the export was still unbounded ({took:.1f}s)"

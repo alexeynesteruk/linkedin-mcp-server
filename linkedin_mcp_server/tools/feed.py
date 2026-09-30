@@ -3,7 +3,7 @@ LinkedIn feed scraping tool.
 
 Fetches posts from the authenticated user's LinkedIn home feed using
 innerText extraction. Scrolls until the requested number of post
-permalinks have been observed in SDUI pagination responses - a
+permalinks have been observed in SDUI pagination responses — a
 locale-independent progress signal, since the feed DOM exposes no
 stable per-post container selector.
 """
@@ -12,16 +12,15 @@ import logging
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
-from fastmcp.exceptions import ToolError
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
 from linkedin_mcp_server.core.exceptions import AuthenticationError
-from linkedin_mcp_server.dependencies import extractor_depends, handle_auth_error
+from linkedin_mcp_server.dependencies import get_ready_extractor, handle_auth_error
 from linkedin_mcp_server.error_handler import raise_tool_error
-from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
-from linkedin_mcp_server.scraping.constants import RATE_LIMITED_MSG as _RATE_LIMITED_MSG
-from linkedin_mcp_server.scraping.extractor import normalize_post_url
+from linkedin_mcp_server.scraping.contracts import RATE_LIMITED_SECTION_TEXT
+from linkedin_mcp_server.scraping.contracts import rate_limited_section_error
+from linkedin_mcp_server.scraping.identifiers import normalize_post_url
 from linkedin_mcp_server.scraping.link_metadata import Reference
 
 logger = logging.getLogger(__name__)
@@ -41,7 +40,6 @@ def register_feed_tools(
     async def get_feed(
         ctx: Context,
         num_posts: Annotated[int, Field(ge=1, le=50)] = 10,
-        extractor: Any = extractor_depends("get_feed"),
     ) -> dict[str, Any]:
         """
         Get posts from the authenticated user's LinkedIn feed.
@@ -57,7 +55,7 @@ def register_feed_tools(
             - references["feed"]: list of {kind: "feed_post", url, ...}
               entries. URLs are relative paths and may carry either
               ``/feed/update/<urn>/`` (DOM-anchor-derived) or
-              ``/posts/<slug>`` (SDUI-derived) shape - both are valid
+              ``/posts/<slug>`` (SDUI-derived) shape — both are valid
               LinkedIn permalinks.
             - section_errors: present when the feed is rate-limited or
               extraction fails.
@@ -67,6 +65,7 @@ def register_feed_tools(
             should parse sections["feed"] for post bodies.
         """
         try:
+            extractor = await get_ready_extractor(ctx, tool_name="get_feed")
             logger.info("Scraping feed (num_posts=%d)", num_posts)
 
             await ctx.report_progress(
@@ -79,15 +78,12 @@ def register_feed_tools(
             sections: dict[str, str] = {}
             references: dict[str, list[Reference]] = {}
             section_errors: dict[str, dict[str, Any]] = {}
-            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
+            if extracted.text and extracted.text != RATE_LIMITED_SECTION_TEXT:
                 sections["feed"] = extracted.text
                 if extracted.references:
                     references["feed"] = extracted.references
-            elif extracted.text == _RATE_LIMITED_MSG:
-                section_errors["feed"] = {
-                    "error_type": "rate_limit",
-                    "error_message": extracted.text,
-                }
+            elif extracted.text == RATE_LIMITED_SECTION_TEXT:
+                section_errors["feed"] = rate_limited_section_error()
             elif extracted.error:
                 section_errors["feed"] = extracted.error
 
@@ -98,11 +94,7 @@ def register_feed_tools(
                 result["references"] = references
             if section_errors:
                 result["section_errors"] = section_errors
-            return annotate_empty_scrape_result(
-                result,
-                tool_name="get_feed",
-                required_sections=("feed",),
-            )
+            return result
 
         except AuthenticationError as e:
             try:
@@ -122,79 +114,46 @@ def register_feed_tools(
         post_url: str,
         ctx: Context,
         max_scrolls: Annotated[int, Field(ge=1, le=50)] | None = None,
-        extractor: Any = extractor_depends("get_post_comments"),
     ) -> dict[str, Any]:
         """
         Get a single LinkedIn post with its full comment thread.
 
-        Use this to read the comments (and nested replies) other people
-        left on a post - e.g. on the authenticated user's own posts. Obtain
-        post URLs from references["feed"] (get_feed), the posts/comments
-        sections of get_person_profile / get_my_profile, or get_company_posts.
+        Use this to read the comments (and nested replies) other people left on
+        a post, for example on the authenticated user's own posts. Obtain post
+        URLs from references["feed"] (get_feed), the posts sections of
+        get_person_profile / get_my_profile, or get_company_posts. Read-only:
+        nothing is liked, replied to or posted.
 
         Args:
-            post_url: Post permalink. Accepts a full or relative URL in
-                either ``/feed/update/<urn>/`` or ``/posts/<slug>`` form, or
-                a bare URN like ``urn:li:activity:7203847...``.
+            post_url: Post permalink: a full or relative URL in either
+                /feed/update/<urn>/ or /posts/<slug> form, or a bare
+                urn:li:activity:<id>. Any other address is refused.
             ctx: FastMCP context for progress reporting
-            max_scrolls: Maximum "load more comments" / "see previous
-                replies" pagination clicks (default 5). Increase for posts
-                with long comment threads.
+            max_scrolls: Maximum comment pagination rounds (1-50, default 5).
+                Increase for posts with long comment threads.
 
         Returns:
-            Dict with url and sections["post"] containing the post body and
-            comment thread as raw text. references["post"] lists commenter
-            profiles and linked posts. section_errors is present when the
-            page is rate-limited or extraction fails. The LLM should parse
-            the raw text; the comment thread follows the post body.
+            Dict with url and sections["post"] holding the post body and comment
+            thread as raw text, plus optional references["post"] (commenter
+            profiles and linked posts) and section_errors when the page is
+            rate-limited or extraction fails. The LLM should parse the raw
+            text; the comment thread follows the post body.
         """
         try:
-            url = normalize_post_url(post_url)
-            if url is None:
-                raise ToolError(
-                    "post_url must be a LinkedIn post permalink "
-                    "(/feed/update/<urn>/ or /posts/<slug>, full or relative "
-                    "URL) or a bare urn:li:activity:<id>."
-                )
-
-            logger.info("Scraping post comments: %s", url)
+            # Before the browser: a value that names no post costs nothing.
+            post_url = normalize_post_url(post_url)
+            extractor = await get_ready_extractor(ctx, tool_name="get_post_comments")
+            logger.info("Scraping post comments: %s", post_url)
 
             await ctx.report_progress(
                 progress=0, total=100, message="Loading post and comments"
             )
 
-            extracted = await extractor.get_post_comments(url, max_scrolls=max_scrolls)
-
-            sections: dict[str, str] = {}
-            references: dict[str, list[Reference]] = {}
-            section_errors: dict[str, dict[str, Any]] = {}
-            if extracted.text and extracted.text != _RATE_LIMITED_MSG:
-                sections["post"] = extracted.text
-                if extracted.references:
-                    references["post"] = extracted.references
-            elif extracted.text == _RATE_LIMITED_MSG:
-                section_errors["post"] = {
-                    "error_type": "rate_limit",
-                    "error_message": extracted.text,
-                }
-            elif extracted.error:
-                section_errors["post"] = extracted.error
+            result = await extractor.get_post_comments(post_url, max_scrolls)
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
+            return result
 
-            result: dict[str, Any] = {"url": url, "sections": sections}
-            if references:
-                result["references"] = references
-            if section_errors:
-                result["section_errors"] = section_errors
-            return annotate_empty_scrape_result(
-                result,
-                tool_name="get_post_comments",
-                required_sections=("post",),
-            )
-
-        except ToolError:
-            raise
         except AuthenticationError as e:
             try:
                 await handle_auth_error(e, ctx)

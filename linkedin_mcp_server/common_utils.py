@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import os
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
 import re
 import tempfile
-from typing import Any, Literal
 
 _PRIVATE_DIR_MODE = 0o700
 
@@ -62,6 +60,25 @@ def harden_linkedin_tree(path: Path) -> None:
             return
 
 
+def is_still_at(fd: int, path: Path) -> bool:
+    """Whether *fd* is still the file that *path* names.
+
+    Compared by device and inode rather than by counting links. A count catches
+    an unlink and misses a rename: the inode keeps its one link while the name
+    comes to mean a different file, so the count still reads as one. A path that
+    has since vanished counts as changed.
+
+    Only meaningful once whatever the caller wanted to establish is in hand.
+    Asked earlier, the answer can stop being true immediately afterwards.
+    """
+    held = os.fstat(fd)
+    try:
+        current = path.stat()
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (current.st_dev, current.st_ino)
+
+
 def secure_write_text(path: Path, content: str, mode: int = 0o600) -> None:
     """Atomically write *content* to *path* with owner-only permissions.
 
@@ -78,72 +95,3 @@ def secure_write_text(path: Path, content: str, mode: int = 0o600) -> None:
     except BaseException:
         os.unlink(tmp)
         raise
-
-
-def _render_result_text(result: dict[str, Any]) -> str:
-    """Render a tool result dict as readable plain text for .txt/.md dumps."""
-    parts: list[str] = []
-    url = result.get("url")
-    if url:
-        parts.append(f"URL: {url}")
-    for name, text in (result.get("sections") or {}).items():
-        parts.append(f"\n## {name}\n{text}")
-    job_ids = result.get("job_ids")
-    if job_ids:
-        parts.append("\nJOB_IDS: " + ", ".join(job_ids))
-    return "\n".join(parts) + "\n"
-
-
-def _resolve_export_path(output_path: str) -> Path:
-    """Resolve *output_path* inside the dedicated LinkedIn MCP export directory."""
-    export_root_path = Path.home().resolve() / ".linkedin-mcp" / "exports"
-    export_root = export_root_path.resolve()
-    if export_root != export_root_path:
-        raise ValueError("LinkedIn MCP export directory must not be a symlink")
-
-    requested = Path(output_path).expanduser()
-    path = (requested if requested.is_absolute() else export_root / requested).resolve()
-    if not path.is_relative_to(export_root):
-        raise ValueError(
-            "output_path must be inside the LinkedIn MCP export directory "
-            f"({export_root})"
-        )
-    return path
-
-
-def apply_output_mode(
-    result: dict[str, Any],
-    output_path: str | None,
-    output_mode: Literal["display", "file", "both"],
-) -> dict[str, Any]:
-    """Optionally persist *result* to disk and shape what is returned to the caller.
-
-    - ``display`` (default): return the full result, write nothing.
-    - ``file``: write to *output_path*, return a compact confirmation only.
-    - ``both``: write to *output_path* and return the full result plus saved path.
-
-    Relative paths resolve under ``~/.linkedin-mcp/exports``. Absolute paths
-    must also stay inside that directory. File format follows the extension:
-    ``.json`` dumps the full dict; anything else writes a readable text rendering
-    of url/sections/job_ids.
-    """
-    if output_mode == "display":
-        return result
-    if not output_path:
-        raise ValueError("output_path is required when output_mode is 'file' or 'both'")
-
-    path = _resolve_export_path(output_path)
-    if path.suffix == ".json":
-        secure_write_text(path, json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        secure_write_text(path, _render_result_text(result))
-
-    if output_mode == "both":
-        return {**result, "saved_path": str(path)}
-    confirmation: dict[str, Any] = {"saved_path": str(path)}
-    if "url" in result:
-        confirmation["url"] = result["url"]
-    if "job_ids" in result:
-        confirmation["job_ids"] = result["job_ids"]
-    confirmation["section_names"] = sorted((result.get("sections") or {}).keys())
-    return confirmation

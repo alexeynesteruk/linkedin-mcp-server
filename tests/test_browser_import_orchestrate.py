@@ -6,7 +6,7 @@ import os
 import stat
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -158,11 +158,16 @@ async def test_import_writes_full_set_then_persists_source_state(
 
 
 @pytest.mark.asyncio
-async def test_import_persists_synthesized_user_agent(isolate_profile_dir, monkeypatch):
-    """The source browser's UA reaches validation AND source-state.json."""
+async def test_import_records_no_user_agent(isolate_profile_dir, monkeypatch):
+    """An import neither synthesizes a UA nor records one.
+
+    The runtime browser reports its own identity, so nothing about the source
+    browser's user agent is carried forward. Asserted rather than assumed: an
+    override reintroduced here would be invisible until a page compared the UA
+    against its client hints.
+    """
     user_data_dir = isolate_profile_dir
     profile = _profile("chrome")
-    ua = "Mozilla/5.0 (test) Chrome/148.0.0.0"
 
     monkeypatch.setattr(
         orchestrate, "discover_profiles", lambda browser=None: [profile]
@@ -171,7 +176,6 @@ async def test_import_persists_synthesized_user_agent(isolate_profile_dir, monke
     monkeypatch.setattr(
         orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
     )
-    monkeypatch.setattr(orchestrate, "synthesize_user_agent", lambda p: ua)
     validate = AsyncMock(return_value=True)
     monkeypatch.setattr(
         "linkedin_mcp_server.drivers.browser.validate_imported_cookies", validate
@@ -181,9 +185,9 @@ async def test_import_persists_synthesized_user_agent(isolate_profile_dir, monke
 
     assert ok is True
     assert validate.await_args is not None
-    assert validate.await_args.kwargs.get("user_agent") == ua
+    assert "user_agent" not in validate.await_args.kwargs
     state = json.loads(source_state_path(user_data_dir).read_text())
-    assert state["user_agent"] == ua
+    assert "user_agent" not in state
 
 
 @pytest.mark.asyncio
@@ -385,3 +389,181 @@ async def test_import_app_bound_only_raises_decryption_error(
     with pytest.raises(CookieDecryptionError) as exc:
         await import_session_from_browser(None, user_data_dir=user_data_dir)
     assert "Brave" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_import_retires_the_previous_profile_first(monkeypatch, tmp_path):
+    """An import seeds a session that may belong to a different account, so the
+    profile on disk is retired rather than reused — Chromium keeps machine_id
+    for the life of a directory, which would present both accounts as one
+    device. Auto-import had no clearing at all before this."""
+    user_data_dir = tmp_path / "profile"
+    profile = _profile("chrome", "Default")
+    order: list[str] = []
+
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate,
+        "extract_linkedin_cookies",
+        lambda p: (order.append("stage"), [_cookie("li_at")])[1],
+    )
+    monkeypatch.setattr(
+        orchestrate,
+        "rotate_shielded",
+        AsyncMock(side_effect=lambda *a: order.append("rotate")),
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=True),
+    )
+
+    assert await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+
+    assert order[0] == "rotate", "the old profile must be retired before staging"
+
+
+@pytest.mark.asyncio
+async def test_import_restores_the_session_when_every_candidate_is_rejected(
+    monkeypatch, tmp_path
+):
+    """Retirement precedes the replacement, so an import that lands nothing must
+    not cost the user the session that was already working."""
+    user_data_dir = tmp_path / "profile"
+    profile = _profile("chrome", "Default")
+    retired = tmp_path / "invalid-state-x"
+    restore = MagicMock(return_value=True)
+
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
+    )
+    monkeypatch.setattr(orchestrate, "rotate_shielded", AsyncMock(return_value=retired))
+    monkeypatch.setattr(orchestrate, "restore_source_profile", restore)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=False),
+    )
+
+    assert (
+        await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+        is False
+    )
+
+    restore.assert_called_once_with(retired, user_data_dir)
+
+
+def _hold_the_profile_elsewhere(profile_dir):
+    """Hold *profile_dir*'s lease as another process would; return a release.
+
+    A second open file description on the lease file, which the kernel treats
+    as a separate holder even inside this process.
+    """
+    from linkedin_mcp_server.profile_lease import (
+        _release_locked_fd,
+        acquire_locked_fd,
+        get_profile_lease,
+    )
+
+    fd = acquire_locked_fd(get_profile_lease(profile_dir)._lease_path, exclusive=True)
+    assert fd is not None
+    released = []
+
+    def release() -> None:
+        if not released:
+            released.append(True)
+            _release_locked_fd(fd)
+
+    return release
+
+
+def _one_accepted_candidate(monkeypatch):
+    profile = _profile("chrome", "Default")
+    monkeypatch.setattr(
+        orchestrate, "discover_profiles", lambda browser=None: [profile]
+    )
+    _patch_meta(monkeypatch, {profile: _meta(last_access=10.0)})
+    monkeypatch.setattr(
+        orchestrate, "extract_linkedin_cookies", lambda p: [_cookie("li_at")]
+    )
+    monkeypatch.setattr(
+        "linkedin_mcp_server.drivers.browser.validate_imported_cookies",
+        AsyncMock(return_value=True),
+    )
+
+
+class TestWaitingForARetiringOwner:
+    """The import's first claim on the profile, after a shared browser retired.
+
+    That claim is the only one that can wait: the rotation inside it takes a
+    second reference to a lease this process already holds, so a wait placed
+    there is never reached by an import refused here first.
+    """
+
+    @pytest.mark.asyncio
+    async def test_it_waits_for_the_holder_to_let_go(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        user_data_dir = isolate_profile_dir
+        _one_accepted_candidate(monkeypatch)
+        release = _hold_the_profile_elsewhere(user_data_dir)
+        asyncio.get_running_loop().call_later(0.3, release)
+        try:
+            ok = await import_session_from_browser(
+                "chrome", user_data_dir=user_data_dir, profile_wait_seconds=10
+            )
+        finally:
+            release()
+
+        assert ok is True
+        assert portable_cookie_path(user_data_dir).exists()
+        assert not get_profile_lease(user_data_dir).held
+
+    @pytest.mark.asyncio
+    async def test_a_holder_that_keeps_it_is_refused_with_nothing_imported(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.exceptions import BrowserBusyError
+        from linkedin_mcp_server.profile_lease import get_profile_lease
+
+        user_data_dir = isolate_profile_dir
+        _one_accepted_candidate(monkeypatch)
+        rotate = AsyncMock()
+        monkeypatch.setattr(orchestrate, "rotate_shielded", rotate)
+        release = _hold_the_profile_elsewhere(user_data_dir)
+        try:
+            with pytest.raises(BrowserBusyError):
+                await import_session_from_browser(
+                    "chrome", user_data_dir=user_data_dir, profile_wait_seconds=0.3
+                )
+        finally:
+            release()
+
+        rotate.assert_not_awaited()
+        assert not portable_cookie_path(user_data_dir).exists()
+        assert not get_profile_lease(user_data_dir).held
+
+    @pytest.mark.asyncio
+    async def test_every_other_caller_is_refused_at_once(
+        self, isolate_profile_dir, monkeypatch
+    ):
+        from linkedin_mcp_server.exceptions import BrowserBusyError
+
+        user_data_dir = isolate_profile_dir
+        _one_accepted_candidate(monkeypatch)
+        release = _hold_the_profile_elsewhere(user_data_dir)
+        started = time.monotonic()
+        try:
+            with pytest.raises(BrowserBusyError):
+                await import_session_from_browser("chrome", user_data_dir=user_data_dir)
+        finally:
+            release()
+
+        assert time.monotonic() - started < 0.5

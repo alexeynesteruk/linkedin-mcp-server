@@ -76,12 +76,26 @@ class TestStripClientShimArgsMiddleware:
         forwarded = call_next.await_args.args[0]
         assert forwarded is context
 
-    async def test_create_mcp_server_registers_shim_middleware(self):
-        mcp = create_mcp_server()
-        assert any(
-            isinstance(middleware, StripClientShimArgsMiddleware)
-            for middleware in mcp.middleware
-        )
+    async def test_create_mcp_server_puts_the_shim_middleware_outermost(self):
+        # FastMCP puts its own DereferenceRefsMiddleware in front of ours; it
+        # only touches listings, so "first of ours" is what matters.
+        ours = [
+            middleware
+            for middleware in create_mcp_server().middleware
+            if type(middleware).__module__.startswith("linkedin_mcp_server")
+        ]
+        assert isinstance(ours[0], StripClientShimArgsMiddleware)
+
+    async def test_the_shim_is_rejected_without_the_middleware(self):
+        """What the middleware exists for: FastMCP refuses the dummy argument."""
+        mcp = FastMCP("test")
+
+        @mcp.tool
+        async def get_inbox(limit: int = 20) -> dict[str, int]:
+            return {"limit": limit}
+
+        with pytest.raises(Exception):
+            await mcp.call_tool("get_inbox", {"_": True, "limit": 7})
 
     async def test_linkedin_health_accepts_claude_code_underscore_shim(self):
         """Claude Code requires '_' on tools with no required fields."""
