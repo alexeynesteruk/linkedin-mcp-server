@@ -709,13 +709,27 @@ def chat_overlay(labels: Labels) -> str:
 """
 
 
-def hidden_preloaded_dialog(labels: Labels) -> str:
+def hidden_preloaded_dialog(labels: Labels, style: str = "display:none") -> str:
     """A preloaded container: hidden, with a disabled submit as its last button."""
     return f"""
-<div role="dialog" style="display:none">
+<div role="dialog" style="{style}">
   <button type="submit" disabled
     onclick="document.body.setAttribute('data-clicked','decoy')"
     >{labels.withdraw}</button>
+</div>
+"""
+
+
+def upsell_popup(labels: Labels) -> str:
+    """A visible popup of LinkedIn's own, open beside whatever the click opened."""
+    return f"""
+<div role="dialog" class="upsell">
+  <button type="button" aria-label="{labels.dismiss}"
+    onclick="document.body.setAttribute('data-clicked','upsell-dismiss')">X</button>
+  <a href="/premium/products/">{labels.upsell}</a>
+  <button type="button"
+    onclick="document.body.setAttribute('data-clicked','upsell')"
+    >{labels.upsell}</button>
 </div>
 """
 
@@ -781,16 +795,19 @@ class TestConfirmDialogChoice:
     """
 
     @pytest.mark.parametrize(
+        "hidden", ["display:none", "visibility:hidden"], ids=["display", "visibility"]
+    )
+    @pytest.mark.parametrize(
         "native", [True, False], ids=["native-dialog", "role-dialog"]
     )
     @pytest.mark.parametrize("decoy_first", [False, True], ids=["after", "before"])
     async def test_the_open_dialog_wins_over_a_hidden_preloaded_one(
-        self, dom_page, native, decoy_first
+        self, dom_page, native, decoy_first, hidden
     ):
         def build(labels: Labels) -> str:
             parts = [
                 withdraw_dialog(labels, native=native),
-                hidden_preloaded_dialog(labels),
+                hidden_preloaded_dialog(labels, hidden),
             ]
             return _body(*(reversed(parts) if decoy_first else parts))
 
@@ -846,6 +863,55 @@ class TestConfirmDialogChoice:
                     labels, native=False, extra='style="position:fixed;top:20%"'
                 ),
                 hidden_preloaded_dialog(labels),
+            ),
+            (3, True, "withdraw"),
+            _confirm,
+        )
+
+    @pytest.mark.parametrize("popup_first", [False, True], ids=["after", "before"])
+    async def test_two_open_dialogs_are_not_guessed_between(
+        self, dom_page, popup_first
+    ):
+        # Nothing structural says which of two open dialogs the click opened,
+        # and the last button of the wrong one is somebody else's action.
+        def build(labels: Labels) -> str:
+            parts = [withdraw_dialog(labels, native=False), upsell_popup(labels)]
+            return _body(*(reversed(parts) if popup_first else parts))
+
+        await _in_every_locale(dom_page, build, (-1, False, None), _confirm)
+
+    async def test_two_open_native_dialogs_are_not_guessed_between(self, dom_page):
+        await _in_every_locale(
+            dom_page,
+            lambda labels: _body(
+                upsell_popup(labels)
+                .replace('<div role="dialog"', "<dialog open")
+                .replace("</div>", "</dialog>"),
+                withdraw_dialog(labels),
+            ),
+            (-1, False, None),
+            _confirm,
+        )
+
+    async def test_a_native_dialog_is_preferred_over_a_role_dialog(self, dom_page):
+        await _in_every_locale(
+            dom_page,
+            lambda labels: _body(upsell_popup(labels), withdraw_dialog(labels)),
+            (3, True, "withdraw"),
+            _confirm,
+        )
+
+    @pytest.mark.parametrize(
+        "outer", ["<dialog open>", '<div role="dialog">'], ids=["native", "role"]
+    )
+    async def test_a_dialog_nested_in_the_open_one_is_the_same_dialog(
+        self, dom_page, outer
+    ):
+        closing = "</dialog>" if outer.startswith("<dialog") else "</div>"
+        await _in_every_locale(
+            dom_page,
+            lambda labels: _body(
+                outer + withdraw_dialog(labels, native=False) + closing
             ),
             (3, True, "withdraw"),
             _confirm,

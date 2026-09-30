@@ -298,11 +298,17 @@ CLICK_WITHDRAW_ANCHOR_JS = (
 """
 )
 
-# The ONE open confirmation dialog: native dialog[open] first, else the first
-# visible [role="dialog"], and never a messaging overlay (same exclusion as
-# ``_DIALOG_SELECTOR``). A page-wide "last button" can land in a hidden
-# preloaded container instead: measured live 2026-08-21 on the invitation
-# manager, the page-wide last match was a hidden, disabled submit button.
+# The ONE open confirmation dialog: a visible native dialog[open] if there is
+# one, else a visible [role="dialog"], and never a messaging overlay (same
+# exclusion as ``_DIALOG_SELECTOR``). A page-wide "last button" can land in a
+# hidden preloaded container instead: measured live 2026-08-21 on the
+# invitation manager, the page-wide last match was a hidden, disabled submit
+# button.
+#
+# One, not the first: with two open (a popup of LinkedIn's own beside the one
+# the click opened) nothing structural says which is the confirmation, and the
+# last button of the other is somebody else's action. Ambiguity is no dialog,
+# as it is for the Accept row. A dialog inside the open one is the same one.
 #
 # Visible means a rendered box, the test ``message_sender`` uses too, and not
 # ``offsetParent``: that is null for anything position: fixed, which is what
@@ -314,13 +320,13 @@ function findConfirmDialog() {
     getComputedStyle(el).visibility !== 'hidden';
   const usable = el =>
     visible(el) && !el.querySelector('[contenteditable="true"]');
-  for (const el of document.querySelectorAll('dialog[open]')) {
-    if (usable(el)) return el;
-  }
-  for (const el of document.querySelectorAll('[role="dialog"]')) {
-    if (usable(el)) return el;
-  }
-  return null;
+  const open = selector => {
+    const found = [...document.querySelectorAll(selector)].filter(usable);
+    return found.filter(el => !found.some(other => other !== el && other.contains(el)));
+  };
+  let dialogs = open('dialog[open]');
+  if (dialogs.length === 0) dialogs = open('[role="dialog"]');
+  return dialogs.length === 1 ? dialogs[0] : null;
 }
 """
 
