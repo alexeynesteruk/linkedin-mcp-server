@@ -114,7 +114,12 @@ _REFERENCE_CAPS = {
     "projects": 12,
     "posts": 12,
     "jobs": 8,
-    "employees": 12,
+    # Every card on the people page is a candidate an agent may act on, and
+    # callers are told to take profile slugs from these references only. In
+    # page order the company's own link and its "See all employees" search
+    # take slots first, so a dozen stopped at about ten people while the text
+    # listed the rest of the loaded cards (reported live, 2026-09-24).
+    "employees": 60,
     "search_results": _SEARCH_RESULTS_REFERENCE_CAP,
     # The "More jobs" module sits at the bottom of a posting and lists a dozen
     # jobs, so a cap applied in page order has to reach past everything above.

@@ -465,6 +465,33 @@ class TestBuildReferences:
         assert len(uncapped) == 20
         assert uncapped[-1]["url"] == "/jobs/view/19/"
 
+    def test_keeps_every_loaded_employee_card_past_the_company_links(self):
+        """The people page leads with the company's own links, and every
+        employee card after them has to survive the cap: agents may only
+        act on slugs they find here."""
+        header: list[RawReference] = [
+            {"href": "https://www.linkedin.com/company/acme/", "text": "Acme"},
+            {
+                "href": (
+                    "https://www.linkedin.com/search/results/people/"
+                    "?currentCompany=%5B%221234%22%5D"
+                ),
+                "text": "See all employees",
+            },
+        ]
+        cards: list[RawReference] = [
+            {
+                "href": f"https://www.linkedin.com/in/employee-{idx}/",
+                "text": f"Employee {idx}",
+            }
+            for idx in range(40)
+        ]
+
+        references = build_references(header + cards, "employees")
+
+        people = [ref["url"] for ref in references if ref["kind"] == "person"]
+        assert people == [f"/in/employee-{idx}/" for idx in range(40)]
+
     def test_caps_jobs_section_more_tightly(self):
         raw: list[RawReference] = [
             {
