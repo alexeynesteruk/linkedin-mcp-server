@@ -23,6 +23,10 @@ from linkedin_mcp_server.profile_lease import get_profile_lease
 
 logger = logging.getLogger(__name__)
 
+#: Tools that never touch the browser and so skip both serialization layers.
+#: ``tools/meta.py`` registers exactly these.
+LOCK_FREE_TOOL_NAMES: frozenset[str] = frozenset({"linkedin_health", "linkedin_ping"})
+
 
 class SequentialToolExecutionMiddleware(Middleware):
     """Ensure only one tool call at a time drives the shared LinkedIn browser.
@@ -63,6 +67,11 @@ class SequentialToolExecutionMiddleware(Middleware):
         call_next: CallNext[mt.CallToolRequestParams, ToolResult],
     ) -> ToolResult:
         tool_name = context.message.name
+        if tool_name in LOCK_FREE_TOOL_NAMES:
+            # Meta tools read local state only. Queueing them behind a scrape,
+            # or behind another process's lease, would make a health probe
+            # report "busy" exactly when it is needed.
+            return await call_next(context)
         wait_started = time.perf_counter()
         logger.debug("Waiting for scraper lock for tool '%s'", tool_name)
         await self._report_progress(

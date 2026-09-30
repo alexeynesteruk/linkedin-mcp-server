@@ -74,6 +74,10 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 | `get_feed` | Read recent home-feed posts, with links in `references`. |
 | `search_posts` | Search posts by keyword with optional recency filters; `references` contains unordered candidate post links. |
 | `close_session` | Close the active browser session and release its resources. |
+| `linkedin_health` | Report version, profile paths, and browser/session readiness without opening the browser or waiting for it. |
+| `linkedin_ping` | List the registered tools and server capabilities. |
+
+Set `LINKEDIN_MCP_TOOL_ALIASES=true` to also register every tool under a `linkedin_` prefix (for example `linkedin_get_inbox`). It is off by default because each alias is another tool schema in the client's context.
 
 <br/>
 <br/>

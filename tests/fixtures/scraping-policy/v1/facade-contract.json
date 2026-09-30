@@ -471,6 +471,28 @@
           "type": "object"
         }
       },
+      "linkedin_health": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "linkedin_ping": {
+        "input": {
+          "additionalProperties": false,
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
       "search_companies": {
         "input": {
           "additionalProperties": false,

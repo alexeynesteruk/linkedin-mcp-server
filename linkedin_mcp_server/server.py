@@ -50,6 +50,11 @@ from linkedin_mcp_server.tools.company import register_company_tools
 from linkedin_mcp_server.tools.feed import register_feed_tools
 from linkedin_mcp_server.tools.job import register_job_tools
 from linkedin_mcp_server.tools.messaging import register_messaging_tools
+from linkedin_mcp_server.tools.meta import (
+    register_meta_tools,
+    register_tool_aliases,
+    tool_aliases_enabled,
+)
 from linkedin_mcp_server.tools.person import register_person_tools
 from linkedin_mcp_server.tools.post import register_post_tools
 
@@ -314,5 +319,15 @@ def create_mcp_server(
                 }
             except Exception as e:
                 raise_tool_error(e, "close_session")  # NoReturn
+
+        # Health and ping never drive Chromium, but they sit inside the gate
+        # for the same reason close_session does: a proxy already forwards the
+        # owner's, and a local copy would shadow the forwarded tool.
+        register_meta_tools(mcp)
+
+        # Last, so every tool above gets its alias. Inside the gate because a
+        # proxy forwards the owner's aliases along with the rest.
+        if tool_aliases_enabled():
+            register_tool_aliases(mcp)
 
     return mcp

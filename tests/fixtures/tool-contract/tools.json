@@ -552,6 +552,54 @@
     "_meta": {
       "fastmcp": {
         "tags": [
+          "meta"
+        ]
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "Report server version, storage paths, and browser/session readiness.\n\nNever opens the browser and never waits for the scraper lock, so it\nanswers while another tool call or another MCP client is scraping.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "linkedin_health",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "LinkedIn MCP Health"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
+          "meta"
+        ]
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "description": "List the registered tools and server capabilities.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "linkedin_ping",
+    "outputSchema": {
+      "additionalProperties": true,
+      "type": "object"
+    },
+    "title": "LinkedIn MCP Ping"
+  },
+  {
+    "_meta": {
+      "fastmcp": {
+        "tags": [
           "company",
           "search"
         ]

@@ -39,6 +39,7 @@ from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.profile_page import ProfilePageReader
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.server import create_mcp_server
+from linkedin_mcp_server.tools.meta import META_TOOL_NAMES
 
 from .policy_scenarios import COMPATIBILITY_METHODS, TOOL_FACADE_METHODS
 from .support.policy_trace import ScriptedPage, TraceRecorder
@@ -123,9 +124,11 @@ async def test_registered_tools_match_extractor_delegates():
     tools = await create_mcp_server().list_tools()
     tool_names = {tool.name for tool in tools}
 
-    assert tool_names == {*TOOL_DELEGATES, "close_session"}
+    # close_session and the meta tools never reach the extractor.
+    assert tool_names == {*TOOL_DELEGATES, "close_session", *META_TOOL_NAMES}
     assert set(TOOL_DELEGATES.values()) == TOOL_FACADE_METHODS
     assert "close_session" not in TOOL_DELEGATES
+    assert META_TOOL_NAMES.isdisjoint(TOOL_DELEGATES)
 
 
 async def test_company_posts_delegate_matches_registered_tool_consumer():
