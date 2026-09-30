@@ -72,7 +72,7 @@ _PERSON_SECTION_MODES = {
     "honors": CaptureMode.DETAILS,
     "languages": CaptureMode.DETAILS,
     "certifications": CaptureMode.DETAILS,
-    "skills": CaptureMode.DETAILS,
+    "skills": CaptureMode.DETAILS | CaptureMode.SKILLS,
     "projects": CaptureMode.DETAILS,
     "contact_info": CaptureMode.OVERLAY,
     "posts": CaptureMode.ACTIVITY,

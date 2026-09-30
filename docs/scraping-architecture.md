@@ -30,11 +30,12 @@ a page-owning collaborator.
 | `feed_payload` | `POST_SLUG_URL_RE`, `append_permalink_references()`, `build_feed_references()`, `is_feed_payload_response()`, `is_permalink_payload_response()`, `permalink_paths_from_payload()` | `browser-free` |
 | `fields` | `ANALYTICS_SECTIONS`, `ANALYTICS_TIME_RANGE_SECTIONS`, `COMPANY_SECTIONS`, `PERSON_SECTIONS`, `normalize_analytics_time_range()`, `parse_analytics_sections()`, `parse_company_sections()`, `parse_person_sections()` | `browser-free` |
 | `identifiers` | `company_page_url()`, `job_view_url()`, `messaging_thread_url()`, `normalize_company_identifier()`, `normalize_job_id()`, `normalize_opaque_id()`, `normalize_person_identifier()`, `normalize_post_url()`, `normalize_profile_urn()`, `normalize_reply_thread_id()`, `normalize_thread_id()`, `person_profile_url()`, `reply_thread_path()`, `reply_thread_url()` | `browser-free` |
-| `invitations` | `CARD_LABELS_JS`, `EXPAND_NOTES_JS`, `INVITATION_KINDS`, `InvitationKind`, `InvitationReader`, `RECEIVED_COUNT_IS_ZERO_JS`, `SCROLL_LIST_JS`, `invitations_url()`, `label_unlabeled_profiles()`, `trim_to_limit()` | `page-owning` |
+| `invitations` | `CARD_LABELS_JS`, `EXPAND_NOTES_JS`, `INVITATION_KINDS`, `InvitationKind`, `InvitationReader`, `RECEIVED_COUNT_IS_ZERO_JS`, `invitations_url()`, `label_unlabeled_profiles()`, `trim_to_limit()` | `page-owning` |
 | `job_pages` | `JOB_IDS_JS`, `JobPageCapture`, `JobPageReader`, `PROMOTED_JOB_IDS_JS` | `page-owning` |
 | `job_policy` | `JOB_SEARCH_PATHS`, `RESULTS_PER_LINKEDIN_PAGE`, `SAVED_JOBS_PAGE_SIZE`, `SAVED_JOBS_PATHS`, `SAVED_JOBS_URL`, `SCROLL_BUDGET_TOTAL`, `SCROLL_DEADLINE_MAX`, `SEARCH_TIMEOUT_FRACTION`, `dropped_filters_section_error()`, `dropped_offset_section_error()`, `label_similar_jobs()`, `lost_keywords_section_error()`, `missing_description_section_error()`, `no_matching_jobs_section_error()`, `reconcile_search_references()`, `route()`, `same_job_search()` | `browser-free` |
 | `jobs` | `JobScraper` | `browser-free` |
 | `link_metadata` | `JOB_PATH_RE`, `RawReference`, `Reference`, `ReferenceKind`, `build_references()`, `choose_reference_text()`, `classify_link()`, `clean_heading()`, `clean_label()`, `dedupe_references()`, `derive_context()`, `normalize_reference()`, `normalize_url()` | `browser-free` |
+| `list_scroll` | `DEFAULT_LIST_ROUNDS`, `SCROLL_LIST_JS`, `scroll_list_until_stable()` | `page-owning` |
 | `message_sender` | `MessageSender` | `page-owning` |
 | `navigation` | `PageNavigator`, `WaitUntil` | `page-owning` |
 | `person` | `PAGE_SEPARATOR`, `PersonScraper`, `SEARCH_BUDGET_FRACTION` | `page-owning` |
@@ -49,7 +50,7 @@ a page-owning collaborator.
 
 - `__init__` -> `extractor`, `fields`
 - `analytics` -> `capture`, `contracts`, `fields`, `link_metadata`, `session`
-- `capture` -> `comment_thread`, `content`, `contracts`, `feed_payload`, `link_metadata`, `navigation`, `session`, `text`
+- `capture` -> `comment_thread`, `content`, `contracts`, `feed_payload`, `link_metadata`, `list_scroll`, `navigation`, `session`, `text`
 - `comment_thread` -> `session`
 - `company` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `search_urls`, `session`
 - `connection` -> _(none)_
@@ -62,11 +63,12 @@ a page-owning collaborator.
 - `feed_payload` -> `link_metadata`
 - `fields` -> `capture`, `contracts`
 - `identifiers` -> _(none)_
-- `invitations` -> `content`, `contracts`, `link_metadata`, `navigation`, `session`, `text`
+- `invitations` -> `content`, `contracts`, `link_metadata`, `list_scroll`, `navigation`, `session`, `text`
 - `job_pages` -> `capture`, `content`, `contracts`, `job_policy`, `link_metadata`, `navigation`, `session`, `text`
 - `job_policy` -> `link_metadata`
 - `jobs` -> `capture`, `contracts`, `identifiers`, `job_pages`, `job_policy`, `link_metadata`, `navigation`, `search_urls`, `session`, `text`
 - `link_metadata` -> _(none)_
+- `list_scroll` -> `comment_thread`, `session`
 - `message_sender` -> `contracts`, `identifiers`, `navigation`, `session`
 - `navigation` -> `session`
 - `person` -> `capture`, `contracts`, `fields`, `identifiers`, `link_metadata`, `navigation`, `profile_page`, `search_urls`, `session`, `text`

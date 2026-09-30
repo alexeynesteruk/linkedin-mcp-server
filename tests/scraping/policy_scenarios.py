@@ -306,7 +306,12 @@ async def _person_sections_scenario() -> dict[str, Any]:
         "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
         "show_more.filtered",
     )
-    page.script("show_more.filtered.count", *([0] * 8))
+    # Skills scrolls its list instead of looking for a button, so seven of the
+    # eight detail pages probe it.
+    page.script("show_more.filtered.count", *([0] * 7))
+    # The skills list grows once and then stays flat for the stale limit.
+    page.script("evaluate:comment_thread_length", 10, 20, 20, 20, 20)
+    page.script("evaluate:scroll_main_region", *([True] * 4))
     extractor = _extractor(page)
     callbacks = TraceCallbacks(recorder)
     async with boundaries(recorder, clock):

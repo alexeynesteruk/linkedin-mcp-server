@@ -949,29 +949,111 @@
     },
     {
       "call": "scrape_person",
-      "kind": "locator.create",
-      "locator": "show_more",
-      "parent": null,
-      "selector": "main button"
+      "kind": "mouse.move",
+      "x": 640,
+      "y": 360
     },
     {
       "call": "scrape_person",
-      "kind": "locator.derive",
-      "locator": "show_more.filtered",
-      "operation": "filter:^Show (more|all)\\b/re.IGNORECASE|re.UNICODE",
-      "parent": "show_more"
+      "kind": "evaluate",
+      "operation": "comment_thread_length",
+      "program_digest": "f0cf704d82eb"
     },
     {
       "call": "scrape_person",
-      "kind": "locator.count",
-      "locator": "show_more.filtered"
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "a9ee35f8dcc7"
     },
     {
-      "actual_scrolls": 2,
       "call": "scrape_person",
-      "kind": "boundary.scroll_body",
-      "max_scrolls": 5,
-      "pause_time": 0.5
+      "delta_x": 0,
+      "delta_y": 2500,
+      "kind": "mouse.wheel"
+    },
+    {
+      "call": "scrape_person",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.3
+    },
+    {
+      "call": "scrape_person",
+      "kind": "evaluate",
+      "operation": "comment_thread_length",
+      "program_digest": "f0cf704d82eb"
+    },
+    {
+      "call": "scrape_person",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "a9ee35f8dcc7"
+    },
+    {
+      "call": "scrape_person",
+      "delta_x": 0,
+      "delta_y": 2500,
+      "kind": "mouse.wheel"
+    },
+    {
+      "call": "scrape_person",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.3
+    },
+    {
+      "call": "scrape_person",
+      "kind": "evaluate",
+      "operation": "comment_thread_length",
+      "program_digest": "f0cf704d82eb"
+    },
+    {
+      "call": "scrape_person",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "a9ee35f8dcc7"
+    },
+    {
+      "call": "scrape_person",
+      "delta_x": 0,
+      "delta_y": 2500,
+      "kind": "mouse.wheel"
+    },
+    {
+      "call": "scrape_person",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.3
+    },
+    {
+      "call": "scrape_person",
+      "kind": "evaluate",
+      "operation": "comment_thread_length",
+      "program_digest": "f0cf704d82eb"
+    },
+    {
+      "call": "scrape_person",
+      "kind": "evaluate",
+      "operation": "scroll_main_region",
+      "program_digest": "a9ee35f8dcc7"
+    },
+    {
+      "call": "scrape_person",
+      "delta_x": 0,
+      "delta_y": 2500,
+      "kind": "mouse.wheel"
+    },
+    {
+      "call": "scrape_person",
+      "kind": "sleep",
+      "reason": "sleep",
+      "seconds": 1.3
+    },
+    {
+      "call": "scrape_person",
+      "kind": "evaluate",
+      "operation": "comment_thread_length",
+      "program_digest": "f0cf704d82eb"
     },
     {
       "arg": {

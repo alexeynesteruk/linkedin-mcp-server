@@ -762,6 +762,49 @@ class TestActivityFeedExtraction:
 
         assert show_more.click.await_count == 2
 
+    async def test_skills_page_scrolls_the_list_and_clicks_no_button(self, mock_page):
+        """The skills page has only per-skill expanders that navigate away; it
+        scrolls until the text stops growing and never runs the click loop."""
+        mock_page.evaluate = AsyncMock(
+            return_value={"source": "root", "text": "text", "references": []}
+        )
+        mock_page.wait_for_function = AsyncMock()
+        mock_page.locator = MagicMock(
+            side_effect=AssertionError("skills must not look for buttons")
+        )
+        capture = _capture(mock_page)
+
+        with (
+            patch(
+                "linkedin_mcp_server.scraping.capture.scroll_list_until_stable",
+                new_callable=AsyncMock,
+            ) as mock_list_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.session.scroll_to_bottom",
+                new_callable=AsyncMock,
+            ) as mock_body_scroll,
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            await capture._capture_once(
+                "https://www.linkedin.com/in/billgates/details/skills/",
+                section_name="skills",
+                plan=CapturePlan(
+                    CaptureMode.DETAILS | CaptureMode.SKILLS, max_scrolls=7
+                ),
+            )
+
+        mock_list_scroll.assert_awaited_once()
+        assert mock_list_scroll.await_args.args[1] == 7
+        mock_body_scroll.assert_not_awaited()
+
     async def test_details_page_show_more_respects_max_scrolls_budget(self, mock_page):
         """When 'Show more' never disappears, loop exits after max_scrolls clicks."""
         mock_page.evaluate = AsyncMock(
@@ -2108,6 +2151,20 @@ class TestCapturePlans:
     )
     def test_url_adapter_preserves_generic_mode_selection(self, url, mode):
         assert capture_plan_for_url(url, 17) == CapturePlan(mode, max_scrolls=17)
+
+    @pytest.mark.parametrize(
+        "path", ["/in/ada/details/skills/", "/in/ada/details/skills"]
+    )
+    def test_url_adapter_marks_the_skills_page(self, path):
+        assert capture_plan_for_url(f"https://www.linkedin.com{path}").mode == (
+            CaptureMode.DETAILS | CaptureMode.SKILLS
+        )
+
+    def test_url_adapter_does_not_mark_skills_from_a_query(self):
+        url = (
+            "https://www.linkedin.com/in/ada/details/experience/?next=/details/skills/"
+        )
+        assert CaptureMode.SKILLS not in capture_plan_for_url(url).mode
 
     def test_url_adapter_preserves_independent_mode_branches(self):
         url = "https://www.linkedin.com/company/acme/people/search/results/"

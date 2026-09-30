@@ -32,6 +32,7 @@ from linkedin_mcp_server.scraping.feed_payload import (
     permalink_paths_from_payload,
 )
 from linkedin_mcp_server.scraping.link_metadata import build_references
+from linkedin_mcp_server.scraping.list_scroll import scroll_list_until_stable
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 from linkedin_mcp_server.scraping.text import (
@@ -68,6 +69,7 @@ class CaptureMode(Flag):
     POST_PERMALINKS = auto()
     JOB_POSTING = auto()
     COMMENT_THREAD = auto()
+    SKILLS = auto()
 
 
 @dataclass(frozen=True)
@@ -94,6 +96,8 @@ def capture_plan_for_url(url: str, max_scrolls: int | None = None) -> CapturePla
         mode |= CaptureMode.COMPANY_PEOPLE
     if "/details/" in path:
         mode |= CaptureMode.DETAILS
+    if path.rstrip("/").endswith("/details/skills"):
+        mode |= CaptureMode.SKILLS
     return CapturePlan(mode=mode, max_scrolls=max_scrolls)
 
 
@@ -402,7 +406,11 @@ class SectionCapture:
             except PlaywrightTimeoutError:
                 logger.debug("Detail section content did not appear on %s", url)
 
-        if CaptureMode.DETAILS in plan.mode:
+        # The skills page has no list-level "Show more": its only matching
+        # buttons are per-skill "Show all N details" expanders, which navigate
+        # away. It loads the rest of the list on scroll instead, so it skips
+        # the click loop and scrolls until the text stops growing.
+        if CaptureMode.DETAILS in plan.mode and CaptureMode.SKILLS not in plan.mode:
             max_clicks = plan.max_scrolls if plan.max_scrolls is not None else 5
             for i in range(max_clicks):
                 button = self._session.page.locator("main button").filter(
@@ -465,7 +473,9 @@ class SectionCapture:
                 logger.debug("Comment composer did not appear on %s", url)
             await expand_comment_thread(self._session, plan.max_scrolls)
 
-        if CaptureMode.ACTIVITY in plan.mode:
+        if CaptureMode.SKILLS in plan.mode:
+            await scroll_list_until_stable(self._session, plan.max_scrolls)
+        elif CaptureMode.ACTIVITY in plan.mode:
             scrolls = plan.max_scrolls if plan.max_scrolls is not None else 10
             await self._session.scroll_body(pause_time=1.0, max_scrolls=scrolls)
         else:
