@@ -83,6 +83,8 @@ Use code <strong>FOUNDING20</strong> for 20% off your first year <a href="https:
 
 Set `LINKEDIN_MCP_TOOL_ALIASES=true` to also register every tool under a `linkedin_` prefix (for example `linkedin_get_inbox`). It is off by default because each alias is another tool schema in the client's context.
 
+Scraped free text (bios, posts, messages) is written by third parties and reaches your model verbatim, so lines that address the reader as an AI ("if you are an LLM, ..."), tell it to ignore its instructions, or name local secret paths such as `~/.ssh/id_rsa` are wrapped in an `[untrusted-linkedin-content: ...]` marker instead of being removed. The text stays readable and reportable; the marker tells the model it is data. Bare words like "LLM", "agent" or "prompt" are never fenced, and copies of the marker in page text are neutralized so a profile cannot forge the boundary.
+
 <br/>
 <br/>
 
