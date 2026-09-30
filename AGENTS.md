@@ -144,6 +144,7 @@ Optional additional keys:
 - `references: {section_name: [{kind, url, text?, context?, value?}]}` — LinkedIn URLs are relative paths; `value` carries non-URL identifiers (e.g. company URN id for `kind: "company_urn"`)
 - `section_errors: {section_name: {error_type, error_message, issue_template_path, runtime, ...}}`
 - `unknown_sections: [name, ...]`
+- `empty_scrape: true` and `warnings: [str]` — added by `EmptyScrapeMiddleware` (`scrape_guards.py`) when a `scraping`/`search` tool returns no section text and no `section_errors`; it also adds an `EmptyScrapeSection` entry to `section_errors`. Tools where empty is a contract answer are listed in `EMPTY_IS_AN_ANSWER` (`get_pending_invitations`).
 - `job_ids: [id, ...]` (search_jobs and get_saved_jobs)
 - `total: {count, exact}` (search_jobs only) — the result count LinkedIn advertises on the first page; `exact` is false for a lower bound such as "500+"
 - `promoted_job_ids: [id, ...]` (search_jobs only) — the subset of `job_ids` shown as promoted; present only when every page could be read, so an empty list means none were

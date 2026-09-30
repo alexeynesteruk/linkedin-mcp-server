@@ -85,6 +85,8 @@ Set `LINKEDIN_MCP_TOOL_ALIASES=true` to also register every tool under a `linked
 
 Scraped free text (bios, posts, messages) is written by third parties and reaches your model verbatim, so lines that address the reader as an AI ("if you are an LLM, ..."), tell it to ignore its instructions, or name local secret paths such as `~/.ssh/id_rsa` are wrapped in an `[untrusted-linkedin-content: ...]` marker instead of being removed. The text stays readable and reportable; the marker tells the model it is data. Bare words like "LLM", "agent" or "prompt" are never fenced, and copies of the marker in page text are neutralized so a profile cannot forge the boundary.
 
+A scraping tool whose result has no section text and no `section_errors` entry says nothing about why, so the server adds one: `section_errors` with an `EmptyScrapeSection` entry, `empty_scrape: true` and a `warnings` line, and it keeps the debug trace for that run. Read it as "LinkedIn did not hydrate, the session is degraded, or another process holds the profile", not as "nothing to find". Results that already explain themselves (rate limit, extraction failure) and tools where empty is the answer (`get_pending_invitations` with none pending) are left alone, as is a page LinkedIn rendered as an empty state, because that still returns its text.
+
 <br/>
 <br/>
 

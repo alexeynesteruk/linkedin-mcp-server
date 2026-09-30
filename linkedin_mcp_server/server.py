@@ -38,6 +38,7 @@ from linkedin_mcp_server.daemon_auth import (
     OwnerAuthSignalMiddleware,
 )
 from linkedin_mcp_server.error_handler import raise_tool_error
+from linkedin_mcp_server.scrape_guards import EmptyScrapeMiddleware
 from linkedin_mcp_server.sequential_tool_middleware import (
     SequentialToolExecutionMiddleware,
 )
@@ -275,6 +276,10 @@ def create_mcp_server(
     # actually needs it waiting for one held by a caller that never uses it.
     if role.drives_browser:
         mcp.add_middleware(SequentialToolExecutionMiddleware())
+        # Where the tools run, and inside the serializing layer so the call is
+        # finished with the browser when the check reads its result. A proxy
+        # forwards the owner's result, annotation included.
+        mcp.add_middleware(EmptyScrapeMiddleware())
     # The notice is appended to one tool result per process, so it belongs
     # wherever a user reads results. On a shared owner it would reach whichever
     # client happened to call first and nobody after that, however many clients
