@@ -12,6 +12,7 @@ import re
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.core.browser_loss import raise_if_browser_lost
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.scraping.capture import (
@@ -316,6 +317,7 @@ class PersonScraper:
                 except LinkedInScraperException:
                     raise
                 except Exception as e:
+                    raise_if_browser_lost(e)
                     logger.warning("Error scraping section %s: %s", section_name, e)
                     section_errors[section_name] = build_issue_diagnostics(
                         e,
@@ -432,7 +434,10 @@ class PersonScraper:
                 await self._navigator._navigate_to_page(show_all_url)
             except LinkedInScraperException:
                 raise
-            except Exception:
+            except Exception as e:
+                # Skipped rather than recorded, so a dead browser here would
+                # skip every remaining section and return the rest as whole.
+                raise_if_browser_lost(e)
                 logger.debug(
                     "Failed to navigate to Show all for section %s: %s",
                     section_key,

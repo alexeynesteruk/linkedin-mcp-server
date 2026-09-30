@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import logging
 
+from linkedin_mcp_server.core.browser_loss import raise_if_browser_lost
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.scraping.capture import SectionCapture
@@ -103,6 +104,7 @@ class AnalyticsScraper:
                 except LinkedInScraperException:
                     raise
                 except Exception as e:
+                    raise_if_browser_lost(e)
                     logger.warning(
                         "Error scraping analytics section %s: %s", section_name, e
                     )

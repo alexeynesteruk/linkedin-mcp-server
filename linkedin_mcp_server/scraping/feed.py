@@ -11,6 +11,7 @@ import anyio
 import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.browser_loss import raise_if_browser_lost
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.scraping.content import PageContentReader
@@ -115,6 +116,7 @@ class FeedScraper:
         except LinkedInScraperException:
             raise
         except Exception as e:
+            raise_if_browser_lost(e)
             logger.warning("Failed to extract feed: %s", e)
             return ExtractedSection(
                 text="",

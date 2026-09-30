@@ -10,6 +10,7 @@ import logging
 import time
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.core.browser_loss import raise_if_browser_lost
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.scraping.capture import (
@@ -474,6 +475,7 @@ class JobScraper:
             except LinkedInScraperException:
                 raise
             except Exception as e:
+                raise_if_browser_lost(e)
                 logger.warning("Error on search page %d: %s", page_num + 1, e)
                 section_errors["search_results"] = build_issue_diagnostics(
                     e,
@@ -674,6 +676,7 @@ class JobScraper:
             except LinkedInScraperException:
                 raise
             except Exception as e:
+                raise_if_browser_lost(e)
                 logger.warning("Error on saved jobs page %d: %s", page_num + 1, e)
                 section_errors["saved_jobs"] = build_issue_diagnostics(
                     e,

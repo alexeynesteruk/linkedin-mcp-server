@@ -15,6 +15,7 @@ import anyio
 import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.browser_loss import raise_if_browser_lost
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
 from linkedin_mcp_server.scraping.comment_thread import (
@@ -299,6 +300,10 @@ class SectionCapture:
                     },
                 )
             except Exception as e:
+                # A browser that is gone is not a section that failed: as an
+                # error entry it reads as an empty page, and the call would
+                # claim a success the next call cannot repeat.
+                raise_if_browser_lost(e)
                 is_overlay = CaptureMode.OVERLAY in plan.mode
                 logger.warning(
                     "Failed to extract %s %s: %s",

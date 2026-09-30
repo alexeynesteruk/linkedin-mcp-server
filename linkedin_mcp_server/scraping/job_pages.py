@@ -17,6 +17,7 @@ import time
 
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.browser_loss import raise_if_browser_lost
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.core.utils import (
     _JOB_CARD_SELECTOR,
@@ -289,6 +290,7 @@ class JobPageReader:
         except LinkedInScraperException:
             raise
         except Exception as e:
+            raise_if_browser_lost(e)
             logger.warning("Failed to extract search page %s: %s", url, e)
             return self._captured(
                 ExtractedSection(
@@ -486,6 +488,7 @@ class JobPageReader:
             except LinkedInScraperException:
                 raise
             except Exception as e:
+                raise_if_browser_lost(e)
                 logger.warning("Failed to extract saved jobs page %s: %s", url, e)
                 # A navigation destroys the scroll's execution context, and
                 # what waits behind it is a checkpoint as often as a layout
