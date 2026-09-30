@@ -73,6 +73,18 @@ INBOX_FILTER_LABELS: dict[str, str] = {
 }
 INBOX_FILTERS: tuple[str, ...] = ("none", *INBOX_FILTER_LABELS)
 
+# One rendered message of the opened thread. A thread page's <main> holds the
+# inbox sidebar too, which fills it with text before the thread pane has
+# fetched a single message, so a length check passes on a page whose thread is
+# still empty: the read then returns `sections: {}` or the first turn only.
+# Each message is a `[data-view-name="message-list-item"]` node, the same node
+# the send confirmation reads (measured live for #1108), so waiting for one is
+# structural and locale-free.
+_THREAD_MESSAGE_READY_JS = """() => {
+    // thread_message_ready
+    return !!document.querySelector('main [data-view-name="message-list-item"]');
+}"""
+
 _SCAN_STARTED_ON_THREAD = (
     " The scan began on a thread path. An unchanged pre-click thread ID was"
     " not accepted as evidence for a row."
@@ -331,6 +343,19 @@ class ConversationReader:
             )
         except PlaywrightTimeoutError:
             logger.debug("%s content did not appear", log_context)
+
+    async def _wait_for_thread_message(self, *, timeout: int = 10000) -> None:
+        """Wait for the opened thread's first message to render.
+
+        A timeout is not an error: a thread with no messages never renders
+        one, and the read that follows returns whatever did render.
+        """
+        try:
+            await self._session.page.wait_for_function(
+                _THREAD_MESSAGE_READY_JS, timeout=timeout
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Conversation messages did not render before the timeout")
 
     async def _scroll_main_scrollable_region(
         self,
@@ -844,6 +869,7 @@ class ConversationReader:
 
         await self._session.check_rate_limit()
         await self._wait_for_main_text(log_context="Conversation")
+        await self._wait_for_thread_message()
         await self._session.dismiss_modal()
         await self._scroll_main_scrollable_region(
             position="top", attempts=3, pause_time=0.5

@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
@@ -1578,6 +1579,61 @@ class TestGetConversation:
             result = await reader.get_conversation(thread_id="abc123")
 
         assert result["sections"]["conversation"] == "Hello!"
+
+    async def test_the_thread_is_read_only_after_a_message_renders(self, mock_page):
+        """The sidebar fills <main> first, so the text-length wait passes on a
+        thread pane that has not fetched a message yet. The read has to wait
+        for one, or it returns an empty or one-turn transcript."""
+        reader = _reader(mock_page)
+        order: list[str] = []
+
+        async def wait_for_function(program: str, **kwargs: Any) -> None:
+            if "thread_message_ready" in program:
+                order.append("message rendered")
+
+        async def extract(_self: Any, _selectors: list[str]) -> dict[str, Any]:
+            order.append("read")
+            return _root("Hello!")
+
+        mock_page.wait_for_function = AsyncMock(side_effect=wait_for_function)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                PageContentReader, "_extract_root_content", autospec=True
+            ) as mock_extract,
+        ):
+            mock_extract.side_effect = extract
+            await reader.get_conversation(thread_id="abc123")
+
+        assert order == ["message rendered", "read"]
+
+    async def test_a_thread_with_no_message_is_still_read(self, mock_page):
+        """An empty thread never renders a message: the wait gives up quietly
+        and the read returns what the page holds."""
+        reader = _reader(mock_page)
+        mock_page.wait_for_function = AsyncMock(
+            side_effect=PlaywrightTimeoutError("no message")
+        )
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                reader, "_scroll_main_scrollable_region", new_callable=AsyncMock
+            ),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Say hello to Ada"),
+            ),
+        ):
+            result = await reader.get_conversation(thread_id="abc123")
+
+        assert result["sections"]["conversation"] == "Say hello to Ada"
 
     async def test_the_thread_scroll_walks_back_to_the_top(self, mock_page):
         """Three attempts, upward: a thread's oldest message is at the top.
