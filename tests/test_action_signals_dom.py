@@ -817,6 +817,40 @@ class TestConfirmDialogChoice:
             _confirm,
         )
 
+    async def test_a_modal_dialog_is_seen(self, dom_page):
+        # showModal() puts the dialog in the top layer with position: fixed,
+        # where offsetParent is null although the dialog covers the page.
+        async def confirm_modal(page, html: str) -> tuple[int, bool, str | None]:
+            await page.set_content(html)
+            await page.evaluate("document.getElementById('withdraw').showModal()")
+            count = await page.evaluate(CONFIRM_DIALOG_BUTTON_COUNT_JS)
+            clicked = bool(await page.evaluate(CLICK_CONFIRM_DIALOG_PRIMARY_JS))
+            recorded = await page.evaluate("document.body.getAttribute('data-clicked')")
+            return (count, clicked, recorded)
+
+        await _in_every_locale(
+            dom_page,
+            lambda labels: _body(
+                withdraw_dialog(labels).replace("<dialog open", "<dialog"),
+                hidden_preloaded_dialog(labels),
+            ),
+            (3, True, "withdraw"),
+            confirm_modal,
+        )
+
+    async def test_a_fixed_position_dialog_is_seen(self, dom_page):
+        await _in_every_locale(
+            dom_page,
+            lambda labels: _body(
+                withdraw_dialog(
+                    labels, native=False, extra='style="position:fixed;top:20%"'
+                ),
+                hidden_preloaded_dialog(labels),
+            ),
+            (3, True, "withdraw"),
+            _confirm,
+        )
+
     async def test_the_spinner_state_reads_as_one_button(self, dom_page):
         # The settle wait holds the click until a second button mounts; this
         # is the count it waits past.
@@ -827,3 +861,77 @@ class TestConfirmDialogChoice:
         await _in_every_locale(
             dom_page, lambda labels: _body(spinner_dialog(labels)), 1, count
         )
+
+
+def _actions_reading(page, text: str) -> ConnectionActions:
+    """The owner over a real page, with a profile read that never navigates.
+
+    Every read answers the same text, so the verdict comes from the signals
+    the real probe reads off the page as the flow leaves it.
+    """
+
+    async def read(_username: str) -> dict[str, Any]:
+        return {
+            "url": f"https://www.linkedin.com/in/{USER}/",
+            "sections": {"main_profile": text},
+        }
+
+    session = ScrapingSession(cast(Page, page))
+    return ConnectionActions(session, PageNavigator(session), read)
+
+
+# The Pending anchor opens a modal the way LinkedIn's does: the shell at once,
+# with only its Dismiss control while it loads, and Cancel/Withdraw a moment
+# later. Withdraw closes it and puts Connect back in the top card.
+_WITHDRAW_FLOW = f"""
+<html><body>
+<main>
+<section class="topcard">
+  <h1>Florian</h1>
+  <div class="actions">
+    <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3ADDD">Message</a>
+    <a id="pending" href="https://www.linkedin.com/in/{USER}/"
+      aria-label="Pending, click to withdraw the invitation sent to Florian"
+      onclick="event.preventDefault(); openWithdraw();">Pending</a>
+    <button type="button" aria-expanded="false">More</button>
+  </div>
+</section>
+</main>
+<dialog id="confirm"><button type="button" aria-label="Dismiss">X</button></dialog>
+<script>
+  function openWithdraw() {{
+    const dialog = document.getElementById('confirm');
+    dialog.showModal();
+    setTimeout(() => {{
+      dialog.insertAdjacentHTML('beforeend',
+        '<button type="button">Cancel</button>' +
+        '<button type="button" onclick="confirmWithdraw()">Withdraw</button>');
+    }}, 400);
+  }}
+  function confirmWithdraw() {{
+    document.body.dataset.withdrawn = 'yes';
+    const dialog = document.getElementById('confirm');
+    dialog.close();
+    dialog.remove();
+    const invite = document.createElement('a');
+    invite.href = '/preload/custom-invite/?vanityName={USER}';
+    invite.setAttribute('aria-label', 'Invite Florian to connect');
+    invite.textContent = 'Connect';
+    document.getElementById('pending').replaceWith(invite);
+  }}
+</script>
+</body></html>
+"""
+
+
+class TestWithdrawFlow:
+    """The whole withdrawal over a real page: click, settle, confirm, re-read."""
+
+    async def test_a_pending_invitation_is_withdrawn_through_its_modal(self, dom_page):
+        await dom_page.set_content(_WITHDRAW_FLOW)
+
+        result = await _actions_reading(dom_page, "Florian").withdraw_invitation(USER)
+
+        assert await dom_page.evaluate("document.body.dataset.withdrawn") == "yes"
+        assert result["status"] == "withdrawn"
+        assert "connectable" in result["message"]

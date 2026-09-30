@@ -303,10 +303,17 @@ CLICK_WITHDRAW_ANCHOR_JS = (
 # ``_DIALOG_SELECTOR``). A page-wide "last button" can land in a hidden
 # preloaded container instead: measured live 2026-08-21 on the invitation
 # manager, the page-wide last match was a hidden, disabled submit button.
+#
+# Visible means a rendered box, the test ``message_sender`` uses too, and not
+# ``offsetParent``: that is null for anything position: fixed, which is what
+# showModal() makes a dialog, so the modal on screen read as hidden.
 _FIND_CONFIRM_DIALOG_FN_JS = r"""
 function findConfirmDialog() {
+  const visible = el =>
+    !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length) &&
+    getComputedStyle(el).visibility !== 'hidden';
   const usable = el =>
-    el.offsetParent !== null && !el.querySelector('[contenteditable="true"]');
+    visible(el) && !el.querySelector('[contenteditable="true"]');
   for (const el of document.querySelectorAll('dialog[open]')) {
     if (usable(el)) return el;
   }
