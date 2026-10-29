@@ -53,7 +53,7 @@ def register_job_tools(
                 job ids as text.
             output_mode: "display" (default) returns the result and writes
                 nothing; "file" writes it and returns only saved_path, url,
-                job_ids, total, promoted_job_ids, section_errors and
+                job_ids, total, promoted_job_ids, section_errors, empty_scrape, warnings and
                 section_names; "both" returns the full result plus saved_path.
                 The path is checked before the browser starts.
 
@@ -80,7 +80,9 @@ def register_job_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return apply_output_mode(result, output_path, output_mode)
+            return apply_output_mode(
+                result, output_path, output_mode, tool_name="get_job_details"
+            )
 
         except AuthenticationError as e:
             try:
@@ -135,7 +137,7 @@ def register_job_tools(
                 job ids as text.
             output_mode: "display" (default) returns the result and writes
                 nothing; "file" writes it and returns only saved_path, url,
-                job_ids, total, promoted_job_ids, section_errors and
+                job_ids, total, promoted_job_ids, section_errors, empty_scrape, warnings and
                 section_names; "both" returns the full result plus saved_path.
                 The path is checked before the browser starts.
 
@@ -186,7 +188,9 @@ def register_job_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return apply_output_mode(result, output_path, output_mode)
+            return apply_output_mode(
+                result, output_path, output_mode, tool_name="search_jobs"
+            )
 
         except AuthenticationError as e:
             try:
@@ -225,7 +229,7 @@ def register_job_tools(
                 job ids as text.
             output_mode: "display" (default) returns the result and writes
                 nothing; "file" writes it and returns only saved_path, url,
-                job_ids, total, promoted_job_ids, section_errors and
+                job_ids, total, promoted_job_ids, section_errors, empty_scrape, warnings and
                 section_names; "both" returns the full result plus saved_path.
                 The path is checked before the browser starts.
 
@@ -246,7 +250,9 @@ def register_job_tools(
 
             await ctx.report_progress(progress=100, total=100, message="Complete")
 
-            return apply_output_mode(result, output_path, output_mode)
+            return apply_output_mode(
+                result, output_path, output_mode, tool_name="get_saved_jobs"
+            )
 
         except AuthenticationError as e:
             try:

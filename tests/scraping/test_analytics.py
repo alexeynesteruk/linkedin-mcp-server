@@ -177,6 +177,7 @@ class TestGetMyAnalytics:
         ) as capture:
             await scraper.get_my_analytics({"content"}, max_scrolls=7)
 
+        assert capture.await_args is not None
         assert capture.await_args.args[2] == CapturePlan(CaptureMode.STANDARD, 7)
 
     async def test_rate_limit_stops_the_walk_and_keeps_earlier_sections(

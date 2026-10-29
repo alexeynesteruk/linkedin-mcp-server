@@ -386,7 +386,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
     try:
         data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         logger.warning("Ignoring unreadable ownership marker: %s", path)
         return None
     if not isinstance(data, dict):

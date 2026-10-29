@@ -1373,6 +1373,53 @@ class TestJobTools:
         }
         assert target.is_file()
 
+    @pytest.mark.parametrize(
+        ("name", "args", "section"),
+        [
+            ("get_job_details", {"job_id": "12345"}, "job_posting"),
+            ("search_jobs", {"keywords": "python"}, "search_results"),
+            ("get_saved_jobs", {}, "saved_jobs"),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["file", "both"])
+    async def test_empty_exports_keep_the_empty_scrape_diagnostic(
+        self,
+        mock_context,
+        serve_extractor,
+        tmp_path,
+        monkeypatch,
+        name,
+        args,
+        section,
+        mode,
+    ):
+        import json
+        from pathlib import Path
+
+        from linkedin_mcp_server.tools.job import register_job_tools
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(
+            "linkedin_mcp_server.scrape_guards.build_issue_diagnostics",
+            lambda *a, **k: {},
+        )
+        serve_extractor(_make_mock_extractor({"url": "u", "sections": {section: ""}}))
+        mcp = FastMCP("test")
+        register_job_tools(mcp)
+        tool_fn = await get_tool_fn(mcp, name)
+
+        result = await tool_fn(
+            **args, ctx=mock_context, output_path="empty.json", output_mode=mode
+        )
+
+        saved = json.loads(Path(result["saved_path"]).read_text())
+        for payload in (result, saved):
+            assert payload["empty_scrape"] is True
+            assert name in payload["warnings"][0]
+            assert (
+                payload["section_errors"][section]["error_type"] == "EmptyScrapeSection"
+            )
+
     async def test_search_jobs_both_mode_returns_result_and_path(
         self, mock_context, serve_extractor, tmp_path, monkeypatch
     ):
@@ -2043,6 +2090,7 @@ class TestMessagingTools:
             "dropped. Every other C0 control character, including tab and a CR "
             "outside CRLF, and DEL are rejected."
         )
+        assert tool.description is not None
         description = " ".join(tool.description.split())
         assert (
             "Each line break is entered with the composer's line-break command, "
@@ -3193,6 +3241,7 @@ class TestNetworkTools:
             await _network_mcp().call_tool(tool, arguments)
 
         relogin.assert_awaited_once()
+        assert relogin.await_args is not None
         assert not relogin.await_args.kwargs.get("nothing_ran_yet", False)
 
     async def test_only_the_listing_is_read_only(self):

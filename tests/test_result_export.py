@@ -232,6 +232,42 @@ class TestPathSafety:
 
 
 class TestAtomicWrite:
+    def test_link_fallback_never_replaces_a_concurrent_export(
+        self, home, root, monkeypatch
+    ):
+        import linkedin_mcp_server.result_export as export
+
+        target = root / "jobs.json"
+        real_exists = export.os.path.lexists
+        real_open = export.os.open
+        link_failed = False
+
+        def no_link(*args, **kwargs):
+            nonlocal link_failed
+            link_failed = True
+            raise PermissionError("links unsupported")
+
+        def exists_then_race(path):
+            exists = real_exists(path)
+            if link_failed and Path(path) == target and not exists:
+                target.write_text("concurrent export")
+            return exists
+
+        def open_then_race(path, flags, *args, **kwargs):
+            if link_failed and Path(path) == target and not target.exists():
+                target.write_text("concurrent export")
+            return real_open(path, flags, *args, **kwargs)
+
+        monkeypatch.setattr(export.os, "link", no_link)
+        monkeypatch.setattr(export.os.path, "lexists", exists_then_race)
+        monkeypatch.setattr(export.os, "open", open_then_race)
+
+        with pytest.raises(OutputPathError, match="already exists"):
+            apply_output_mode(_result(), "jobs.json", "file")
+
+        assert target.read_text() == "concurrent export"
+        assert _files(root) == ["jobs.json"]
+
     def test_no_temporary_file_is_left_behind(self, home, root):
         apply_output_mode(_result(), "jobs.json", "file")
 
@@ -273,7 +309,7 @@ class TestAtomicWrite:
         assert (root / "jobs.json").read_text() == "raced in"
         assert _files(root) == ["jobs.json"]
 
-    def test_a_filesystem_without_hard_links_falls_back_to_a_checked_replace(
+    def test_a_filesystem_without_hard_links_uses_exclusive_creation(
         self, home, root, monkeypatch
     ):
         def no_link(*_args: Any, **_kwargs: Any) -> None:

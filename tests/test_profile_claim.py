@@ -506,6 +506,21 @@ class TestClaimingACustomRoot:
         assert ensure_profile_claim(target, claim_anyway=True) == target
         assert require_profile_claim(target) == target
 
+    def test_invalid_utf8_marker_refuses_and_can_be_explicitly_reclaimed(
+        self, tmp_path
+    ):
+        target = tmp_path / "custom" / "profile"
+        marker = _write_marker(target, "")
+        marker.write_bytes(b"\xff\xfe")
+
+        with pytest.raises(ProfileRootRefusedError):
+            ensure_profile_claim(target)
+        with pytest.raises(ProfileRootRefusedError):
+            require_profile_claim(target)
+        assert marker.read_bytes() == b"\xff\xfe"
+        assert ensure_profile_claim(target, claim_anyway=True) == target
+        assert require_profile_claim(target) == target
+
     def test_a_marker_naming_an_unusable_path_refuses_instead_of_crashing(
         self, tmp_path
     ):

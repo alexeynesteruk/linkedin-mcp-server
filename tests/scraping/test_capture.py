@@ -807,6 +807,7 @@ class TestActivityFeedExtraction:
             )
 
         mock_list_scroll.assert_awaited_once()
+        assert mock_list_scroll.await_args is not None
         assert mock_list_scroll.await_args.args[2] == 7
         mock_body_scroll.assert_not_awaited()
         # The merged read of the whole list is what gets extracted.

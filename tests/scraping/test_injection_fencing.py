@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
+from patchright.async_api import Page
 
 import re
 
@@ -248,7 +249,7 @@ class TestEveryReaderFencesOnce:
         recorder = TraceRecorder("feed-fence", _COMMON_ALLOWED)
         clock = FakeClock(recorder)
         page = _page(recorder).script("evaluate:root_content", _root(INJECTED))
-        session = ScrapingSession(page)
+        session = ScrapingSession(cast(Page, page))
         scraper = FeedScraper(
             session, PageNavigator(session), PageContentReader(session)
         )

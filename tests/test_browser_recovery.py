@@ -364,6 +364,7 @@ class TestTheMiddleware:
             result = await client.call_tool("send_message", {}, raise_on_error=False)
 
         assert result.is_error is True
+        assert result.structured_content is not None
         assert result.structured_content["status"] == "outcome_unknown"
         assert result.structured_content["retry_safe"] is False
         assert (
@@ -470,7 +471,7 @@ class TestTheMiddleware:
         context.message.name = "get_feed"
         context.fastmcp_context = None
 
-        async def call_next(_context: Any) -> Any:
+        async def call_next(context: Any) -> Any:
             raise asyncio.CancelledError
 
         with pytest.raises(asyncio.CancelledError):
@@ -505,7 +506,7 @@ class TestOnADaemonOwner:
         sequential = SequentialToolExecutionMiddleware()
         runs: list[str] = []
 
-        async def tool(_context: Any) -> Any:
+        async def tool(context: Any) -> Any:
             runs.append("ran")
             raise TargetClosedError()
 
@@ -519,6 +520,7 @@ class TestOnADaemonOwner:
         result = await OwnerCallLivenessMiddleware().on_call_tool(context, call_next)
 
         assert result.is_error is True
+        assert result.structured_content is not None
         assert result.structured_content["status"] == "outcome_unknown"
         assert result.structured_content["retry_safe"] is False
         assert runs == ["ran"]

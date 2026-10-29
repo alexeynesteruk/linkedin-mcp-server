@@ -41,6 +41,26 @@ def test_write_source_state_creates_generation(monkeypatch, isolate_profile_dir)
     assert load_source_state(isolate_profile_dir) == state
 
 
+@pytest.mark.parametrize("kind", ["source", "runtime"])
+def test_invalid_utf8_metadata_is_ignored(isolate_profile_dir, kind):
+    runtime = "linux-amd64-container"
+    path = (
+        source_state_path(isolate_profile_dir)
+        if kind == "source"
+        else runtime_state_path(runtime, isolate_profile_dir)
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\xff\xfe")
+
+    loaded = (
+        load_source_state(isolate_profile_dir)
+        if kind == "source"
+        else load_runtime_state(runtime, isolate_profile_dir)
+    )
+    assert loaded is None
+    assert path.read_bytes() == b"\xff\xfe"
+
+
 def test_load_source_state_ignores_a_recorded_user_agent(
     monkeypatch, isolate_profile_dir
 ):

@@ -25,7 +25,7 @@ from linkedin_mcp_server.scraping.invitations import (
     label_unlabeled_profiles,
     trim_to_limit,
 )
-from linkedin_mcp_server.scraping.link_metadata import Reference
+from linkedin_mcp_server.scraping.link_metadata import RawReference, Reference
 from linkedin_mcp_server.scraping.navigation import PageNavigator
 from linkedin_mcp_server.scraping.session import ScrapingSession
 
@@ -86,7 +86,7 @@ class TestInvitationsUrl:
 
     def test_an_unknown_kind_is_refused(self):
         with pytest.raises(ValueError, match="kind must be one of"):
-            invitations_url("accepted")  # type: ignore[arg-type]
+            invitations_url("accepted")  # ty: ignore[invalid-argument-type]
 
 
 class TestTrimToLimit:
@@ -187,7 +187,7 @@ class TestGetPendingInvitations:
 
 class TestCardLabels:
     def test_a_textless_profile_link_takes_its_card_label(self):
-        raw = [
+        raw: list[RawReference] = [
             {"href": "https://www.linkedin.com/in/acomminos/", "text": ""},
             {"href": "https://www.linkedin.com/in/bob/", "text": "Bob"},
             {"href": "https://www.linkedin.com/mynetwork/", "text": ""},

@@ -77,16 +77,21 @@ _INHERITED_BROWSERS_PATH = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
 
 @pytest.fixture(autouse=True)
 def installed_browser_for_dom_tests(request, reset_singletons, monkeypatch):
-    """Give ``browser_dom`` tests the browser cache the run was started with.
+    """Give native browser tests the browser cache the run was started with.
 
     ``reset_bootstrap_for_testing`` deletes ``PLAYWRIGHT_BROWSERS_PATH`` so that
     no bootstrap test measures, reports on or installs into a real cache. That
     also hid a browser installed outside patchright's default cache, such as the
     server's own under ``~/.linkedin-mcp/patchright-browsers``, and every DOM
-    test skipped. These tests only launch Chromium against synthetic markup, so
-    they get the caller's cache back and nothing else does.
+    test skipped. Contract and identity tests launch disposable profiles too;
+    they need the same cache or silently skip while Chromium is installed.
+    Bootstrap tests still run without the caller's cache.
     """
-    if _INHERITED_BROWSERS_PATH and request.node.get_closest_marker("browser_dom"):
+    native_browser = any(
+        request.node.get_closest_marker(marker)
+        for marker in ("browser_dom", "browser_contract", "browser_identity")
+    )
+    if _INHERITED_BROWSERS_PATH and native_browser:
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", _INHERITED_BROWSERS_PATH)
 
 

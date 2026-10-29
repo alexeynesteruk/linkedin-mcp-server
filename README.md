@@ -87,6 +87,8 @@ Scraped free text (bios, posts, messages) is written by third parties and reache
 
 A scraping tool whose result has no section text and no `section_errors` entry says nothing about why, so the server adds one: `section_errors` with an `EmptyScrapeSection` entry, `empty_scrape: true` and a `warnings` line, and it keeps the debug trace for that run. Read it as "LinkedIn did not hydrate, the session is degraded, or another process holds the profile", not as "nothing to find". Results that already explain themselves (rate limit, extraction failure) and tools where empty is the answer (`get_pending_invitations` with none pending) are left alone, as is a page LinkedIn rendered as an empty state, because that still returns its text.
 
+Job exports keep these diagnostics in both the saved JSON and the `output_mode="file"` confirmation. Exporting an empty scrape does not turn it into a successful read. Export names are created exclusively, including on filesystems without hard-link support, so concurrent exports cannot overwrite one another.
+
 <br/>
 <br/>
 

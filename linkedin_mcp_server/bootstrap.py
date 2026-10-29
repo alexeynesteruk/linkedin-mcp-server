@@ -958,7 +958,7 @@ def _metadata_shape_ok() -> Path | None:
         return None
     try:
         payload = json.loads(metadata_path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         return None
     if not (
         isinstance(payload, dict)

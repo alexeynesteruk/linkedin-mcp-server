@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from mcp.types import TextContent
 from fastmcp import FastMCP
 
 from linkedin_mcp_server.scrape_guards import (
@@ -132,13 +133,15 @@ class TestMiddleware:
         assert result.structured_content["empty_scrape"] is True
         assert "sections" in result.structured_content["section_errors"]
         # The text block a client reads carries the same annotation.
-        text = result.content[0].text  # type: ignore[union-attr]
+        assert isinstance(result.content[0], TextContent)
+        text = result.content[0].text
         assert json.loads(text) == result.structured_content
 
     async def test_a_search_tool_is_covered_by_its_tag(self):
         mcp = _server({"search_x": EMPTY}, {"search_x": {"search"}})
         result = await mcp.call_tool("search_x", {})
-        assert result.structured_content["empty_scrape"] is True  # type: ignore[index]
+        assert result.structured_content is not None
+        assert result.structured_content["empty_scrape"] is True
 
     async def test_get_pending_invitations_empty_is_an_answer(self):
         assert "get_pending_invitations" in EMPTY_IS_AN_ANSWER

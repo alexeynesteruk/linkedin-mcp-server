@@ -23,13 +23,22 @@ from typing import Any, Literal
 
 from linkedin_mcp_server.common_utils import secure_mkdir
 from linkedin_mcp_server.core.exceptions import InvalidReferenceError
+from linkedin_mcp_server.scrape_guards import annotate_empty_scrape_result
 
 OutputMode = Literal["display", "file", "both"]
 _OUTPUT_MODES = ("display", "file", "both")
 _FILE_MODE = 0o600
 # Keys a file-only confirmation carries over. Anything that says the result is
 # incomplete or empty must survive, or "file" would hide a failed scrape.
-_CONFIRMATION_KEYS = ("url", "job_ids", "total", "promoted_job_ids", "section_errors")
+_CONFIRMATION_KEYS = (
+    "url",
+    "job_ids",
+    "total",
+    "promoted_job_ids",
+    "section_errors",
+    "empty_scrape",
+    "warnings",
+)
 
 
 class OutputPathError(InvalidReferenceError):
@@ -122,7 +131,8 @@ def _write_new_file(path: Path, content: str) -> None:
     The content is written to a temporary file beside the target, then published
     with ``os.link``, which is the rename that refuses to replace. The temporary
     name is removed either way, so a failure leaves nothing behind. A filesystem
-    without hard links falls back to a checked ``os.replace``.
+    without hard links uses exclusive creation instead; publication there is
+    not atomic, but still never replaces an existing export.
     """
     secure_mkdir(path.parent)
     fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
@@ -138,12 +148,33 @@ def _write_new_file(path: Path, content: str) -> None:
                 "overwritten, choose another name"
             ) from None
         except OSError:
-            if os.path.lexists(path):
+            try:
+                target_fd = os.open(
+                    path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _FILE_MODE
+                )
+            except FileExistsError:
                 raise OutputPathError(
                     f"output_path {path} already exists; existing files are never "
                     "overwritten, choose another name"
                 ) from None
-            os.replace(tmp, path)
+            identity = os.fstat(target_fd)
+            try:
+                with os.fdopen(target_fd, "w", encoding="utf-8") as handle:
+                    handle.write(content)
+                    handle.flush()
+            except BaseException:
+                # Close before unlinking so Windows can remove the partial
+                # file; leave a replacement owned by another writer alone.
+                try:
+                    current = path.stat()
+                    if (current.st_dev, current.st_ino) == (
+                        identity.st_dev,
+                        identity.st_ino,
+                    ):
+                        path.unlink()
+                except OSError:
+                    pass
+                raise
     finally:
         try:
             os.unlink(tmp)
@@ -155,6 +186,8 @@ def apply_output_mode(
     result: dict[str, Any],
     output_path: str | None,
     output_mode: str,
+    *,
+    tool_name: str = "job export",
 ) -> dict[str, Any]:
     """Optionally write *result* to disk and shape what the caller gets back.
 
@@ -162,7 +195,7 @@ def apply_output_mode(
       ignored.
     - ``file``: write, and return a compact confirmation (``saved_path``,
       ``section_names`` and whichever of url, job_ids, total, promoted_job_ids
-      and section_errors the result had).
+      and section_errors the result had, including empty-scrape warnings).
     - ``both``: write, and return *result* with ``saved_path`` added.
 
     A ``.json`` name receives the whole result; any other name receives a text
@@ -171,6 +204,9 @@ def apply_output_mode(
     check_output_target(output_path, output_mode)
     if output_mode == "display":
         return result
+    # File mode removes `sections` before middleware sees the return value.
+    # Diagnose before exporting, or an empty scrape looks like a successful save.
+    result = annotate_empty_scrape_result(dict(result), tool_name=tool_name)
     assert output_path is not None
     path = resolve_export_path(output_path)
     if path.suffix == ".json":

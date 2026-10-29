@@ -577,12 +577,13 @@ class TestBrowserSetupReady:
         _write_metadata(install_metadata_path(), bdir, version=2)
         assert browser_setup_ready() is False
 
-    def test_false_on_corrupt_metadata(self, isolate_profile_dir, monkeypatch):
+    @pytest.mark.parametrize("payload", [b"not json {{{", b"\xff\xfe"])
+    def test_false_on_corrupt_metadata(self, isolate_profile_dir, monkeypatch, payload):
         _patch_targets_and_version(monkeypatch)
         bdir = browsers_path()
         _materialize_install(bdir, ["chromium-1217", "chromium_headless_shell-1217"])
         bdir.mkdir(parents=True, exist_ok=True)
-        install_metadata_path().write_text("not json {{{")
+        install_metadata_path().write_bytes(payload)
         assert browser_setup_ready() is False
 
     def test_false_when_registry_unreadable(self, isolate_profile_dir, monkeypatch):

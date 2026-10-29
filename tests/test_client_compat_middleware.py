@@ -53,6 +53,7 @@ class TestStripClientShimArgsMiddleware:
 
         assert result == {"ok": True}
         call_next.assert_awaited_once()
+        assert call_next.await_args is not None
         forwarded = call_next.await_args.args[0]
         assert forwarded.message.arguments == {"limit": 5}
         assert forwarded.message.name == "get_inbox"
@@ -73,6 +74,7 @@ class TestStripClientShimArgsMiddleware:
 
         await middleware.on_call_tool(context, call_next)
 
+        assert call_next.await_args is not None
         forwarded = call_next.await_args.args[0]
         assert forwarded is context
 

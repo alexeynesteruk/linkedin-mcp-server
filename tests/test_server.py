@@ -429,7 +429,9 @@ class TestTheRoleAsProcessState:
 
         assert process_role() is ServerRole.OWNER
 
-    def test_the_owner_entry_point_says_so_before_it_can_fail(self, monkeypatch):
+    def test_the_owner_entry_point_says_so_before_it_can_fail(
+        self, monkeypatch, isolate_profile_dir
+    ):
         """`main` claims OWNER before anything downstream could need to know.
 
         `create_owner_server` claims it too, but that runs several steps into
@@ -438,8 +440,8 @@ class TestTheRoleAsProcessState:
 
         Driven rather than read: an earlier version of this asserted on the source
         text of `main`, which stayed green when the call was made unreachable. The
-        child opens its log before taking the lock, so that boundary records the
-        role before its expected startup failure is translated into a verdict.
+        child takes its lock before opening its log, so a disposable root keeps
+        a running developer daemon from short-circuiting that boundary.
         """
         from linkedin_mcp_server import daemon_config, daemon_owner
         from linkedin_mcp_server.config.schema import AppConfig
@@ -453,10 +455,12 @@ class TestTheRoleAsProcessState:
             seen.append(process_role())
             raise Checkpoint
 
+        config = AppConfig()
+        config.browser.user_data_dir = str(isolate_profile_dir)
         monkeypatch.setattr(
             daemon_owner,
             "_read_handover",
-            lambda: daemon_config.OwnerHandover(AppConfig(), "0123456789abcdef" * 4),
+            lambda: daemon_config.OwnerHandover(config, "0123456789abcdef" * 4),
         )
         monkeypatch.setattr(daemon_owner, "set_headless", lambda _headless: None)
         monkeypatch.setattr(daemon_owner, "_attach_daemon_log", at_checkpoint)

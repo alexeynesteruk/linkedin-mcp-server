@@ -374,7 +374,7 @@
             },
             "output_mode": {
               "default": "display",
-              "description": "\"display\" (default) returns the result and writes\nnothing; \"file\" writes it and returns only saved_path, url,\njob_ids, total, promoted_job_ids, section_errors and\nsection_names; \"both\" returns the full result plus saved_path.\nThe path is checked before the browser starts.",
+              "description": "\"display\" (default) returns the result and writes\nnothing; \"file\" writes it and returns only saved_path, url,\njob_ids, total, promoted_job_ids, section_errors, empty_scrape, warnings and\nsection_names; \"both\" returns the full result plus saved_path.\nThe path is checked before the browser starts.",
               "enum": [
                 "display",
                 "file",
@@ -612,7 +612,7 @@
             },
             "output_mode": {
               "default": "display",
-              "description": "\"display\" (default) returns the result and writes\nnothing; \"file\" writes it and returns only saved_path, url,\njob_ids, total, promoted_job_ids, section_errors and\nsection_names; \"both\" returns the full result plus saved_path.\nThe path is checked before the browser starts.",
+              "description": "\"display\" (default) returns the result and writes\nnothing; \"file\" writes it and returns only saved_path, url,\njob_ids, total, promoted_job_ids, section_errors, empty_scrape, warnings and\nsection_names; \"both\" returns the full result plus saved_path.\nThe path is checked before the browser starts.",
               "enum": [
                 "display",
                 "file",
@@ -796,7 +796,7 @@
             },
             "output_mode": {
               "default": "display",
-              "description": "\"display\" (default) returns the result and writes\nnothing; \"file\" writes it and returns only saved_path, url,\njob_ids, total, promoted_job_ids, section_errors and\nsection_names; \"both\" returns the full result plus saved_path.\nThe path is checked before the browser starts.",
+              "description": "\"display\" (default) returns the result and writes\nnothing; \"file\" writes it and returns only saved_path, url,\njob_ids, total, promoted_job_ids, section_errors, empty_scrape, warnings and\nsection_names; \"both\" returns the full result plus saved_path.\nThe path is checked before the browser starts.",
               "enum": [
                 "display",
                 "file",

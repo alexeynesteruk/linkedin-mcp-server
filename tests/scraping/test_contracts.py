@@ -113,7 +113,9 @@ class TestRefuseAnInvalidMessage:
 
     def test_the_control_refusal_names_what_is_allowed(self):
         # Pinned as a literal: the caller reads this to correct its input.
-        assert refuse_an_invalid_message("alice", "a\tb")["message"] == (
+        refusal = refuse_an_invalid_message("alice", "a\tb")
+        assert refusal is not None
+        assert refusal["message"] == (
             "Message must not contain control characters other than line "
             "breaks (LF or CRLF). Tabs, a lone CR, DEL and every other C0 "
             "character are refused."
@@ -133,15 +135,15 @@ class TestRefuseAnInvalidMessage:
         ids=["trailing", "inner", "after-lf", "double"],
     )
     def test_a_carriage_return_outside_crlf_is_refused(self, message: str):
-        assert refuse_an_invalid_message("alice", message)["message"] == (
-            CONTROL_REASON
-        )
+        refusal = refuse_an_invalid_message("alice", message)
+        assert refusal is not None
+        assert refusal["message"] == CONTROL_REASON
 
     @pytest.mark.parametrize("message", ["\n", "\r\n\r\n", " \n \n "])
     def test_line_breaks_alone_are_blank(self, message: str):
-        assert refuse_an_invalid_message("alice", message)["message"] == (
-            "Message must contain non-whitespace characters."
-        )
+        refusal = refuse_an_invalid_message("alice", message)
+        assert refusal is not None
+        assert refusal["message"] == ("Message must contain non-whitespace characters.")
 
     def test_whitespace_is_refused_before_normal_message_text(self):
         assert refuse_an_invalid_message("alice", "   ") == message_action_result(
@@ -194,7 +196,9 @@ class TestRefuseAnInvalidThreadMessage:
             "sent": False,
             "retry_safe": True,
         }
-        assert refuse_an_invalid_message("alice", message)["message"] == reason
+        refusal = refuse_an_invalid_message("alice", message)
+        assert refusal is not None
+        assert refusal["message"] == reason
 
     @pytest.mark.parametrize("message", ["Hello!", "Hello,\n\nBob"])
     def test_a_usable_message_is_not_refused(self, message):
