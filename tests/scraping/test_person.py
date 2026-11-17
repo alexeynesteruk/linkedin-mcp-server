@@ -1787,6 +1787,53 @@ class TestGetSidebarProfiles:
         mock_page.evaluate.assert_awaited_once()  # sidebar JS only, no show_all expansion
         assert result["sidebar_profiles"]["more_profiles_for_you"] == ["/in/alice/"]
 
+    async def test_skips_show_all_when_linkedin_href_lands_off_site(self, mock_page):
+        """A linkedin.com href that then leaves LinkedIn is not scraped.
+
+        The pre-navigation check allows the href, so the browser does follow
+        it. The address after navigation is the one that is read, and an
+        off-site landing contributes nothing to the sidebar list.
+        """
+        show_all_url = "https://www.linkedin.com/search/results/people/?keywords=test"
+        sidebar_js_result = {
+            "sections": {"more_profiles_for_you": ["/in/alice/"]},
+            "showAllUrls": {"more_profiles_for_you": show_all_url},
+        }
+        mock_page.evaluate = AsyncMock(
+            side_effect=[sidebar_js_result, ["/in/off-site/"]]
+        )
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+
+        opened: list[str] = []
+
+        async def fake_navigate(url: str) -> None:
+            opened.append(url)
+            if url == show_all_url:
+                mock_page.url = "https://evil.example/out"
+
+        scraper = _scraper(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", side_effect=fake_navigate),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            result = await scraper.get_sidebar_profiles("testuser")
+
+        assert show_all_url in opened
+        mock_page.evaluate.assert_awaited_once()
+        assert result["sidebar_profiles"]["more_profiles_for_you"] == ["/in/alice/"]
+
     async def test_returns_empty_sidebar_profiles_when_no_sections_found(
         self, mock_page
     ):

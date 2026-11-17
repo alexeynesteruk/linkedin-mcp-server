@@ -397,7 +397,7 @@ class PersonScraper:
         Scrapes "More profiles for you", "Explore premium profiles", and
         "People you may know" sidebar sections. Follows each "Show all" link to
         collect the full list; skips any section whose "Show all" URL is not on
-        LinkedIn, or contains or redirects to /premium.
+        LinkedIn, contains or redirects to /premium, or lands off LinkedIn.
 
         Returns:
             Dict with url and sidebar_profiles mapping section key to list of
@@ -457,6 +457,16 @@ class PersonScraper:
             if "/premium" in self._session.page.url:
                 logger.debug(
                     "Show all for section %s redirected to premium, skipping",
+                    section_key,
+                )
+                continue
+            # The href was on LinkedIn. The document that loaded may not be:
+            # a redirect off-site is still this page's address, and it is not
+            # read. /premium stays its own check above; a premium URL is a
+            # LinkedIn landing and would pass this one.
+            if not is_linkedin_landing(self._session.page.url):
+                logger.debug(
+                    "Show all for section %s landed off LinkedIn, skipping",
                     section_key,
                 )
                 continue
