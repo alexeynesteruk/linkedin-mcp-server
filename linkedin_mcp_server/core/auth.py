@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import re
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from patchright.async_api import (
     Error as PlaywrightError,
@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 # is read, as its final segments so the route without the flagship-web prefix
 # counts too. Observations, and any new route, go in
 # docs/linkedin-auth-routes.md first; nothing here is guessed.
+# Whole host, so `evil-linkedin.com` and `linkedin.com.evil.test` are not it.
+# The same shape a profile reference accepts: the root, `www`, and locale
+# subdomains. https only, and only the port LinkedIn serves.
+_LINKEDIN_HOST = re.compile(r"^(?:[a-z0-9-]+\.)*linkedin\.com$")
 _ACCOUNT_RESTRICTION_PATH_TAIL = ("login", "login-restriction")
 _AUTH_BLOCKER_URL_PATTERNS = (
     "/login",
@@ -295,6 +299,50 @@ def _is_account_restricted_url(url: str) -> bool:
     return segments[-len(_ACCOUNT_RESTRICTION_PATH_TAIL) :] == (
         _ACCOUNT_RESTRICTION_PATH_TAIL
     )
+
+
+def is_linkedin_landing(url: object) -> bool:
+    """Whether *url* is an https document LinkedIn served.
+
+    A page address is always absolute. ``about:blank``, ``javascript:`` and
+    ``http`` are not this, and neither is a lookalike host or a URL that
+    carries userinfo. Callers use it before following a href the page handed
+    them.
+    """
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").removesuffix(".")
+    return (
+        parsed.scheme == "https"
+        and port in (None, 443)
+        and parsed.username is None
+        and parsed.password is None
+        and _LINKEDIN_HOST.fullmatch(host) is not None
+    )
+
+
+def raise_if_auth_route(url: str) -> None:
+    """Refuse a LinkedIn sign-in or challenge route.
+
+    Waiting does not clear one, so this is not a rate limit. The restriction
+    route is first because ``/login`` matches it too. An address that is not
+    a LinkedIn document is left alone: a failed navigation is not evidence
+    the stored session died.
+    """
+    if not is_linkedin_landing(url):
+        return
+    _raise_if_account_restricted(url)
+    if _is_auth_blocker_url(url):
+        logger.warning("Authentication barrier detected on %s", url)
+        raise AuthenticationError(
+            "LinkedIn requires interactive re-authentication. "
+            "Run with --login and complete the account selection/sign-in flow."
+        )
 
 
 def _raise_if_account_restricted(url: str) -> None:

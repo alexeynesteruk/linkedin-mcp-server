@@ -1638,8 +1638,9 @@ class TestSendInThread:
         mocks["write"].assert_not_awaited()
         mocks["submit"].assert_not_awaited()
 
-    async def test_checkpoint_instead_of_the_thread_is_a_rate_limit(self, mock_page):
-        from linkedin_mcp_server.core.exceptions import RateLimitError
+    async def test_checkpoint_instead_of_the_thread_needs_login(self, mock_page):
+        """A challenge is not a rate limit, and nothing is typed into it."""
+        from linkedin_mcp_server.core.exceptions import AuthenticationError
 
         sender = _sender(mock_page)
         patches = self._patches(
@@ -1649,7 +1650,7 @@ class TestSendInThread:
         del patches["rate_limit"]
         with ExitStack() as stack:
             mocks = self._enter(stack, patches)
-            with pytest.raises(RateLimitError):
+            with pytest.raises(AuthenticationError, match="--login"):
                 await sender.send_message(
                     "testuser", "Hello!", confirm_send=True, thread_id=THREAD_ID
                 )
