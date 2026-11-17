@@ -401,6 +401,80 @@ class TestLoaders:
         config = load_from_env(AppConfig())
         assert config.server.log_level == "DEBUG"
 
+    def test_load_from_env_refuses_an_invalid_log_level(self, monkeypatch):
+        monkeypatch.setenv("LOG_LEVEL", "NOPE")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match="Invalid LOG_LEVEL: 'NOPE'"):
+            load_from_env(AppConfig())
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "HEADLESS",
+            "AUTO_IMPORT_FROM_BROWSER",
+            "DAEMON_ENABLED",
+            "EAGER_FULL_CHROMIUM",
+        ],
+    )
+    def test_load_from_env_refuses_an_unreadable_flag(self, monkeypatch, key):
+        monkeypatch.setenv(key, "flase")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match=f"Invalid {key}: 'flase'"):
+            load_from_env(AppConfig())
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "HEADLESS",
+            "AUTO_IMPORT_FROM_BROWSER",
+            "DAEMON_ENABLED",
+            "EAGER_FULL_CHROMIUM",
+        ],
+    )
+    def test_load_from_env_reads_a_blank_flag_as_unset(self, monkeypatch, key):
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        monkeypatch.delenv(key, raising=False)
+        unset = load_from_env(AppConfig())
+        monkeypatch.setenv(key, "  ")
+        assert load_from_env(AppConfig()) == unset
+
+    def test_load_from_env_refuses_an_unknown_trace_mode(self, monkeypatch):
+        monkeypatch.setenv("LINKEDIN_TRACE_MODE", "alwyas")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(ConfigurationError, match="Invalid LINKEDIN_TRACE_MODE"):
+            load_from_env(AppConfig())
+
+    def test_load_from_env_refuses_an_unknown_update_check(self, monkeypatch):
+        monkeypatch.setenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", "disabled")
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        with pytest.raises(
+            ConfigurationError, match="Invalid LINKEDIN_MCP_CHECK_FOR_UPDATES"
+        ):
+            load_from_env(AppConfig())
+
+    def test_load_from_env_accepts_known_trace_and_update_spellings(self, monkeypatch):
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        monkeypatch.setenv("LINKEDIN_TRACE_MODE", "keep")
+        monkeypatch.setenv("LINKEDIN_MCP_CHECK_FOR_UPDATES", "off")
+        load_from_env(AppConfig())
+
+    @pytest.mark.parametrize("value", ["true", "yes", "on", "1", "on_error"])
+    def test_load_from_env_keeps_truthy_trace_mode_as_accepted(
+        self, monkeypatch, value
+    ):
+        # These spellings used to fall through to on_error. Refusing them
+        # would reject a setting the trace reader still honors.
+        monkeypatch.setenv("LINKEDIN_TRACE_MODE", value)
+        from linkedin_mcp_server.config.loaders import load_from_env
+
+        load_from_env(AppConfig())
+
     def test_load_from_env_defaults(self, monkeypatch):
         # Clear env vars
         for var in ["HEADLESS", "LOG_LEVEL"]:
@@ -839,6 +913,31 @@ class TestLoaders:
 
         config = load_from_env(AppConfig())
         assert config.browser.slow_mo == 100
+
+    def test_slow_mo_zero_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("SLOW_MO", "500")
+        from linkedin_mcp_server.config import load_config
+
+        assert load_config(["--slow-mo", "0"]).browser.slow_mo == 0
+
+    def test_absent_slow_mo_keeps_env(self, monkeypatch):
+        monkeypatch.setenv("SLOW_MO", "500")
+        from linkedin_mcp_server.config import load_config
+
+        assert load_config([]).browser.slow_mo == 500
+
+    def test_zero_port_flag_is_refused_like_the_environment(self):
+        from linkedin_mcp_server.config import load_config
+
+        with pytest.raises(ConfigurationError, match="Port 0 is not in valid range"):
+            load_config(["--port", "0"])
+
+    def test_zero_port_environment_is_refused(self, monkeypatch):
+        monkeypatch.setenv("PORT", "0")
+        from linkedin_mcp_server.config import load_config
+
+        with pytest.raises(ConfigurationError, match="Port 0 is not in valid range"):
+            load_config([])
 
     def test_load_from_env_viewport(self, monkeypatch):
         monkeypatch.setenv("VIEWPORT", "1920x1080")

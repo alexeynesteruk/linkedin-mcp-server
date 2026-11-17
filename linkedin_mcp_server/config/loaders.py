@@ -31,6 +31,55 @@ def _normalize_env(value: str) -> str:
     return value.strip().lower()
 
 
+_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+# Spellings ``debug_trace._trace_mode`` already accepts, plus the documented
+# default. A typo used to fall through to ``on_error``.
+# stickerdaniel/linkedin-mcp-server#1501.
+# Truthy spellings keep the old fallthrough, which is on_error. Refusing them
+# would reject a setting debug_trace still honors. stickerdaniel #1501.
+_TRACE_MODE_VALUES = frozenset(
+    {
+        "on_error",
+        "always",
+        "keep",
+        "persist",
+        *TRUTHY_VALUES,
+        *FALSY_VALUES,
+    }
+)
+_FLAG_VALUES = frozenset((*TRUTHY_VALUES, *FALSY_VALUES))
+
+
+def _env_flag(key: str) -> bool | None:
+    """Read an on/off environment variable, or None when it is unset or blank.
+
+    A value outside the truthy and falsy spellings is a typo. Ignoring it kept
+    the default while reading as though the setting had applied.
+    stickerdaniel/linkedin-mcp-server#1479.
+    """
+    raw = os.environ.get(key)
+    if raw is None or not (value := _normalize_env(raw)):
+        return None
+    if value in TRUTHY_VALUES:
+        return True
+    if value in FALSY_VALUES:
+        return False
+    raise ConfigurationError(
+        f"Invalid {key}: '{raw}'. Must be one of {', '.join(TRUTHY_VALUES + FALSY_VALUES)}."
+    )
+
+
+def _refuse_unknown_choice(key: str, allowed: frozenset[str]) -> None:
+    """Refuse a set-but-unreadable environment value. Blank reads as unset."""
+    raw = os.environ.get(key)
+    if raw is None or not (value := _normalize_env(raw)):
+        return
+    if value not in allowed:
+        raise ConfigurationError(
+            f"Invalid {key}: '{raw}'. Must be one of {', '.join(sorted(allowed))}."
+        )
+
+
 def positive_int(value: str) -> int:
     """Argparse type for positive integers."""
     ivalue = int(value)
@@ -219,19 +268,20 @@ def is_interactive_environment() -> bool:
 def load_from_env(config: AppConfig) -> AppConfig:
     """Load configuration from environment variables."""
 
-    # Log level
+    # Log level. A typo used to keep the default while reading as applied.
+    # stickerdaniel/linkedin-mcp-server#1461.
     if log_level_env := os.environ.get(EnvironmentKeys.LOG_LEVEL):
         log_level_upper = log_level_env.strip().upper()
-        if log_level_upper in ("DEBUG", "INFO", "WARNING", "ERROR"):
-            config.server.log_level = log_level_upper
+        if log_level_upper not in _LOG_LEVELS:
+            raise ConfigurationError(
+                f"Invalid LOG_LEVEL: '{log_level_env}'. "
+                f"Must be one of {', '.join(_LOG_LEVELS)}."
+            )
+        config.server.log_level = log_level_upper
 
     # Headless mode
-    if headless_env := os.environ.get(EnvironmentKeys.HEADLESS):
-        headless_value = _normalize_env(headless_env)
-        if headless_value in FALSY_VALUES:
-            config.browser.headless = False
-        elif headless_value in TRUTHY_VALUES:
-            config.browser.headless = True
+    if (headless := _env_flag(EnvironmentKeys.HEADLESS)) is not None:
+        config.browser.headless = headless
 
     # Transport mode
     if transport_env := os.environ.get(EnvironmentKeys.TRANSPORT):
@@ -413,28 +463,20 @@ def load_from_env(config: AppConfig) -> AppConfig:
     # Auto-import a session from a logged-in browser on first no-session tool
     # call. Unset = on by default (interactive and non-interactive desktop);
     # false disables it. No effect under Docker or a non-loopback HTTP bind.
-    if auto_import_env := os.environ.get(EnvironmentKeys.AUTO_IMPORT_FROM_BROWSER):
-        auto_import_value = _normalize_env(auto_import_env)
-        if auto_import_value in FALSY_VALUES:
-            config.browser.auto_import_from_browser = False
-        elif auto_import_value in TRUTHY_VALUES:
-            config.browser.auto_import_from_browser = True
+    if (auto_import := _env_flag(EnvironmentKeys.AUTO_IMPORT_FROM_BROWSER)) is not None:
+        config.browser.auto_import_from_browser = auto_import
 
     # Install full chromium up front instead of lazily on the first headed login.
-    if eager_full_env := os.environ.get(EnvironmentKeys.EAGER_FULL_CHROMIUM):
-        eager_full_value = _normalize_env(eager_full_env)
-        if eager_full_value in FALSY_VALUES:
-            config.browser.eager_full_chromium = False
-        elif eager_full_value in TRUTHY_VALUES:
-            config.browser.eager_full_chromium = True
+    if (eager_full := _env_flag(EnvironmentKeys.EAGER_FULL_CHROMIUM)) is not None:
+        config.browser.eager_full_chromium = eager_full
 
     # Share one browser-owning process across stdio clients.
-    if daemon_env := os.environ.get(EnvironmentKeys.DAEMON_ENABLED):
-        daemon_value = _normalize_env(daemon_env)
-        if daemon_value in FALSY_VALUES:
-            config.server.daemon_enabled = False
-        elif daemon_value in TRUTHY_VALUES:
-            config.server.daemon_enabled = True
+    if (daemon := _env_flag(EnvironmentKeys.DAEMON_ENABLED)) is not None:
+        config.server.daemon_enabled = daemon
+
+    # Unknown values used to mean "on_error" and "keep checking" respectively.
+    _refuse_unknown_choice("LINKEDIN_TRACE_MODE", _TRACE_MODE_VALUES)
+    _refuse_unknown_choice("LINKEDIN_MCP_CHECK_FOR_UPDATES", _FLAG_VALUES)
 
     return config
 
@@ -489,7 +531,7 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
     parser.add_argument(
         "--slow-mo",
         type=int,
-        default=0,
+        default=None,
         metavar="MS",
         help="Slow down browser actions by N milliseconds (debugging)",
     )
@@ -769,14 +811,14 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
     if args.host:
         config.server.host = args.host
 
-    if args.port:
+    if args.port is not None:
         config.server.port = args.port
 
     if args.path:
         config.server.path = args.path
 
     # Browser configuration
-    if args.slow_mo:
+    if args.slow_mo is not None:
         config.browser.slow_mo = args.slow_mo
 
     if args.user_agent:
