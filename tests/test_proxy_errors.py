@@ -1,5 +1,7 @@
 """Tests for recognizing and safely reporting proxy failures."""
 
+from urllib.parse import quote
+
 import pytest
 
 from linkedin_mcp_server.config.schema import AppConfig
@@ -90,6 +92,80 @@ class TestRedaction:
         # A password inside a URL appears percent-encoded.
         redacted = redact_proxy_credentials("http://user:s3cr3t%20p%40ss@gate:7000")
         assert "s3cr3t" not in redacted and "%40ss" not in redacted
+
+    def test_userinfo_only_password_is_masked(self, monkeypatch):
+        """The secret is in PROXY_SERVER and not in the username or password fields.
+
+        Those fields are what redaction used to read, so a password that
+        appears only as userinfo used to survive into the reported text.
+        """
+        user = "acct" + "zone9"
+        secret = "s3" + "cr3t"
+        server = f"http://{user}:{secret}@gate.example:7000"
+        config = AppConfig()
+        config.browser.proxy_server = server
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        redacted = redact_proxy_credentials(f"failed via {server}")
+
+        assert config.browser.proxy_username is None
+        assert config.browser.proxy_password is None
+        assert secret not in redacted
+        assert user not in redacted
+        assert "gate.example" in redacted
+
+    def test_percent_encoded_userinfo_is_masked(self, monkeypatch):
+        """urlsplit does not see a userinfo whose "@" is percent-encoded.
+
+        The password is ``p@ss``, so the encoded form ``p%40ss`` does not
+        contain the literal password. Masking only the decoded fields would
+        leave the encoded password in the URL.
+        """
+        password = "p@" + "ss"
+        encoded_password = quote(password, safe="")
+        userinfo = quote(f"acct:{password}", safe="")
+        server = f"http://{userinfo}%40gate.example:7000"
+        config = AppConfig()
+        config.browser.proxy_server = server
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        redacted = redact_proxy_credentials(f"proxy {server} refused ({password})")
+
+        assert password not in redacted
+        assert encoded_password not in redacted
+        assert "gate.example" in redacted
+
+    def test_percent_encoded_password_inside_userinfo_is_masked(self, monkeypatch):
+        password = "p@" + "ss"
+        encoded_password = quote(password, safe="")
+        server = f"http://acct:{encoded_password}@gate.example:7000"
+        config = AppConfig()
+        config.browser.proxy_server = server
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        redacted = redact_proxy_credentials(f"saw {server} and {password}")
+
+        assert password not in redacted
+        assert encoded_password not in redacted
+        assert "gate.example" in redacted
+
+    def test_a_client_error_does_not_repeat_userinfo(self, monkeypatch):
+        """The proxy address is part of the error. The userinfo in it is not."""
+        user = "acct" + "zone9"
+        secret = "s3" + "cr3t"
+        config = AppConfig()
+        config.browser.proxy_server = f"http://{user}:{secret}@gate.example:7000"
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        converted = as_proxy_error(Exception("net::ERR_PROXY_CONNECTION_FAILED"))
+        hint = proxy_hint()
+
+        assert secret not in str(converted)
+        assert user not in str(converted)
+        assert "gate.example" in str(converted)
+        assert secret not in hint
+        assert user not in hint
+        assert "gate.example" in hint
 
     def test_without_a_configured_password_nothing_changes(self, monkeypatch):
         monkeypatch.setattr(

@@ -8,7 +8,7 @@ two apart before they draw that conclusion.
 
 import logging
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from linkedin_mcp_server.config.schema import BrowserConfig
 
@@ -68,6 +68,63 @@ def is_proxy_error(error: BaseException) -> bool:
     )
 
 
+def _proxy_server_userinfo_secrets(proxy_server: str | None) -> list[str]:
+    """Credentials that live in *proxy_server*'s userinfo and nowhere else.
+
+    ``validate()`` normally moves these into ``proxy_username`` and
+    ``proxy_password`` and stores a host:port URL. A config that has not been
+    through that split still holds the secret in the URL, and so does a
+    ``PROXY_SERVER`` whose ``@`` was percent-encoded, which ``urlsplit`` then
+    reads as a hostname. This interpreter also leaves percent-encoding in
+    place on ``username`` and ``password``, so the decoded form is produced
+    here. The host is not a secret and is not returned.
+    """
+    if not proxy_server or not proxy_server.strip():
+        return []
+    raw_url = proxy_server.strip()
+    if "://" not in raw_url:
+        raw_url = f"http://{raw_url}"
+    try:
+        parsed = urlsplit(raw_url)
+    except ValueError:
+        return []
+
+    netloc = parsed.netloc
+    raw_userinfo = ""
+    if "@" in netloc:
+        raw_userinfo = netloc.rsplit("@", 1)[0]
+        decoded_userinfo = unquote(raw_userinfo)
+    else:
+        decoded_netloc = unquote(netloc)
+        if "@" not in decoded_netloc:
+            return []
+        decoded_userinfo = decoded_netloc.rsplit("@", 1)[0]
+        # The last encoded "@" separates userinfo from the host. An earlier
+        # one belongs to the password.
+        index = netloc.lower().rfind("%40")
+        if index > 0:
+            raw_userinfo = netloc[:index]
+
+    secrets: list[str] = []
+
+    def add(value: str | None) -> None:
+        if value and value not in secrets:
+            secrets.append(value)
+
+    add(raw_userinfo)
+    add(decoded_userinfo)
+    source = decoded_userinfo if ":" in decoded_userinfo else raw_userinfo
+    if ":" in source:
+        user, password = source.split(":", 1)
+        add(user)
+        add(unquote(user))
+        add(password)
+        add(unquote(password))
+    elif source:
+        add(unquote(source))
+    return secrets
+
+
 def redact_proxy_credentials(message: str) -> str:
     """Strip the configured proxy credentials from *message*.
 
@@ -76,13 +133,30 @@ def redact_proxy_credentials(message: str) -> str:
     alongside the password because residential providers encode the account,
     zone and session in it. Percent-encoded forms are covered too, since that is
     how credentials appear inside a URL.
+
+    A credential that exists only as ``PROXY_SERVER`` userinfo — not also in
+    ``proxy_username`` or ``proxy_password`` — is masked the same way, including
+    the percent-encoded form of that userinfo.
     """
     config = _browser_config()
-    for secret in (config.proxy_password, config.proxy_username):
-        if not secret:
-            continue
-        for variant in (secret, quote(secret, safe="")):
-            message = message.replace(variant, "***")
+    secrets: list[str] = []
+    for secret in (
+        config.proxy_password,
+        config.proxy_username,
+        *_proxy_server_userinfo_secrets(config.proxy_server),
+    ):
+        if secret and secret not in secrets:
+            secrets.append(secret)
+    variants: list[str] = []
+    for secret in secrets:
+        encoded = quote(secret, safe="")
+        for variant in (secret, encoded):
+            if variant and variant not in variants:
+                variants.append(variant)
+    # Longest first, so an encoded userinfo blob is removed whole before a
+    # shorter piece of it splits the encoding and leaves the rest visible.
+    for variant in sorted(variants, key=len, reverse=True):
+        message = message.replace(variant, "***")
     return message
 
 
@@ -99,9 +173,11 @@ def as_proxy_error(error: BaseException) -> ProxyConnectionError:
     server = _browser_config().proxy_server or "the configured proxy"
     detail = redact_proxy_credentials(str(error))
     return ProxyConnectionError(
-        f"Could not reach LinkedIn through proxy {server}: {detail}. "
-        "Check that the proxy is running and that its address and credentials "
-        "are correct. The saved LinkedIn session was not changed."
+        redact_proxy_credentials(
+            f"Could not reach LinkedIn through proxy {server}: {detail}. "
+            "Check that the proxy is running and that its address and credentials "
+            "are correct. The saved LinkedIn session was not changed."
+        )
     )
 
 
@@ -148,10 +224,12 @@ def raise_if_proxy_configured(error: BaseException) -> None:
     server = _browser_config().proxy_server
     detail = redact_proxy_credentials(str(error))
     raise ProxyConnectionError(
-        f"LinkedIn could not be reached through proxy {server}: {detail}. "
-        "Wrong proxy credentials look exactly like this, because the browser "
-        "retries the challenge until the page times out. Check the proxy "
-        "address and credentials. The saved LinkedIn session was not changed."
+        redact_proxy_credentials(
+            f"LinkedIn could not be reached through proxy {server}: {detail}. "
+            "Wrong proxy credentials look exactly like this, because the browser "
+            "retries the challenge until the page times out. Check the proxy "
+            "address and credentials. The saved LinkedIn session was not changed."
+        )
     ) from None
 
 
@@ -183,6 +261,7 @@ def proxy_hint() -> str:
     server = _browser_config().proxy_server
     if not server:
         return ""
+    server = redact_proxy_credentials(server)
     return (
         f" Traffic is routed through proxy {server}; if it is unreachable or "
         "its credentials are wrong, that looks the same as a failed sign-in."

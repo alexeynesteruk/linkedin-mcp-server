@@ -294,3 +294,32 @@ def test_build_issue_diagnostics_strips_proxy_credentials(monkeypatch, tmp_path)
     assert secret not in issue_body
     assert username not in issue_body
     assert "***" in diagnostics["error_message"]
+
+
+def test_build_issue_diagnostics_strips_proxy_userinfo(monkeypatch, tmp_path):
+    """Notes paste the error string. Userinfo that is not in the credential fields still has to be gone."""
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues",
+        lambda payload: [],
+    )
+    from linkedin_mcp_server.config.schema import BrowserConfig
+
+    user = "proxy-" + "user-value"
+    secret = "proxy-" + "secret-value"
+    server = f"http://{user}:{secret}@proxy.example:8080"
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.proxy_errors._browser_config",
+        lambda: BrowserConfig(proxy_server=server),
+    )
+
+    diagnostics = build_issue_diagnostics(
+        RuntimeError(f"tunnel failed {server}"),
+        context="search_people",
+    )
+
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
+    assert secret not in diagnostics["error_message"]
+    assert user not in diagnostics["error_message"]
+    assert secret not in issue_body
+    assert user not in issue_body

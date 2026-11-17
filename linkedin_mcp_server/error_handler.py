@@ -287,11 +287,15 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     elif isinstance(exception, (LinkedInScraperException, LinkedInMCPError)):
         # Catch-all for base exception types and any future subclasses
-        # without a dedicated handler above. Passes through str(exception).
-        logger.warning("LinkedIn error%s: %s", ctx, exception)
+        # without a dedicated handler above. The message is what the client
+        # sees and what this log line writes, so a proxy URL quoted in it is
+        # redacted first. The copy is what gets chained: FastMCP logs the
+        # cause, and the original would put the credential back.
+        safe = redacted_copy(exception)
+        logger.warning("LinkedIn error%s: %s", ctx, safe)
         _raise_tool_error_with_diagnostics(
-            exception,
-            str(exception),
+            safe,
+            str(safe),
             context=context,
         )
 

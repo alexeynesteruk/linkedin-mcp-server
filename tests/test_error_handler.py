@@ -4,6 +4,7 @@ import pytest
 from fastmcp.exceptions import ToolError
 
 from linkedin_mcp_server.core.exceptions import (
+    LinkedInScraperException,
     NetworkError,
     ProfileNotFoundError,
     InvalidReferenceError,
@@ -154,10 +155,44 @@ def test_raises_tool_error_for_scraping_error():
 
 
 def test_raises_tool_error_for_base_scraper_exception():
-    from linkedin_mcp_server.core.exceptions import LinkedInScraperException
-
     with pytest.raises(ToolError, match="generic scraper error"):
         raise_tool_error(LinkedInScraperException("generic scraper error"))
+
+
+def test_scraper_exception_redacts_a_secret_only_in_the_proxy_url(
+    monkeypatch, caplog, tmp_path
+):
+    """This branch used to hand str(exception) to the client and the log.
+
+    The password is not in the username or password settings. It exists only
+    as PROXY_SERVER userinfo, which is the form redaction used to ignore, on
+    the branch that used to skip redaction. Either hole puts it in the reply.
+    """
+    from linkedin_mcp_server.config.schema import AppConfig
+
+    user = "acct" + "zone9"
+    secret = "s3" + "cr3t"
+    config = AppConfig()
+    config.browser.proxy_server = f"http://{user}:{secret}@gate.example:7000"
+    monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues",
+        lambda payload: [],
+    )
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(ToolError) as caught:
+        raise_tool_error(
+            LinkedInScraperException(
+                f"navigation failed via http://{user}:{secret}@gate.example:7000"
+            ),
+            "get_person_profile",
+        )
+
+    assert secret not in str(caught.value)
+    assert user not in str(caught.value)
+    assert secret not in caplog.text
+    assert user not in caplog.text
 
 
 def test_raises_tool_error_for_linkedin_mcp_error():
