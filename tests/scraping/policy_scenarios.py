@@ -1166,8 +1166,15 @@ async def _conversation_scenario(method: str) -> dict[str, Any]:
     if method != "search_conversations":
         scrolls = 3 if method == "get_conversation" else 1
         page.script("evaluate:scroll_main_region", *([True] * scrolls))
+    if method == "search_conversations":
+        # The empty state fills main before the result rows attach, so the
+        # search waits for a row and only then reads the text.
+        page.script(
+            "wait_for_selector:conversation_rows",
+            PlaywrightTimeoutError("no scripted rows"),
+        )
     page.script("evaluate:root_content", _root("Conversation content"))
-    if method != "get_conversation":
+    if method == "get_inbox":
         page.script(
             "wait_for_selector:conversation_rows",
             PlaywrightTimeoutError("no scripted rows"),
