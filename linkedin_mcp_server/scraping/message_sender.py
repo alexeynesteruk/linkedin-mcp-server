@@ -1468,12 +1468,21 @@ def _normalize_profile_urn(value: str | None) -> str | None:
     return candidate.removeprefix(_PROFILE_URN_PREFIX)
 
 
+# The profile page lands on /in/<name>/?isSelfProfile=false. That flag is the
+# only query a profile route may carry; any other still refuses.
+_BENIGN_PROFILE_QUERIES = frozenset({"", "isSelfProfile=false"})
+
+
 def _profile_path_from_url(value: str) -> str | None:
     parsed = _safe_linkedin_url(value)
-    if parsed is None or parsed.query or not _PROFILE_PATH_RE.fullmatch(parsed.path):
+    if (
+        parsed is None
+        or parsed.query not in _BENIGN_PROFILE_QUERIES
+        or not _PROFILE_PATH_RE.fullmatch(parsed.path)
+    ):
         return None
     try:
-        username = normalize_person_identifier(value)
+        username = normalize_person_identifier(parsed._replace(query="").geturl())
     except LinkedInScraperException:
         return None
     canonical_path = urlparse(person_profile_url(username, "/")).path

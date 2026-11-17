@@ -91,6 +91,15 @@ class TestMessageTargetUrls:
             ("https://www.linkedin.com/in/testuser/edit/intro/", None),
             ("https://www.linkedin.com/in/testuser%2Fedit/", None),
             ("https://www.linkedin.com/in/testuser/?trk=profile", None),
+            (
+                "https://www.linkedin.com/in/testuser/?isSelfProfile=false",
+                "/in/testuser/",
+            ),
+            ("https://www.linkedin.com/in/testuser/?isSelfProfile=true", None),
+            (
+                "https://www.linkedin.com/in/testuser/?isSelfProfile=false&trk=1",
+                None,
+            ),
             ("https://www.linkedin.com/in/testuser/#details", None),
         ],
     )
