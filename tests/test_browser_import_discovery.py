@@ -407,9 +407,60 @@ def test_flat_layout_no_cookies_db_dropped(tmp_path, monkeypatch):
     assert discover_profiles("opera") == []
 
 
+def test_opera_one_default_profile_is_discovered(tmp_path, monkeypatch):
+    # Opera One moved its profile into Default/. A root holding only
+    # Default/Network/Cookies found nothing while flat meant the root alone.
+    base = tmp_path / "Application Support"
+    root = base / SUPPORTED_BROWSERS["opera"]["mac_subpath"]
+    _write_local_state(root, {"Default": {"name": "Opera user"}})
+    _make_profile_dir(root, "Default", network=True, flat=False)
+
+    monkeypatch.setattr(discovery, "_os_base_dirs", lambda: ("mac", [base]))
+
+    profiles = discover_profiles("opera")
+
+    assert [(p.profile_dir_name, p.display_name) for p in profiles] == [
+        ("Default", "Opera user")
+    ]
+    profile = profiles[0]
+    assert profile.profile_path == root / "Default"
+    assert profile.cookies_db == root / "Default" / "Network" / "Cookies"
+    assert profile.layout == "profiles"
+    assert profile.safe_storage_label == "Opera"
+
+
+def test_upgraded_opera_offers_the_root_and_its_profiles(tmp_path, monkeypatch):
+    base = tmp_path / "Application Support"
+    root = base / SUPPORTED_BROWSERS["opera"]["mac_subpath"]
+    _write_local_state(root, {"Default": {"name": "Opera user"}})
+    (root / "Cookies").write_text("db")
+    _make_profile_dir(root, "Default", network=True, flat=False)
+
+    monkeypatch.setattr(discovery, "_os_base_dirs", lambda: ("mac", [base]))
+
+    profiles = discover_profiles("opera")
+
+    assert [(p.profile_dir_name, p.cookies_db, p.layout) for p in profiles] == [
+        (".", root / "Cookies", "flat"),
+        ("Default", root / "Default" / "Network" / "Cookies", "profiles"),
+    ]
+
+
+def test_profiles_layout_never_offers_the_root(tmp_path, monkeypatch):
+    base = tmp_path / "Application Support"
+    root = base / SUPPORTED_BROWSERS["chrome"]["mac_subpath"]
+    _write_local_state(root, {"Default": {"name": "Personal"}})
+    (root / "Cookies").write_text("db")
+    _make_profile_dir(root, "Default", network=True, flat=False)
+
+    monkeypatch.setattr(discovery, "_os_base_dirs", lambda: ("mac", [base]))
+
+    assert [p.profile_dir_name for p in discover_profiles("chrome")] == ["Default"]
+
+
 def test_enumerate_profiles_flat_layout_returns_root_dot():
-    # Driven off the layout field, not the browser name: a flat layout yields a
-    # single "." profile_dir_name regardless of info_cache contents.
+    # Driven off the layout field, not the browser name: a flat layout offers
+    # the "." profile even where no profile directory exists.
     from pathlib import Path
 
     profiles = enumerate_profiles(Path("/nonexistent/root"), layout="flat")

@@ -98,15 +98,17 @@ measurements.
 
 ## Flat layout (Opera)
 
-Opera and Opera GX keep `Local State` at the user-data root (so the install gate
-`_has_local_state` works unchanged) but store cookies at that root with no
-`Default/` subdir. The `layout="flat"` registry field drives `enumerate_profiles`
-to treat the root itself as the single profile (`profile_dir_name "."`, so
-`root / "." == root`), and `resolve_cookies_db` finds `Network/Cookies` or
-`Cookies` there. Nothing branches on the browser name: the only `layout`-keyed
-branch is in `enumerate_profiles`. Both share the macOS keychain account `Opera`,
-and on Windows they live under `%APPDATA%` (Roaming), which the base-dir search
-already covers.
+Opera and Opera GX keep `Local State` at the user-data root, so the install
+gate `_has_local_state` is unchanged. Before Opera One, cookies sat at that
+root with no `Default/` subdirectory. Opera One stores them under `Default/`
+like other Chromium browsers, and an upgrade can leave both. `layout="flat"`
+offers the root first (`profile_dir_name "."`, so `root / "." == root`) and
+then the standard `Default` / `Profile N` directories. `discover_profiles`
+keeps the ones that have a cookies database; `resolve_cookies_db` finds
+`Network/Cookies` or `Cookies`. A standard-layout browser never offers its
+root. Nothing else branches on the browser name. Both share the macOS keychain
+account `Opera`, and on Windows they live under `%APPDATA%` (Roaming), which
+the base-dir search already covers.
 
 ## Not yet supported
 
