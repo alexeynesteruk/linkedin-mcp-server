@@ -166,7 +166,8 @@ def test_the_actor_environment_carries_the_row_and_drops_inherited_settings(
     assert "CHROME_PATH" not in env
     assert "LINKEDIN_DEBUG_BRIDGE_COOKIE_SET" not in env
     assert env["USER_DATA_DIR"] == str(account.profile)
-    assert env["PROXY_SERVER"] == "http://127.0.0.1:9"
+    assert env["LINKEDIN_MCP_DIFFERENTIAL_PROXY"] == "http://127.0.0.1:9"
+    assert "PROXY_SERVER" not in env
     assert env["DAEMON_ENABLED"] == "true"
     assert env["HEADLESS"] == "true"
     assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(Path("/cache"))

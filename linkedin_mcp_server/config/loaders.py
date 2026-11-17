@@ -164,6 +164,34 @@ _USER_AGENT_REMOVED = (
     "cannot be retired automatically."
 )
 
+# Refused rather than ignored, for the same reason as the user agent: someone
+# who set this wanted the browser to leave from another address, and starting
+# anyway would leave them believing it still applies. The fields stay on the
+# config object so a running owner's fingerprint can still be read.
+_PROXY_REMOVED = (
+    "{setting} is no longer supported and the server will not start with it "
+    "set. The browser connects directly. Remove the setting to start. If a "
+    "shared server from an earlier version is still running with a proxy, stop "
+    "that process too: it cannot be retired automatically."
+)
+
+# Bundles installed before the proxy settings were removed still hand these
+# literals over when a host does not substitute them. They mean "no value",
+# the same way an empty string does. Anything else is someone asking for a
+# proxy and is refused above.
+_RETIRED_PROXY_PLACEHOLDERS = {
+    "PROXY_SERVER": "${user_config.proxy_server}",
+    "PROXY_USERNAME": "${user_config.proxy_username}",
+    "PROXY_PASSWORD": "${user_config.proxy_password}",
+    "PROXY_BYPASS": "${user_config.proxy_bypass}",
+}
+
+# The differential rows point the product's browser at a loopback proxy so a
+# test never opens the real site. It is not a user setting: the public proxy
+# variables are refused, and nothing in the bundle, the image, or the CLI sets
+# this one.
+DIFFERENTIAL_PROXY = "LINKEDIN_MCP_DIFFERENTIAL_PROXY"
+
 
 class EnvironmentKeys:
     """Environment variable names used by the application."""
@@ -216,12 +244,7 @@ class EnvironmentKeys:
 # One collision survives and is not fixable here: a password whose value is
 # its own variable's literal. Substituted and unsubstituted are then the same
 # string, and nothing downstream can tell them apart.
-_MCPB_PLACEHOLDERS = {
-    EnvironmentKeys.PROXY_SERVER: "${user_config.proxy_server}",
-    EnvironmentKeys.PROXY_USERNAME: "${user_config.proxy_username}",
-    EnvironmentKeys.PROXY_PASSWORD: "${user_config.proxy_password}",
-    EnvironmentKeys.PROXY_BYPASS: "${user_config.proxy_bypass}",
-}
+_MCPB_PLACEHOLDERS: dict[str, str] = {}
 
 
 def _env(key: str) -> str | None:
@@ -236,15 +259,8 @@ def _env(key: str) -> str | None:
     somebody set by hand after reading one out of an extension's own settings
     pane.
 
-    Both failure modes are worth refusing. A literal in ``PROXY_SERVER`` aborts
-    startup, which is loud. A literal in ``PROXY_USERNAME`` is not: the browser
-    offers ``${user_config.proxy_username}`` to the proxy as a credential, and
-    an authentication that fails that way surfaces as a timeout or an expired
-    session, never as a configuration problem.
-
-    Deliberately no ``strip()``: a proxy password may legitimately begin or end
-    with a space, and silently trimming it would be a wrong password nobody can
-    see.
+    Deliberately no ``strip()``: a credential may legitimately begin or end
+    with a space, and silently trimming it would be a different value.
     """
     value = os.environ.get(key)
     if not value or value == _MCPB_PLACEHOLDERS.get(key):
@@ -421,39 +437,14 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
 
-    # Browser proxy (validated and split in BrowserConfig.validate()). Unlike
-    # the CLI flag, PROXY_SERVER may carry the credentials a provider hands out:
-    # the environment is not world-readable the way a process argument list is.
-    #
-    # Read through _env(), which drops a placeholder the host left behind.
-    # That is a fail-open path and it says so: a host that fails to substitute
-    # a field the user *did* fill in skips the proxy, and the browser then goes
-    # out on the real address. So the variables are named in the log once. They
-    # hold placeholders, so naming them leaks nothing.
-    if unsubstituted := [
-        key
-        for key, literal in _MCPB_PLACEHOLDERS.items()
-        if os.environ.get(key) == literal
-    ]:
-        logger.warning(
-            "Ignoring %s: the value is an unsubstituted MCPB placeholder, not "
-            "a setting, so no proxy is configured from these. Update the "
-            "extension bundle, and clear the variable from any environment "
-            "override set by hand.",
-            ", ".join(unsubstituted),
-        )
-
-    if proxy_server_env := _env(EnvironmentKeys.PROXY_SERVER):
-        config.browser.proxy_server = proxy_server_env
-
-    if proxy_username_env := _env(EnvironmentKeys.PROXY_USERNAME):
-        config.browser.proxy_username = proxy_username_env
-
-    if proxy_password_env := _env(EnvironmentKeys.PROXY_PASSWORD):
-        config.browser.proxy_password = proxy_password_env
-
-    if proxy_bypass_env := _env(EnvironmentKeys.PROXY_BYPASS):
-        config.browser.proxy_bypass = proxy_bypass_env
+    # The public proxy settings are refused. A differential row may still name
+    # a loopback proxy; that variable is not one of the retired settings.
+    for key, placeholder in _RETIRED_PROXY_PLACEHOLDERS.items():
+        value = os.environ.get(key)
+        if value and value != placeholder:
+            raise ConfigurationError(_PROXY_REMOVED.format(setting=key))
+    if differential_proxy := os.environ.get(DIFFERENTIAL_PROXY):
+        config.browser.proxy_server = differential_proxy
 
     # Import a LinkedIn session from a locally logged-in browser (validated in
     # ServerConfig.validate())
@@ -635,11 +626,7 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         type=credential_free_url,
         default=None,
         metavar="URL",
-        help=(
-            "Route the browser through a proxy, as scheme://host:port "
-            "(http, https, socks4 or socks5). Chromium cannot authenticate to "
-            "a SOCKS proxy, so credentials require an http(s) endpoint"
-        ),
+        help="No longer supported. The server will not start if this is set.",
     )
 
     parser.add_argument(
@@ -647,11 +634,7 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         type=str,
         default=None,
         metavar="USER",
-        help=(
-            "Username for the proxy. Visible in the process list like any "
-            "argument, which is acceptable because it grants nothing without "
-            "the password; that one has no flag on purpose, set PROXY_PASSWORD"
-        ),
+        help="No longer supported. The server will not start if this is set.",
     )
 
     parser.add_argument(
@@ -659,7 +642,7 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         type=str,
         default=None,
         metavar="HOSTS",
-        help="Comma-separated hosts to reach directly instead of via the proxy",
+        help="No longer supported. The server will not start if this is set.",
     )
 
     # Session management
@@ -859,15 +842,12 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
 
-    # Proxy (validated and normalized in BrowserConfig.validate())
     if args.proxy_server:
-        config.browser.proxy_server = args.proxy_server
-
+        raise ConfigurationError(_PROXY_REMOVED.format(setting="--proxy-server"))
     if args.proxy_username:
-        config.browser.proxy_username = args.proxy_username
-
+        raise ConfigurationError(_PROXY_REMOVED.format(setting="--proxy-username"))
     if args.proxy_bypass:
-        config.browser.proxy_bypass = args.proxy_bypass
+        raise ConfigurationError(_PROXY_REMOVED.format(setting="--proxy-bypass"))
 
     # Session management
     if args.login:

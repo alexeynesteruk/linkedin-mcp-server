@@ -122,18 +122,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   `tests/test_manifest.py` holds this line; `mcpb validate` does not, and
   cannot: the schema knows nothing about substitution.
 - **What counts as a sufficient default depends on where the placeholder
-  sits.** In a string, which is where the four `env` mappings sit, `""` is
-  enough: it substitutes to nothing and the loader reads an empty variable as
-  unset. As an entire element of `args` it is not, because that substitution
-  is guarded by a truthiness test on the replacement and `""` is falsy, so the
-  element keeps its literal. An array-valued default reached from a string is
-  refused outright and also keeps the literal. Measured; the test knows all
-  three.
+  sits.** In a string, `""` is enough: it substitutes to nothing and the
+  loader reads an empty variable as unset. As an entire element of `args` it
+  is not, because that substitution is guarded by a truthiness test on the
+  replacement and `""` is falsy, so the element keeps its literal. An
+  array-valued default reached from a string is refused outright and also
+  keeps the literal. Measured; the test knows all three.
 - **A placeholder that does reach the process is not a value.** `_env()` in
-  `config/loaders.py` drops it. Both directions matter and only one is loud:
-  `PROXY_SERVER` fails validation and stops the server, while
-  `PROXY_USERNAME` is offered to the proxy as a credential and comes back as a
-  timeout that reads like an expired session.
+  `config/loaders.py` drops it. `PROXY_SERVER`, `PROXY_USERNAME`,
+  `PROXY_PASSWORD`, `PROXY_BYPASS`, and the `--proxy-*` flags are refused at
+  startup: this fork does not route the browser through a proxy. A leftover
+  `${user_config.proxy_*}` literal from an older bundle is treated as unset.
 
 ## Tool Return Format
 

@@ -1794,7 +1794,14 @@ def _spawn_command(*, lock_fd: int | None, job_name: str | None = None) -> list[
 #: ``BrowserConfig.validate`` splits out into the separate fields
 #: (``config/schema.py:242-253``). It splits them out of the *configuration*; the
 #: environment variable still holds the original string.
-_SECRETS_TO_DROP = ("PROXY_PASSWORD", "PROXY_USERNAME", "PROXY_SERVER")
+_SECRETS_TO_DROP = (
+    "PROXY_PASSWORD",
+    "PROXY_USERNAME",
+    "PROXY_SERVER",
+    # The differential rows set this on the frontend. The owner receives the
+    # resolved proxy on stdin, so the variable must not sit in its environment.
+    "LINKEDIN_MCP_DIFFERENTIAL_PROXY",
+)
 
 
 def _owner_environment() -> dict[str, str]:

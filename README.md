@@ -141,7 +141,7 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 
 - `--login` - Open a browser to sign in and save the session
 - `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `coccoc`, `opera`, `opera_gx`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
-- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker, behind a proxy, and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
+- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
 - `--logout` - Clear the stored session
 - `--login-viewer` - Docker only: show the `--login` browser at a token-protected URL on port 6080 (see [Authentication](#authentication))
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
@@ -169,7 +169,6 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 
 - `--no-headless` - Show the browser window (useful for debugging)
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable
-- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
 
 **Other:**
 
@@ -520,7 +519,6 @@ username.
 **Browser:**
 
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable (rarely needed in Docker)
-- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
 
 **Other:**
 
@@ -660,69 +658,6 @@ belongs behind something that provides it.
 <br/>
 <br/>
 
-
-## Using a proxy
-
-<details open>
-<summary><strong>Sponsored proxy providers</strong></summary>
-
-<br/>
-<a href="https://www.swiftproxy.net/?ref=stickerdaniel">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/872f4efb-f329-4f3c-b864-cd1fac7a331b" />
-    <img src="https://github.com/user-attachments/assets/c413a236-a49f-4480-8dcc-b67de3093920" alt="Swiftproxy logo" width="240">
-  </picture>
-</a>
-
-> Swiftproxy offers residential proxies with sticky sessions and worldwide geo-targeting. Its dedicated static ISP options include networks such as AT&T, Sky UK, and Rogers, with unlimited traffic and renewable addresses.
-
-Use code <strong>PROXY90</strong> for 10% off <a href="https://www.swiftproxy.net/?ref=stickerdaniel">Try Swiftproxy →</a>
-<br/>
-
-<a href="https://www.rapidproxy.io/?ref=linkedin">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/47680db7-360f-4128-9e66-73f784c0fa85" />
-    <img src="https://github.com/user-attachments/assets/3daa30e1-ead1-4884-8388-b3024c026ba9" alt="RapidProxy logo" width="240">
-  </picture>
-</a>
-
-> RapidProxy offers 90M+ residential IPs worldwide for LinkedIn automation and browser workflows, with sticky sessions, geo-targeting, and high-concurrency support. Plans start at $0.55/GB with non-expiring traffic.
-
-Use code <strong>RAPID10</strong> for 10% off <a href="https://www.rapidproxy.io/?ref=linkedin">Try RapidProxy for free →</a>
-<br/>
-
-<br/>
-</details>
-
-LinkedIn scores the address a session signs in from. Your account's usual IP address is the safe one. You should use a proxy in your country when the server cannot use it: a VPS, another country, or a second account that must not share the first one's address.
-
-With a paid provider, use a sticky residential session that holds one address (never per-request rotation). A WireGuard full tunnel or Tailscale exit node on your home network works when the server should use your usual home address.
-
-### Setup Help
-
-<details>
-<summary><b>🔧 Configuration</b></summary>
-
-- Set the proxy up **before** `--login`. Moving an existing session to a new address triggers a LinkedIn checkpoint. That includes a session from `--import-from-browser`, which was created on your real address.
-- `--proxy-server scheme://host:port` or `PROXY_SERVER`, with `http`, `https`, `socks4` or `socks5`. Only browser traffic is routed, not the MCP transport.
-- Pass credentials through `PROXY_USERNAME` and `PROXY_PASSWORD`, or include them in `PROXY_SERVER` using the combined `http://user:pass@host:port` form. The combined form is not accepted by the `--proxy-server` CLI option.
-- `PROXY_BYPASS=localhost,127.0.0.1,::1` reaches local targets directly. With a proxy set, Chromium routes `localhost` through it too.
-
-</details>
-
-<details>
-<summary><b>❗ Troubleshooting</b></summary>
-
-- Chromium cannot authenticate to a SOCKS proxy, so credentials require an `http(s)` endpoint. If your provider only offers authenticated SOCKS5, run a local relay that holds the credentials and point the server at that.
-- A wrong proxy password shows up as a timeout or a failed sign-in, because Chromium retries the authentication challenge until the page times out. If sessions stop working right after you add a proxy, check the proxy credentials first.
-- Auto-import is skipped while a proxy is configured: the imported session would move from your real address to the proxy. Use `--login`.
-- Inside a container `127.0.0.1` is the container itself, so a relay on the host is `host.docker.internal`; native Linux Docker also needs `--add-host=host.docker.internal:host-gateway`.
-
-</details>
-
-<br/>
-<br/>
-
 ## Setup from Source (Develop & Contribute)
 
 Contributions are welcome. See [CONTRIBUTING.md](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/CONTRIBUTING.md) for architecture guidelines and checklists. Search existing issues first, then use the [issue forms](https://github.com/stickerdaniel/linkedin-mcp-server/issues/new/choose) for anything new. AI agents follow the [issue-packet skill](https://github.com/stickerdaniel/linkedin-mcp-server/blob/main/.agents/skills/issue-packet/SKILL.md).
@@ -764,7 +699,7 @@ uv run -m linkedin_mcp_server
 
 - `--login` - Open a browser to sign in and save the session
 - `--import-from-browser [BROWSER]` - Reuse a session from a locally signed-in Chromium browser (`chrome`, `chromium`, `brave`, `edge`, `arc`, `vivaldi`, `helium`, `yandex`, `whale`, `coccoc`, `opera`, `opera_gx`, `auto`). Bare flag picks `auto`, the most recently used browser with a live LinkedIn session.
-- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker, behind a proxy, and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
+- `--auto-import` / `--no-auto-import` - Import a session from a signed-in local browser on the first tool call that needs one, before falling back to manual login (default: on). Skipped in Docker and on a non-loopback HTTP bind. On macOS the keychain may prompt once.
 - `--status` - Check whether the stored session is valid, then exit
 - `--logout` - Clear the stored session
 - `--user-data-dir PATH` - Browser profile directory (default: ~/.linkedin-mcp/profile). Rotating or clearing a session deletes this directory *and its parent*, which holds the stored cookies and derived profiles.
@@ -795,7 +730,6 @@ uv run -m linkedin_mcp_server
 - `--viewport WxH` - Viewport size (default: 1280x720). Applies to windowless mode only; a headed launch uses the real window size.
 - `--chrome-path PATH` - Path to a Chrome/Chromium executable
 - `--installer-temp-dir PATH` - Existing directory for browser installation temporary files (environment: `INSTALLER_TEMP_DIR`).
-- `--proxy-server URL` - Route browser traffic through a proxy, as `scheme://host:port`. Set it up **before** `--login`; see [Using a proxy](#using-a-proxy).
 
 **Other:**
 

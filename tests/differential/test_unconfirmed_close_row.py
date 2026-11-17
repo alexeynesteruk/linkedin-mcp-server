@@ -199,7 +199,7 @@ async def _run(
         )
     _, proxy = egress
     monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(default_browsers_path()))
-    monkeypatch.setenv("PROXY_SERVER", proxy.url)
+    monkeypatch.setenv("LINKEDIN_MCP_DIFFERENTIAL_PROXY", proxy.url)
     reset_config()
     result = await measure_host_quit_row(
         profile=profile,

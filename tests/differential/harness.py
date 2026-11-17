@@ -461,7 +461,7 @@ def actor_environment(
     env.update(
         {
             EnvironmentKeys.USER_DATA_DIR: str(account.profile),
-            EnvironmentKeys.PROXY_SERVER: proxy_url,
+            "LINKEDIN_MCP_DIFFERENTIAL_PROXY": proxy_url,
             EnvironmentKeys.DAEMON_ENABLED: "true" if daemon else "false",
             EnvironmentKeys.HEADLESS: "true",
             EnvironmentKeys.LOG_LEVEL: "INFO",

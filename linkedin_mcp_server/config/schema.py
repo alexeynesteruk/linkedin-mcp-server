@@ -147,10 +147,13 @@ class BrowserConfig:
     default_timeout: int = 5000  # Milliseconds for page operations
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
     user_data_dir: str = DEFAULT_USER_DATA_DIR  # Persistent browser profile
-    # Proxy for the browser's own traffic. The server's MCP transport is not
-    # routed through it. ``proxy_server`` accepts scheme://host:port and, from
-    # the environment only, a provider string carrying credentials; validate()
-    # splits those out so the stored value never holds a password.
+    # Always None from user configuration: PROXY_* and the --proxy-* flags are
+    # refused at startup. The fields stay because SHARED_CONFIG_FIELDS hashes
+    # them into the daemon fingerprint, and the differential rows still set
+    # proxy_server in-process so a test browser never opens the real site.
+    # Dropping a field makes a running owner unreadable to a client of the
+    # other version. ``proxy_server`` still accepts scheme://host:port when set
+    # that way; validate() splits embedded credentials out of the stored value.
     proxy_server: str | None = None
     # Both credentials are kept out of the repr, because cli_main logs the whole
     # config at DEBUG level and users paste those logs into issue reports. The

@@ -323,28 +323,15 @@ def test_oci_identifier_names_the_published_image(server: dict[str, Any]) -> Non
     assert repository == "docker.io/stickerdaniel/linkedin-mcp-server"
 
 
-def test_proxy_settings_match_the_bundle(
+def test_neither_registry_entry_offers_a_proxy(
     server: dict[str, Any], manifest: dict[str, Any]
 ) -> None:
-    """Every package offers the configuration the MCP bundle already asks for.
-
-    The bundle collects four proxy fields from the user. A registry client has
-    no other way to learn that this server takes any configuration at all, so
-    the two lists have to describe the same server. Dropping one here would not
-    break anything visibly; it would just make the registry entry quietly less
-    capable than the bundle.
-    """
-    expected = {
-        name.upper() for name in manifest["user_config"] if name.startswith("proxy_")
-    }
-    assert expected, "manifest.json no longer declares proxy fields"
-
+    """The bundle and both registry packages must agree that no proxy is asked for."""
+    user_config = manifest.get("user_config") or {}
+    assert not any(name.startswith("proxy_") for name in user_config)
     for package in server["packages"]:
         declared = {v["name"] for v in package.get("environmentVariables", [])}
-        assert declared == expected, (
-            f"{package['registryType']} package declares {sorted(declared)}, "
-            f"manifest.json asks for {sorted(expected)}"
-        )
+        assert not any(name.startswith("PROXY_") for name in declared), declared
 
 
 def test_file_is_in_the_form_the_release_job_writes(server: dict[str, Any]) -> None:

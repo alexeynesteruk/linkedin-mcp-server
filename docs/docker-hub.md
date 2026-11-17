@@ -141,10 +141,6 @@ Use `$env:USERPROFILE\.linkedin-mcp` when constructing the host path outside JSO
 | `DAEMON_ENABLED` | `false` | The experimental shared-browser daemon is ignored in Docker. |
 | `VIEWPORT` | `1280x720` | Viewport size as WIDTHxHEIGHT. Only applies with `HEADLESS=true`; a headed Docker run uses its real window size. |
 | `CHROME_PATH` | - | Path to Chrome/Chromium executable (rarely needed in Docker) |
-| `PROXY_SERVER` | - | Route browser traffic through a proxy, as `scheme://host:port` (`http`, `https`, `socks4`, `socks5`), or with credentials as `http://user:pass@host:port`. Only the browser is routed, not the MCP transport. Inside a container `127.0.0.1` is the container itself, so a relay on the host is `host.docker.internal` (native Linux Docker also needs `--add-host=host.docker.internal:host-gateway`). A container on your own machine leaves through your address and needs no proxy. One on a cloud host or in another country does: with a paid provider, use a sticky residential session that holds one address (never per-request rotation), and create the session through it with `--login --login-viewer`. Details under [Using a proxy](https://github.com/stickerdaniel/linkedin-mcp-server#using-a-proxy). |
-| `PROXY_USERNAME` | - | Username for the proxy |
-| `PROXY_PASSWORD` | - | Password for the proxy. Env-only, since command-line arguments are readable by every user on the machine. Chromium cannot authenticate to a SOCKS proxy, so credentials need an `http(s)` endpoint. |
-| `PROXY_BYPASS` | - | Comma-separated hosts to reach directly instead of through the proxy |
 | `LINKEDIN_EXPERIMENTAL_PERSIST_DERIVED_SESSION` | `false` | Experimental: keep the container's derived profile across restarts instead of rebuilding it on each start |
 | `LINKEDIN_TRACE_MODE` | `on_error` | Trace retention: `on_error` keeps artifacts only from failed runs, `always` keeps every run, `off` keeps none |
 

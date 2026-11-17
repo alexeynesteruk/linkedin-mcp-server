@@ -24,28 +24,7 @@
       "version": "4.26.1",
       "transport": {
         "type": "stdio"
-      },
-      "environmentVariables": [
-        {
-          "name": "PROXY_SERVER",
-          "description": "Optional. Route the browser through a proxy, as scheme://host:port (http, https, socks4 or socks5). May also include credentials, as http://user:password@host:port. Only browser traffic is routed.",
-          "isSecret": true
-        },
-        {
-          "name": "PROXY_USERNAME",
-          "description": "Optional. Username for the proxy, if it requires one.",
-          "isSecret": true
-        },
-        {
-          "name": "PROXY_PASSWORD",
-          "description": "Optional. Password for the proxy. Chromium cannot authenticate to a SOCKS proxy, so credentials require an http or https endpoint.",
-          "isSecret": true
-        },
-        {
-          "name": "PROXY_BYPASS",
-          "description": "Optional. Comma-separated hosts to reach directly instead of through the proxy."
-        }
-      ]
+      }
     },
     {
       "registryType": "oci",
@@ -67,27 +46,6 @@
               "isRequired": true
             }
           }
-        }
-      ],
-      "environmentVariables": [
-        {
-          "name": "PROXY_SERVER",
-          "description": "Optional. Route the browser through a proxy, as scheme://host:port (http, https, socks4 or socks5). May also include credentials, as http://user:password@host:port. Only browser traffic is routed.",
-          "isSecret": true
-        },
-        {
-          "name": "PROXY_USERNAME",
-          "description": "Optional. Username for the proxy, if it requires one.",
-          "isSecret": true
-        },
-        {
-          "name": "PROXY_PASSWORD",
-          "description": "Optional. Password for the proxy. Chromium cannot authenticate to a SOCKS proxy, so credentials require an http or https endpoint.",
-          "isSecret": true
-        },
-        {
-          "name": "PROXY_BYPASS",
-          "description": "Optional. Comma-separated hosts to reach directly instead of through the proxy."
         }
       ]
     }

@@ -191,7 +191,8 @@ async def stage_signed_in_session(
     """Leave *profile* signed in to the synthetic origin, as an import would.
 
     The caller has configured the process: ``USER_DATA_DIR`` naming *profile*,
-    ``PROXY_SERVER`` naming the fixture proxy, ``PLAYWRIGHT_BROWSERS_PATH``
+    ``LINKEDIN_MCP_DIFFERENTIAL_PROXY`` naming the fixture proxy,
+    ``PLAYWRIGHT_BROWSERS_PATH``
     naming the installed browser. *accept*, when given, is called with the
     staged session before the product validates it, so the origin can judge
     the staging requests too.
