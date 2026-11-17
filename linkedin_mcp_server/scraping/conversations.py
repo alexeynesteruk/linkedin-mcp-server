@@ -488,7 +488,13 @@ class ConversationReader:
                     const match = location.pathname.match(
                         /^\\/messaging\\/thread\\/([^/]+)\\/?$/
                     );
-                    return match ? match[1] : null;
+                    if (!match) return null;
+                    // /messaging/thread/new/ is the composer, not a conversation.
+                    try {
+                        return decodeURIComponent(match[1]) === 'new' ? null : match[1];
+                    } catch {
+                        return null;
+                    }
                 };
                 const outcome = {
                     rows: [],

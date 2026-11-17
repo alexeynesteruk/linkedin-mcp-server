@@ -307,7 +307,8 @@ _MESSAGE_COMPOSER_INSPECT_JS = (
                 url.hash ||
                 !(
                     url.pathname === '/messaging/compose/' ||
-                    /^\/messaging\/thread\/[A-Za-z0-9_=-]+\/$/.test(url.pathname)
+                    url.pathname === '/messaging/thread/new/' ||
+                    /^\/messaging\/thread\/(?!new\/)[A-Za-z0-9_=-]+\/$/.test(url.pathname)
                 )
             ) {
                 return null;
@@ -820,8 +821,11 @@ _MESSAGE_CONFIRMATION_READY_JS = (
                 ) {
                     return false;
                 }
-            } else if (path.startsWith('/messaging/thread/')) {
-                if (startPath.startsWith('/messaging/thread/')) {
+            } else if (/^\/messaging\/thread\/(?!new\/)[A-Za-z0-9_=-]+\/$/.test(path)) {
+                // /messaging/thread/new/ is the composer. A send that starts
+                // there and lands on a real thread id is a new thread, not a
+                // move away from an existing one.
+                if (/^\/messaging\/thread\/(?!new\/)[A-Za-z0-9_=-]+\/$/.test(startPath)) {
                     if (path !== startPath) return false;
                 } else if (
                     items.length !== 1 ||
@@ -1026,7 +1030,8 @@ _MESSAGE_COMPOSER_PINNED_JS = (
                 url.hash ||
                 !(
                     url.pathname === '/messaging/compose/' ||
-                    /^\/messaging\/thread\/[A-Za-z0-9_=-]+\/$/.test(url.pathname)
+                    url.pathname === '/messaging/thread/new/' ||
+                    /^\/messaging\/thread\/(?!new\/)[A-Za-z0-9_=-]+\/$/.test(url.pathname)
                 )
             ) {
                 return null;
@@ -1376,7 +1381,9 @@ _PROFILE_PATH_RE = re.compile(r"^/in/[^/?#]+/$")
 # A thread reply is the exception by design: there the caller named the
 # conversation, so this exact path is the target (see _ThreadMessageTarget),
 # and identifiers.normalize_reply_thread_id admits the same alphabet.
-_MESSAGE_THREAD_PATH_RE = re.compile(r"^/messaging/thread/[A-Za-z0-9_=-]+/$")
+# `new` is the composer, not a conversation. `new-existing` still matches.
+_MESSAGE_THREAD_PATH_RE = re.compile(r"^/messaging/thread/(?!new/)[A-Za-z0-9_=-]+/$")
+_COMPOSE_PATHS = {"/messaging/compose/", "/messaging/thread/new/"}
 _PROFILE_URN_PREFIX = "urn:li:fsd_profile:"
 
 
@@ -1512,7 +1519,7 @@ def _message_page_url_is_safe(value: str, profile_urn: str) -> bool:
     recipient_values = [
         item for key in ("recipient", "profileUrn") for item in params.get(key, [])
     ]
-    if parsed.path != "/messaging/compose/" and not _MESSAGE_THREAD_PATH_RE.fullmatch(
+    if parsed.path not in _COMPOSE_PATHS and not _MESSAGE_THREAD_PATH_RE.fullmatch(
         parsed.path
     ):
         return False

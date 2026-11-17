@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+from linkedin_mcp_server.scraping.identifiers import job_id_from_path
 from linkedin_mcp_server.scraping.link_metadata import (
-    JOB_PATH_RE,
     Reference,
     _SEARCH_RESULTS_REFERENCE_CAP,
 )
@@ -29,10 +29,9 @@ def reconcile_search_references(
 
     for ref in references:
         if ref.get("kind") == "job":
-            match = JOB_PATH_RE.match(str(ref.get("url", "")))
-            if match is None:
+            job_id = job_id_from_path(str(ref.get("url", "")))
+            if job_id is None:
                 continue
-            job_id = match.group(1)
             if job_id not in kept_ids or job_id in emitted_ids:
                 continue
             out.append(ref)
@@ -121,9 +120,9 @@ def dropped_offset_section_error(offset: int, landed: str) -> dict[str, str]:
 
 
 # The two filters the redesigned route reads out of the query's words instead
-# of its parameters. Every other filter it drops (`f_JT`, `f_E`, `f_EA`,
-# `sortBy`) has no such second home, so naming the keywords for one of those
-# would offer a repair that does not exist.
+# of its parameters. Every other filter it drops (`f_JT`, `f_E`, `sortBy`) has
+# no such second home, so naming the keywords for one of those would offer a
+# repair that does not exist. Easy Apply is `f_AL`, which that route keeps.
 _KEYWORD_FILTERS = frozenset({"location", "f_WT"})
 
 
@@ -137,8 +136,9 @@ def dropped_filters_section_error(names: list[str], landed: str) -> dict[str, st
     Python in Berlin then returns Python anywhere and reads as though Berlin
     had none.
 
-    The redesigned route keeps only the keywords, `f_TPR` and `start`, and
-    reads a location and a work type from the words of the query instead, so
+    Of the parameters this server sends, the redesigned route keeps only the
+    keywords, `f_TPR`, `f_AL` and `start`, and it reads a location and a work
+    type from the words of the query instead, so
     there the message says where they go. Measured: "remote forward deployed
     engineer in France" returned remote postings in France. Only when one of
     those two is what was dropped: the route drops the rest as well, and a

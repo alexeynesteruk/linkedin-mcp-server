@@ -2,6 +2,8 @@
 
 from urllib.parse import quote
 
+import pytest
+
 from linkedin_mcp_server.scraping.fields import (
     ANALYTICS_SECTIONS,
     COMPANY_SECTIONS,
@@ -201,6 +203,40 @@ class TestBuildReferences:
                 "context": "post attachment",
             }
         ]
+
+    def test_normalize_url_unwraps_a_redirect_without_a_trailing_slash(self):
+        href = (
+            "https://www.linkedin.com/redir/redirect?url="
+            "https%3A%2F%2Fexample.com%2Fpage"
+        )
+        assert normalize_url(href) == "https://example.com/page"
+
+    def test_normalize_url_unwraps_a_safety_go_link(self):
+        href = (
+            "https://www.linkedin.com/safety/go/?url=https%3A%2F%2Fexample.com%2Fapply"
+        )
+        assert normalize_url(href) == "https://example.com/apply"
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "https://en.wikipedia.org/wiki/What%3F",
+            "https://example.com/notes%23draft",
+            "https://example.com/docs/a%2Fb",
+            "https://example.com/My%20CV.pdf",
+        ],
+    )
+    def test_normalize_url_keeps_the_escapes_of_a_redirect_target(self, target):
+        # The url parameter carries the target encoded once, and reading the
+        # query decodes it once. Decoding again turned an escaped "?" or "#"
+        # into a delimiter and cut the path short.
+        href = (
+            "https://www.linkedin.com/redir/redirect/?url="
+            + quote(target, safe="")
+            + "&urlhash=abc"
+        )
+
+        assert normalize_url(href) == target
 
     def test_normalize_url_unwraps_nested_redirects_within_cap(self):
         target = "https://example.com/report"
@@ -1015,6 +1051,24 @@ class TestClassifyLink:
         assert result == (
             "conversation",
             "/messaging/thread/2-NjAwMDAyMDEtZWVh/",
+        )
+
+    def test_the_compose_box_is_not_a_conversation(self):
+        # /messaging/thread/new/ is where a new message is written, not a
+        # thread a later call can reopen. stickerdaniel/linkedin-mcp-server#1255.
+        assert classify_link("https://www.linkedin.com/messaging/thread/new/") is None
+
+    def test_punctuation_in_a_job_slug_keeps_the_trailing_id(self):
+        assert classify_link(
+            "https://www.linkedin.com/jobs/view/senior-.net-developer-at-acme-4252026496/"
+        ) == ("job", "/jobs/view/4252026496/")
+
+    def test_a_job_slug_that_decodes_into_a_path_is_dropped(self):
+        assert (
+            classify_link(
+                "https://www.linkedin.com/jobs/view/ui%2Fux-designer-at-acme-4252026496/"
+            )
+            is None
         )
 
     def test_messaging_thread_url_with_query(self):

@@ -111,7 +111,9 @@ def build_job_search_url(
     if work_type:
         params += f"&f_WT={_normalize_csv(work_type, WORK_TYPE_MAP)}"
     if easy_apply:
-        params += "&f_EA=true"
+        # f_AL is Easy Apply. f_EA is "Under 10 applicants", and the redesigned
+        # search applies it without complaint. stickerdaniel/linkedin-mcp-server#1459.
+        params += "&f_AL=true"
     if sort_by:
         mapped = SORT_BY_MAP.get(sort_by.strip(), sort_by)
         params += f"&sortBy={quote_plus(mapped)}"

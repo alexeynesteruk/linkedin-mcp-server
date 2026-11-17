@@ -532,11 +532,54 @@ class TestSluggedJobUrls:
         assert normalize_job_id(slugged) == normalize_job_id("/jobs/view/1967281839/")
         assert normalize_job_id(slugged) == "1967281839"
 
+    def test_the_compose_sentinel_is_not_a_thread(self):
+        # /messaging/thread/new/ is the composer. A real id may start with
+        # those letters. stickerdaniel/linkedin-mcp-server#1255.
+        for value in ("new", "/messaging/thread/new/", "/messaging/thread/%6Eew/"):
+            with pytest.raises(InvalidReferenceError, match="composer"):
+                normalize_thread_id(value)
+        assert normalize_thread_id("new-existing") == "new-existing"
+
     def test_a_bare_argument_stays_strictly_numeric(self):
         # Outside a URL the words are not a slug LinkedIn wrote, they are a
         # wrong value, and a page load is what it costs to learn that.
         with pytest.raises(InvalidReferenceError):
             normalize_job_id("software-engineer-1967281839")
+
+    def test_punctuation_in_a_slug_is_not_the_job_id(self):
+        # A title keeps periods, plus signs and parentheses. The id is the
+        # trailing run of digits. stickerdaniel/linkedin-mcp-server#1493.
+        assert (
+            normalize_job_id(
+                "https://www.linkedin.com/jobs/view/"
+                "senior-.net-developer-at-acme-4252026496/"
+            )
+            == "4252026496"
+        )
+        assert (
+            normalize_job_id("/jobs/view/c%2B%2B-engineer-at-acme-4252026496/")
+            == "4252026496"
+        )
+
+    def test_a_search_link_names_the_job_it_selects(self):
+        # The address bar of a job opened from search holds currentJobId.
+        # stickerdaniel/linkedin-mcp-server#1437.
+        assert (
+            normalize_job_id(
+                "https://www.linkedin.com/jobs/search/?currentJobId=4458959237"
+            )
+            == "4458959237"
+        )
+
+    def test_two_selected_jobs_name_neither(self):
+        with pytest.raises(InvalidReferenceError):
+            normalize_job_id("/jobs/search/?currentJobId=1&currentJobId=2")
+
+    def test_a_slug_that_decodes_to_path_syntax_is_refused(self):
+        # A browser asks for the literal segment; nothing proves LinkedIn
+        # serves a posting there. stickerdaniel/linkedin-mcp-server#1508.
+        with pytest.raises(InvalidReferenceError):
+            normalize_job_id("/jobs/view/ui%2Fux-designer-at-acme-4252026496/")
 
 
 class TestNothingTidiesTheReference:
@@ -566,6 +609,25 @@ class TestIdentifierAllowlist:
     company slug also takes a period. The old rule listed forbidden syntax
     instead, so a value carrying none of it passed and spent a page load on a
     404."""
+
+    def test_a_company_slug_keeps_an_ampersand_and_an_apostrophe(self):
+        # LinkedIn writes both into real slugs. stickerdaniel/linkedin-mcp-server
+        # #1500 and #1506.
+        assert normalize_company_identifier("johnson-&-johnson") == "johnson-&-johnson"
+        assert (
+            normalize_company_identifier(
+                "https://www.linkedin.com/company/lowe's-home-improvement/"
+            )
+            == "lowe's-home-improvement"
+        )
+        assert (
+            company_page_url("johnson-&-johnson")
+            == "https://www.linkedin.com/company/johnson-&-johnson"
+        )
+        assert (
+            company_page_url("lowe's-home-improvement")
+            == "https://www.linkedin.com/company/lowe's-home-improvement"
+        )
 
     @pytest.mark.parametrize("value", ["foo@example.com", "foo:bar", "foo!bar"])
     def test_a_value_that_cannot_be_one_is_refused(self, value: str):
