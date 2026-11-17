@@ -848,6 +848,66 @@ class TestPersonTool:
                 current_company="1115",
             )
 
+    async def test_search_people_redacts_a_proxy_secret_in_a_filter_refusal(
+        self, monkeypatch
+    ):
+        """A company filter that quotes the proxy password must not return it."""
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.config.schema import BrowserConfig
+        from linkedin_mcp_server.tools.person import register_person_tools
+
+        secret = "proxy-secret-value"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.proxy_errors._browser_config",
+            lambda: BrowserConfig(
+                proxy_username="proxy-user-value", proxy_password=secret
+            ),
+        )
+        ready = AsyncMock()
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.person.get_ready_extractor", ready
+        )
+        mcp = FastMCP("test")
+        register_person_tools(mcp)
+
+        with pytest.raises(ToolError) as exc_info:
+            await mcp.call_tool(
+                "search_people",
+                {"keywords": "engineer", "current_company": secret},
+            )
+        assert secret not in str(exc_info.value)
+        ready.assert_not_awaited()
+
+    async def test_search_posts_redacts_a_shaped_proxy_error(self, monkeypatch):
+        """A ToolError raised before the search must not keep the proxy secret."""
+        from fastmcp.exceptions import ToolError
+
+        from linkedin_mcp_server.config.schema import BrowserConfig
+        from linkedin_mcp_server.tools.post import register_post_tools
+
+        secret = "proxy-secret-value"
+        username = "proxy-user-value"
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.proxy_errors._browser_config",
+            lambda: BrowserConfig(proxy_username=username, proxy_password=secret),
+        )
+        ready = AsyncMock(
+            side_effect=ToolError(
+                f"failed via http://{username}:{secret}@proxy.example:8080"
+            )
+        )
+        monkeypatch.setattr("linkedin_mcp_server.tools.post.get_ready_extractor", ready)
+        mcp = FastMCP("test")
+        register_post_tools(mcp)
+
+        with pytest.raises(ToolError) as exc_info:
+            await mcp.call_tool("search_posts", {"keywords": "hiring"})
+        message = str(exc_info.value)
+        assert secret not in message
+        assert username not in message
+        assert "***" in message
+
     async def test_connect_with_person(self, mock_context, serve_extractor):
         expected = {
             "url": "https://www.linkedin.com/in/test-user/",

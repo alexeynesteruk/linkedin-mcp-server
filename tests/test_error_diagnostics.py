@@ -265,3 +265,32 @@ def test_build_issue_diagnostics_keeps_sensitive_runtime_details_out_of_mcp_payl
     assert "## Local runtime" in issue_body
     assert "Source profile (local):" in issue_body
     assert "upload" not in issue_body.lower()
+
+
+def test_build_issue_diagnostics_strips_proxy_credentials(monkeypatch, tmp_path):
+    """The notes file is what gets pasted into an issue. The proxy secret must not be in it."""
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues",
+        lambda payload: [],
+    )
+    from linkedin_mcp_server.config.schema import BrowserConfig
+
+    username = "proxy-user-value"
+    secret = "proxy-secret-value"
+    monkeypatch.setattr(
+        "linkedin_mcp_server.core.proxy_errors._browser_config",
+        lambda: BrowserConfig(proxy_username=username, proxy_password=secret),
+    )
+
+    diagnostics = build_issue_diagnostics(
+        RuntimeError(f"tunnel failed http://{username}:{secret}@proxy.example:8080"),
+        context="search_people",
+    )
+
+    issue_body = Path(diagnostics["issue_template_path"]).read_text()
+    assert secret not in diagnostics["error_message"]
+    assert username not in diagnostics["error_message"]
+    assert secret not in issue_body
+    assert username not in issue_body
+    assert "***" in diagnostics["error_message"]
