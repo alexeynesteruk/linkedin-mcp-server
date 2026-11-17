@@ -1703,6 +1703,49 @@ class TestGetSidebarProfiles:
         mock_page.evaluate.assert_awaited_once()  # no show_all JS call
         assert result["sidebar_profiles"]["explore_premium_profiles"] == ["/in/carol/"]
 
+    @pytest.mark.parametrize(
+        "show_all_url",
+        [
+            "https://evil.example/search/results/people/",
+            "https://evil-linkedin.com/search/results/people/",
+            "https://linkedin.com.evil.test/in/someone/",
+            "http://www.linkedin.com/search/results/people/",
+            "javascript:alert(1)",
+        ],
+    )
+    async def test_skips_show_all_that_is_not_a_linkedin_page(
+        self, mock_page, show_all_url
+    ):
+        """A href from the page is judged before the browser follows it."""
+        sidebar_js_result = {
+            "sections": {"more_profiles_for_you": ["/in/alice/"]},
+            "showAllUrls": {"more_profiles_for_you": show_all_url},
+        }
+        mock_page.evaluate = AsyncMock(return_value=sidebar_js_result)
+        mock_page.url = "https://www.linkedin.com/in/testuser/"
+
+        scraper = _scraper(mock_page)
+        navigate_mock = AsyncMock()
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", navigate_mock),
+            patch(
+                "linkedin_mcp_server.scraping.session.detect_rate_limit",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.session.handle_modal_close",
+                new_callable=AsyncMock,
+                return_value=False,
+            ),
+        ):
+            result = await scraper.get_sidebar_profiles("testuser")
+
+        navigate_mock.assert_awaited_once()
+        opened = navigate_mock.await_args_list[0].args[0]
+        assert opened.endswith("/in/testuser/")
+        mock_page.evaluate.assert_awaited_once()
+        assert result["sidebar_profiles"]["more_profiles_for_you"] == ["/in/alice/"]
+
     async def test_skips_show_all_when_page_redirects_to_premium(self, mock_page):
         """If navigating to Show all lands on a /premium URL, skip that section."""
         sidebar_js_result = {

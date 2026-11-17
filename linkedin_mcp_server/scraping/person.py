@@ -12,6 +12,7 @@ import re
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
+from linkedin_mcp_server.core.auth import is_linkedin_landing
 from linkedin_mcp_server.core.browser_loss import raise_if_browser_lost
 from linkedin_mcp_server.core.exceptions import LinkedInScraperException
 from linkedin_mcp_server.error_diagnostics import build_issue_diagnostics
@@ -395,8 +396,8 @@ class PersonScraper:
 
         Scrapes "More profiles for you", "Explore premium profiles", and
         "People you may know" sidebar sections. Follows each "Show all" link to
-        collect the full list; skips any section whose "Show all" URL contains or
-        redirects to /premium.
+        collect the full list; skips any section whose "Show all" URL is not on
+        LinkedIn, or contains or redirects to /premium.
 
         Returns:
             Dict with url and sidebar_profiles mapping section key to list of
@@ -424,6 +425,14 @@ class PersonScraper:
         first_show_all = True
         for section_key, show_all_url in show_all_urls.items():
             if "/premium" in show_all_url:
+                continue
+            # The href is read from the page, so it is checked before the
+            # browser goes there, not only after it lands.
+            if not is_linkedin_landing(show_all_url):
+                logger.debug(
+                    "Show all for section %s is not a LinkedIn URL, skipping",
+                    section_key,
+                )
                 continue
 
             if not first_show_all:
