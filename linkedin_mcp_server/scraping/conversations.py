@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Literal
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote, urlsplit
 
 import logging
 import re
@@ -206,6 +206,39 @@ def _inbox_filter_failed_error(inbox_filter: str, *, page: str) -> dict[str, str
             "so the inbox text is unfiltered and no click-derived conversation "
             "references were produced: rows from an unfiltered list must not be "
             "attributed to a filtered view." + _BYPASS_ROW_ATTRIBUTION
+        ),
+    }
+
+
+# A messaging search that LinkedIn redirects onto the last open thread.
+# ``/messaging/thread/new/`` is the composer, not that redirect (#703).
+_OPENED_THREAD_PATH_RE = re.compile(r"^/messaging/thread/([^/?#]+)/?$")
+
+
+def _search_landed_on_a_thread(url: str) -> bool:
+    """Whether *url* is a conversation thread rather than the search list."""
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return False
+    match = _OPENED_THREAD_PATH_RE.fullmatch(path)
+    if match is None:
+        return False
+    return unquote(match.group(1)) != "new"
+
+
+def _search_opened_thread_error() -> dict[str, str]:
+    """Empty search result: the navigation opened a thread and no rows attached.
+
+    Not a failed read. The page holds that thread or the empty-state list
+    beside it, and neither is a search result (#703).
+    """
+    return {
+        "error_type": "search_opened_thread",
+        "error_message": (
+            "The search opened a conversation instead of a result list, and no "
+            "result rows attached. Nothing was read from that page: the open "
+            "thread and the empty-state list beside it are not search results."
         ),
     }
 
@@ -941,9 +974,19 @@ class ConversationReader:
         # alone fills main past the text threshold, so a page read before the
         # rows attach says "no messages" for a search that has matches, and
         # then the scan clicks those very rows (#703). A search without rows
-        # still reads its text after the wait, and the scan reuses the
-        # outcome instead of waiting a second time.
+        # still reads its text after the wait, unless the navigation opened a
+        # thread, and the scan reuses the outcome instead of waiting again.
         rows_attached = await self._wait_for_conversation_rows("search_results")
+        # No result rows on a thread URL means the search was redirected to
+        # the last open conversation (#703). Reading the page would return
+        # that thread, or the empty-state list beside it, as the search.
+        # The empty result below is that outcome, not a failed read.
+        if not rows_attached and _search_landed_on_a_thread(self._session.page.url):
+            return {
+                "url": self._session.page.url,
+                "sections": {},
+                "section_errors": {"search_results": _search_opened_thread_error()},
+            }
 
         raw_result = await self._content._extract_root_content(["main"])
         raw = raw_result["text"]

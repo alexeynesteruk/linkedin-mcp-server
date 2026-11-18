@@ -2047,6 +2047,118 @@ class TestSearchConversations:
             "sections": {"search_results": "Some result text"},
         }
 
+    async def test_a_redirected_search_does_not_return_the_open_thread(self, mock_page):
+        """A search with no result rows can land on the last open thread (#703).
+
+        The page is then that thread, or the empty-state list beside it.
+        Either one in the result is a conversation the search did not find.
+        The empty result names the redirect and is not a failed read.
+        """
+        thread_url = (
+            "https://www.linkedin.com/messaging/thread/2-last-open/?searchTerm=ada"
+        )
+        empty_state = "No messages yet! Reach out and start a conversation"
+        transcript = f"Ada Lovelace\nSee you on Tuesday\n{empty_state}"
+        mock_page.url = thread_url
+        mock_page.wait_for_selector = AsyncMock(
+            side_effect=PlaywrightTimeoutError("no rows")
+        )
+        reader = _reader(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root(
+                    transcript,
+                    [
+                        {
+                            "href": "https://www.linkedin.com/messaging/thread/2-last-open/",
+                            "text": "Ada Lovelace",
+                        }
+                    ],
+                ),
+            ),
+        ):
+            result = await reader.search_conversations("ada")
+
+        rendered = str(result)
+        assert empty_state not in rendered
+        assert "See you on Tuesday" not in rendered
+        assert "Ada Lovelace" not in rendered
+        assert result == {
+            "url": thread_url,
+            "sections": {},
+            "section_errors": {
+                "search_results": {
+                    "error_type": "search_opened_thread",
+                    "error_message": (
+                        "The search opened a conversation instead of a result "
+                        "list, and no result rows attached. Nothing was read "
+                        "from that page: the open thread and the empty-state "
+                        "list beside it are not search results."
+                    ),
+                }
+            },
+        }
+
+    async def test_result_rows_on_a_thread_url_stay_the_search(self, mock_page):
+        """Rows that did attach are the search, even when the URL is a thread.
+
+        Click-to-capture and a search that keeps its filter both leave the
+        address on a thread. That is not the redirect that never attaches rows.
+        """
+        mock_page.url = (
+            "https://www.linkedin.com/messaging/thread/2-hit/?searchTerm=ada"
+        )
+        reader = _reader(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("Ada Lovelace\nSee you on Tuesday"),
+            ),
+            patch.object(
+                reader,
+                "_extract_conversation_thread_refs",
+                new_callable=AsyncMock,
+                return_value=_scan(),
+            ),
+        ):
+            result = await reader.search_conversations("ada")
+
+        assert result["sections"] == {
+            "search_results": "Ada Lovelace\nSee you on Tuesday"
+        }
+        assert "section_errors" not in result
+
+    async def test_the_new_message_composer_is_not_an_opened_thread(self, mock_page):
+        """``/messaging/thread/new/`` is the composer, not a redirected search."""
+        mock_page.url = "https://www.linkedin.com/messaging/thread/new/?searchTerm=ada"
+        mock_page.wait_for_selector = AsyncMock(
+            side_effect=PlaywrightTimeoutError("no rows")
+        )
+        reader = _reader(mock_page)
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(reader, "_wait_for_main_text", new_callable=AsyncMock),
+            patch.object(
+                PageContentReader,
+                "_extract_root_content",
+                new_callable=AsyncMock,
+                return_value=_root("No messages yet!"),
+            ),
+        ):
+            result = await reader.search_conversations("ada")
+
+        assert result["sections"] == {"search_results": "No messages yet!"}
+        assert "section_errors" not in result
+
 
 class TestScrollMainScrollableRegion:
     async def test_each_attempt_is_one_evaluation_paced_by_the_delay(
