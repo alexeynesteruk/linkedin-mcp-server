@@ -252,6 +252,7 @@ class JobScraper:
                     url,
                     section_name="search_results",
                     scroll_deadline=scroll_deadline,
+                    page_deadline=started + budget,
                 )
                 extracted = capture.section
                 slowest_page = max(slowest_page, time.monotonic() - page_started)

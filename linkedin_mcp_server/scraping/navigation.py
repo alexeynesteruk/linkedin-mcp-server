@@ -14,8 +14,14 @@ from linkedin_mcp_server.core.auth import (
     detect_auth_barrier_quick,
     resolve_remember_me_prompt,
 )
+from linkedin_mcp_server.core.destination import (
+    is_linkedin_landing,
+    raise_if_off_linkedin,
+)
 from linkedin_mcp_server.core.exceptions import AuthenticationError
 from linkedin_mcp_server.core.proxy_errors import (
+    NAVIGATION_BUDGET_MS,
+    goto_reporting_proxy_errors,
     raise_if_proxy_error,
     redact_proxy_credentials,
     redacted_copy,
@@ -59,6 +65,9 @@ class PageNavigator:
     # renders after it commits, and an account picker was measured 200ms behind
     # its own navigation, so a page judged on arrival is judged empty.
     _DOCUMENT_READY_TIMEOUT = 5.0
+    # The `goto` timeout every navigation without a deadline keeps. A deadline
+    # can only shorten it.
+    _GOTO_TIMEOUT_MS = NAVIGATION_BUDGET_MS
 
     def __init__(self, session: ScrapingSession):
         self._session = session
@@ -145,9 +154,17 @@ class PageNavigator:
         *,
         wait_until: WaitUntil = "domcontentloaded",
         allow_remember_me: bool = True,
+        deadline: float | None = None,
     ) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
         page = self._session.page
+        timeout_ms: int | float = self._GOTO_TIMEOUT_MS
+        overall_ms: float | None = None
+        if deadline is not None:
+            left_ms = (deadline - self._session.monotonic()) * 1000
+            # Never zero, which Playwright reads as no timeout at all.
+            timeout_ms = max(1.0, min(timeout_ms, left_ms))
+            overall_ms = float(timeout_ms)
         hops: list[str] = []
         listener_registered = False
 
@@ -174,7 +191,16 @@ class PageNavigator:
                 extra={"target_url": url, "wait_until": wait_until},
             )
             try:
-                await page.goto(url, wait_until=wait_until, timeout=30000)
+                if type(page).__module__.startswith("patchright."):
+                    await goto_reporting_proxy_errors(
+                        page,
+                        url,
+                        wait_until=wait_until,
+                        timeout=timeout_ms,
+                        overall_timeout=overall_ms,
+                    )
+                else:
+                    await page.goto(url, wait_until=wait_until, timeout=timeout_ms)
                 await stabilize_navigation(f"goto {url}", logger)
                 await record_page_trace(
                     page,
@@ -182,10 +208,6 @@ class PageNavigator:
                     extra={"target_url": url, "wait_until": wait_until},
                 )
             except Exception as exc:
-                # Ahead of the traces below: they record the raw exception text,
-                # which for a proxy failure can quote the proxy URL and land a
-                # password in trace.jsonl. Converting here also keeps a proxy
-                # outage from being reported as a LinkedIn navigation problem.
                 raise_if_proxy_error(exc)
                 if allow_remember_me and await resolve_remember_me_prompt(page):
                     await stabilize_navigation(
@@ -218,6 +240,7 @@ class PageNavigator:
                         url,
                         wait_until=wait_until,
                         allow_remember_me=False,
+                        deadline=deadline,
                     )
                     return
                 await record_page_trace(
@@ -234,13 +257,15 @@ class PageNavigator:
                 )
                 await self._log_navigation_failure(url, wait_until, exc, hops)
                 await self._raise_if_auth_barrier(url, navigation_error=exc)
-                # Re-raised as a redacted copy rather than the original: with a
-                # proxy configured, a driver error can quote the proxy URL, and
-                # everything downstream from here logs the exception -- the
-                # catch-all in error_handler, and FastMCP's own handler above
-                # that. Only the message is rewritten; the type is preserved so
-                # callers that branch on it are unaffected.
                 raise redacted_copy(exc) from None
+
+            if not is_linkedin_landing(page.url):
+                await record_page_trace(
+                    page,
+                    "extractor-off-linkedin",
+                    extra={"target_url": url, "hops": hops},
+                )
+                raise_if_off_linkedin(page.url)
 
             barrier = await detect_auth_barrier_quick(page)
             if not barrier:
@@ -258,9 +283,11 @@ class PageNavigator:
                     url,
                     wait_until=wait_until,
                     allow_remember_me=False,
+                    deadline=deadline,
                 )
                 return
 
+            raise_if_off_linkedin(page.url)
             await record_page_trace(
                 page,
                 "extractor-auth-barrier",
@@ -274,10 +301,12 @@ class PageNavigator:
         finally:
             unregister_navigation_listener()
 
-    async def _navigate_to_page(self, url: str) -> None:
+    async def _navigate_to_page(
+        self, url: str, *, deadline: float | None = None
+    ) -> None:
         """Navigate to a LinkedIn page and fail fast on auth barriers."""
         logger.debug("_navigate_to_page: target=%s", url)
-        await self._goto_with_auth_checks(url)
+        await self._goto_with_auth_checks(url, deadline=deadline)
 
     @contextmanager
     def _watching_navigations(self) -> Iterator[list[str]]:

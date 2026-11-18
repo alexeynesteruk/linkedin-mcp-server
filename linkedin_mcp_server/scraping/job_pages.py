@@ -49,6 +49,10 @@ from linkedin_mcp_server.scraping.text import (
 
 logger = logging.getLogger(__name__)
 
+# What the rate-limit retry has to have left after its backoff before it is
+# worth starting (#1261). The retry is a whole page again (6.5s average).
+_RETRY_PAGE_ALLOWANCE = 6.5
+
 
 # The id is the trailing run of digits, and LinkedIn serves the same job under
 # both `/jobs/view/1967281839/` and `/jobs/view/<title>-at-<company>-1967281839/`.
@@ -253,6 +257,7 @@ class JobPageReader:
         url: str,
         section_name: str,
         scroll_deadline: float = SCROLL_DEADLINE_MAX,
+        page_deadline: float | None = None,
     ) -> JobPageCapture:
         """Extract innerText from a job search page with soft rate-limit retry.
 
@@ -265,14 +270,32 @@ class JobPageReader:
         path here still answers with a capture the caller charges its budget
         from. Losing that let a page whose extraction failed after a full
         twelve-second scroll cost the search nothing.
+
+        ``page_deadline`` is where the search's budget ends, on the monotonic
+        clock. Both attempts navigate and scroll against it, and the retry is
+        not started when its backoff and a page will not fit before it.
         """
         charge = _ScrollCharge()
         try:
             result = await self._extract_search_page_once(
-                url, section_name, scroll_deadline, charge=charge
+                url,
+                section_name,
+                scroll_deadline,
+                charge=charge,
+                page_deadline=page_deadline,
             )
             if result.text != RATE_LIMITED_SECTION_TEXT:
                 return self._captured(result, charge.seconds)
+
+            if page_deadline is not None:
+                left = page_deadline - time.monotonic()
+                if left < RATE_LIMIT_RETRY_DELAY + _RETRY_PAGE_ALLOWANCE:
+                    logger.info(
+                        "Not retrying search page %s: %.1fs of the budget left",
+                        url,
+                        left,
+                    )
+                    return self._captured(result, charge.seconds)
 
             logger.info(
                 "Retrying search page %s after %.0fs backoff",
@@ -281,7 +304,11 @@ class JobPageReader:
             )
             await asyncio.sleep(RATE_LIMIT_RETRY_DELAY)
             result = await self._extract_search_page_once(
-                url, section_name, scroll_deadline / 2, charge=charge
+                url,
+                section_name,
+                scroll_deadline / 2,
+                charge=charge,
+                page_deadline=page_deadline,
             )
             if result.text == RATE_LIMITED_SECTION_TEXT:
                 logger.warning("Search page %s still rate-limited after retry", url)
@@ -313,9 +340,10 @@ class JobPageReader:
         scroll_deadline: float = SCROLL_DEADLINE_MAX,
         *,
         charge: _ScrollCharge,
+        page_deadline: float | None = None,
     ) -> ExtractedSection:
         """Single attempt to navigate, scroll sidebar, and extract innerText."""
-        await self._navigator._navigate_to_page(url)
+        await self._navigator._navigate_to_page(url, deadline=page_deadline)
         await detect_rate_limit(self._session.page)
         # Above the selector wait and the modal close, so the window this
         # opens covers everything read from here on. Taken between them, a
@@ -357,6 +385,10 @@ class JobPageReader:
         with self._navigator._watching_navigations() as hops:
             if main_found:
                 scroll_started = time.monotonic()
+                if page_deadline is not None:
+                    scroll_deadline = min(
+                        scroll_deadline, max(0.0, page_deadline - scroll_started)
+                    )
                 try:
                     moved = await scroll_job_sidebar(
                         self._session.page, deadline=scroll_deadline

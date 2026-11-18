@@ -1,8 +1,13 @@
 """Tests for recognizing and safely reporting proxy failures."""
 
-from urllib.parse import quote
+import asyncio
+from collections.abc import Callable
+import re
+from typing import Any
+from urllib.parse import quote, quote_plus, unquote, unquote_plus
 
 import pytest
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.config.schema import AppConfig
 from linkedin_mcp_server.core.exceptions import NetworkError, ProxyConnectionError
@@ -167,6 +172,50 @@ class TestRedaction:
         assert user not in hint
         assert "gate.example" in hint
 
+    def test_other_encodings_of_the_password_cannot_be_recovered(self, monkeypatch):
+        """Lowercase hex and quote_plus are not ``quote`` of the decoded secret.
+
+        A driver can write either hex case, and a space as ``+``. Masking only
+        the stored userinfo and ``quote`` of the password leaves a form that
+        ``unquote`` turns back into the password. The host stays.
+        """
+        password = "p:ss" + " word"
+        quoted = quote(password, safe="")
+        quoted_lower = re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(), quoted)
+        plus = quote_plus(password, safe="")
+        plus_lower = re.sub(r"%[0-9A-F]{2}", lambda m: m.group(0).lower(), plus)
+        assert quoted_lower != quoted
+        assert plus not in (quoted, password)
+        assert plus_lower not in (quoted, quoted_lower, plus)
+
+        config = AppConfig()
+        config.browser.proxy_server = f"http://acct:{quoted}@gate.example:7000"
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        redacted = redact_proxy_credentials(
+            f"driver quoted {quoted_lower}, plus {plus}, and {plus_lower} "
+            "via gate.example"
+        )
+
+        assert password not in redacted
+        assert quoted_lower not in redacted
+        assert plus not in redacted
+        assert plus_lower not in redacted
+        assert password not in unquote(redacted)
+        assert password not in unquote_plus(redacted)
+        assert "gate.example" in redacted
+
+    def test_a_password_fragment_is_not_a_secret(self, monkeypatch):
+        """Only the credential and its encodings are masked, not a piece of them."""
+        password = "p:ss" + " word"
+        config = AppConfig()
+        config.browser.proxy_server = "http://gate.example:7000"
+        config.browser.proxy_password = password
+        monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+
+        message = "reviewed the word list at gate.example"
+        assert redact_proxy_credentials(message) == message
+
     def test_without_a_configured_password_nothing_changes(self, monkeypatch):
         monkeypatch.setattr(
             "linkedin_mcp_server.config.get_config", lambda: AppConfig()
@@ -245,6 +294,131 @@ class _FakePage:
         if self._error:
             raise self._error
         return "ok"
+
+
+class _Request:
+    def __init__(self, *, navigation=True, frame=None):
+        self.frame = frame
+        self._navigation = navigation
+
+    def is_navigation_request(self):
+        return self._navigation
+
+
+class _ClockPage:
+    def __init__(self, events, *, finish_after, main_frame=None, error=None):
+        self._events = events
+        self._finish_after = finish_after
+        self.main_frame = main_frame
+        self._error = error
+        self._listeners: list[tuple[str, Callable[..., Any]]] = []
+
+    def on(self, event, handler):
+        self._listeners.append((event, handler))
+
+    def remove_listener(self, event, handler):
+        self._listeners = [
+            (found, callback)
+            for found, callback in self._listeners
+            if not (found == event and callback == handler)
+        ]
+
+    async def goto(self, url, **kwargs):
+        timeout = kwargs.get("timeout", 30_000)
+
+        async def body():
+            if self._error is not None:
+                raise self._error
+            elapsed = 0.0
+            for delay, request in self._events:
+                await asyncio.sleep(delay - elapsed)
+                elapsed = delay
+                for event, handler in list(self._listeners):
+                    if event == "request":
+                        handler(request)
+            await asyncio.sleep(self._finish_after)
+            return "ok"
+
+        if not timeout:
+            return await body()
+        return await asyncio.wait_for(body(), timeout / 1000)
+
+
+class TestNavigationBudget:
+    async def test_a_request_sent_after_the_old_clock_still_completes(self):
+        page = _ClockPage([(0.25, _Request())], finish_after=0.02)
+        assert (
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=100
+            )
+            == "ok"
+        )
+
+    async def test_the_budget_still_bounds_the_answer(self):
+        page = _ClockPage([(0.01, _Request())], finish_after=0.25)
+        with pytest.raises(PlaywrightTimeoutError, match="after the request was sent"):
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=100
+            )
+
+    async def test_a_request_that_is_never_sent_fails(self, monkeypatch):
+        monkeypatch.setattr(
+            "linkedin_mcp_server.core.proxy_errors.STARTUP_BUDGET_MS", 50
+        )
+        page = _ClockPage([(2.0, _Request())], finish_after=0.01)
+        with pytest.raises(PlaywrightTimeoutError, match="before the request was sent"):
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=100
+            )
+
+    async def test_an_overall_timeout_bounds_the_wait_for_the_request(self):
+        page = _ClockPage([(2.0, _Request())], finish_after=0.01)
+        with pytest.raises(PlaywrightTimeoutError, match="before the request was sent"):
+            await asyncio.wait_for(
+                goto_reporting_proxy_errors(
+                    page,
+                    "https://www.linkedin.com/feed/",
+                    timeout=100,
+                    overall_timeout=100,
+                ),
+                1.0,
+            )
+
+    async def test_an_overall_timeout_bounds_the_answer_after_a_late_request(self):
+        page = _ClockPage([(0.15, _Request())], finish_after=0.1)
+        with pytest.raises(PlaywrightTimeoutError, match="after the request was sent"):
+            await goto_reporting_proxy_errors(
+                page,
+                "https://www.linkedin.com/feed/",
+                timeout=200,
+                overall_timeout=200,
+            )
+
+    async def test_a_subresource_does_not_start_the_budget(self):
+        page = _ClockPage(
+            [(0.01, _Request(navigation=False)), (0.2, _Request())],
+            finish_after=0.02,
+        )
+        assert (
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=150
+            )
+            == "ok"
+        )
+
+    async def test_an_iframe_navigation_does_not_start_the_budget(self):
+        main = object()
+        page = _ClockPage(
+            [(0.01, _Request(frame=object())), (0.30, _Request(frame=main))],
+            finish_after=0.02,
+            main_frame=main,
+        )
+        assert (
+            await goto_reporting_proxy_errors(
+                page, "https://www.linkedin.com/feed/", timeout=200
+            )
+            == "ok"
+        )
 
 
 class TestUsernameIsTreatedAsSecret:

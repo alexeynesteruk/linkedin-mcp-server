@@ -6,9 +6,13 @@ checks read it as a dead session. These helpers let those call sites tell the
 two apart before they draw that conclusion.
 """
 
+import asyncio
 import logging
+import re
 from typing import Any
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import quote, quote_plus, unquote, unquote_plus, urlsplit
+
+from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from linkedin_mcp_server.config.schema import BrowserConfig
 
@@ -120,9 +124,50 @@ def _proxy_server_userinfo_secrets(proxy_server: str | None) -> list[str]:
         add(unquote(user))
         add(password)
         add(unquote(password))
+        # ``+`` in userinfo is a space from ``quote_plus``. ``unquote`` leaves
+        # it, so the decoded password and its other encodings would not match.
+        add(unquote_plus(password))
     elif source:
         add(unquote(source))
+        add(unquote_plus(source))
     return secrets
+
+
+# Percent-escapes only. Lowercasing the whole encoding would treat a
+# differently-cased copy of the secret as a second secret.
+_PERCENT_HEX = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def _lower_percent_hex(value: str) -> str:
+    """The same encoding with percent-escape hex in lowercase."""
+    return _PERCENT_HEX.sub(lambda match: match.group(0).lower(), value)
+
+
+def _credential_encodings(secret: str, message: str) -> list[str]:
+    """Encodings of the whole *secret* that *message* may quote.
+
+    ``quote`` writes uppercase hex. The same escapes also appear in lowercase,
+    and ``quote_plus`` writes a space as ``+``. A ``quote_plus`` form is
+    included only when that form is actually in *message*. Nothing here is a
+    slice of the surrounding text.
+    """
+    encodings: list[str] = []
+
+    def add(value: str) -> None:
+        if value and value not in encodings:
+            encodings.append(value)
+
+    add(secret)
+    add(_lower_percent_hex(secret))
+    quoted = quote(secret, safe="")
+    add(quoted)
+    add(_lower_percent_hex(quoted))
+    plus = quote_plus(secret, safe="")
+    plus_lower = _lower_percent_hex(plus)
+    if plus in message or plus_lower in message:
+        add(plus)
+        add(plus_lower)
+    return encodings
 
 
 def redact_proxy_credentials(message: str) -> str:
@@ -132,7 +177,8 @@ def redact_proxy_credentials(message: str) -> str:
     handlers log exceptions with their full cause chain. The username is masked
     alongside the password because residential providers encode the account,
     zone and session in it. Percent-encoded forms are covered too, since that is
-    how credentials appear inside a URL.
+    how credentials appear inside a URL, including lowercase hex and the
+    ``quote_plus`` form of the decoded secret.
 
     A credential that exists only as ``PROXY_SERVER`` userinfo — not also in
     ``proxy_username`` or ``proxy_password`` — is masked the same way, including
@@ -149,9 +195,8 @@ def redact_proxy_credentials(message: str) -> str:
             secrets.append(secret)
     variants: list[str] = []
     for secret in secrets:
-        encoded = quote(secret, safe="")
-        for variant in (secret, encoded):
-            if variant and variant not in variants:
+        for variant in _credential_encodings(secret, message):
+            if variant not in variants:
                 variants.append(variant)
     # Longest first, so an encoded userinfo blob is removed whole before a
     # shorter piece of it splits the encoding and leaves the rest visible.
@@ -233,6 +278,113 @@ def raise_if_proxy_configured(error: BaseException) -> None:
     ) from None
 
 
+#: The product's navigation budget, in milliseconds, counted from the moment
+#: the browser sends the navigation request. Patchright's own default is the
+#: same number but starts at the ``goto`` call. On a Windows runner the first
+#: request of a fresh browser is not sent for seconds after that call (1.1s to
+#: 2.5s on a green idle leg; a loaded one never sent it inside 30s), so a clock
+#: that starts at the call expires before the origin has anything to answer.
+NAVIGATION_BUDGET_MS = 30_000
+#: How long to wait for the browser to send the request at all. A wedged
+#: browser never emits one, and the navigation budget cannot start then, so
+#: this cap is what ends the call. It is not part of the navigation budget.
+STARTUP_BUDGET_MS = 30_000
+
+
+def _page_reports_requests(page: Any) -> bool:
+    """Whether *page* is a real page, not a stand-in whose ``on`` is invented."""
+    kind = type(page)
+    return callable(getattr(kind, "on", None)) and callable(
+        getattr(kind, "remove_listener", None)
+    )
+
+
+def _is_main_frame_navigation(page: Any, request: Any) -> bool:
+    """Whether *request* is the navigation ``goto`` is waiting on."""
+    is_navigation = getattr(request, "is_navigation_request", None)
+    if callable(is_navigation) and not is_navigation():
+        return False
+    frame = getattr(request, "frame", None)
+    main = getattr(page, "main_frame", None)
+    return frame is None or main is None or frame is main
+
+
+async def _stop_goto(goto: asyncio.Future[Any]) -> None:
+    """Cancel a ``goto`` that is still running, and wait until it has stopped."""
+    if goto.done():
+        return
+    goto.cancel()
+    await asyncio.shield(asyncio.gather(goto, return_exceptions=True))
+
+
+async def _goto_within_budget(
+    page: Any, url: str, *, overall_timeout: float | None = None, **kwargs: Any
+) -> Any:
+    """``page.goto``, with :data:`NAVIGATION_BUDGET_MS` starting at the request.
+
+    A caller that passes ``timeout`` sets that budget. ``0`` keeps Patchright's
+    meaning, no limit. A page that cannot report its requests is unchanged:
+    the driver's own clock applies, which is the only clock it has.
+
+    ``overall_timeout`` bounds the whole call, from here, wait for the request
+    included. A caller with a deadline of its own needs it: the two budgets
+    above run one after the other, so ``timeout`` alone lets a request that is
+    slow to leave spend its startup wait on top of the time that was left.
+    """
+    caller_set_timeout = "timeout" in kwargs
+    timeout = kwargs.pop("timeout", None)
+    if not _page_reports_requests(page):
+        if caller_set_timeout:
+            kwargs["timeout"] = timeout
+        return await page.goto(url, **kwargs)
+    if timeout is None:
+        timeout = NAVIGATION_BUDGET_MS
+    if timeout == 0:
+        return await page.goto(url, timeout=0, **kwargs)
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    startup_ms: float = STARTUP_BUDGET_MS
+    if overall_timeout is not None:
+        startup_ms = min(startup_ms, overall_timeout)
+    sent: asyncio.Future[None] = loop.create_future()
+
+    def on_request(request: Any) -> None:
+        if sent.done() or not _is_main_frame_navigation(page, request):
+            return
+        sent.set_result(None)
+
+    page.on("request", on_request)
+    goto = asyncio.ensure_future(page.goto(url, timeout=0, **kwargs))
+    try:
+        await asyncio.wait(
+            {goto, sent},
+            timeout=startup_ms / 1000,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not goto.done() and not sent.done():
+            await _stop_goto(goto)
+            raise PlaywrightTimeoutError(
+                f"Page.goto: Timeout {startup_ms:g}ms exceeded before "
+                "the request was sent."
+            )
+        if goto.done():
+            return await goto
+        if overall_timeout is not None:
+            spent_ms = (loop.time() - started) * 1000
+            timeout = max(0.0, min(timeout, overall_timeout - spent_ms))
+        try:
+            return await asyncio.wait_for(asyncio.shield(goto), timeout / 1000)
+        except TimeoutError:
+            await _stop_goto(goto)
+            raise PlaywrightTimeoutError(
+                f"Page.goto: Timeout {timeout:g}ms exceeded after the request was sent."
+            ) from None
+    finally:
+        page.remove_listener("request", on_request)
+        await _stop_goto(goto)
+
+
 async def goto_reporting_proxy_errors(page: Any, url: str, **kwargs: Any) -> Any:
     """``page.goto(url)``, reporting a proxy fault as :class:`ProxyConnectionError`.
 
@@ -240,9 +392,12 @@ async def goto_reporting_proxy_errors(page: Any, url: str, **kwargs: Any) -> Any
     happen before any auth check (manual login, cookie-import validation, the
     runtime bridge) would otherwise surface the raw driver error, which reads
     like a LinkedIn problem and can carry the proxy URL into a log.
+
+    The navigation budget starts when the browser sends the request, not when
+    this function is called. See :data:`NAVIGATION_BUDGET_MS`.
     """
     try:
-        return await page.goto(url, **kwargs)
+        return await _goto_within_budget(page, url, **kwargs)
     except Exception as exc:
         raise_if_proxy_error(exc)
         raise

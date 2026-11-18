@@ -1618,6 +1618,48 @@ class TestSearchJobs:
         assert "Page 2 content" in result["sections"]["search_results"]
         assert mock_extract.await_count == 2
 
+    async def test_every_page_is_handed_the_end_of_the_budget(self, mock_page):
+        class Clock:
+            def __init__(self) -> None:
+                self.now = 7.0
+
+            def monotonic(self) -> float:
+                return self.now
+
+        clock = Clock()
+        scraper = _scraper(mock_page)
+        seen: list[float | None] = []
+
+        async def read_page(url, section_name, page_deadline=None, **kwargs):
+            seen.append(page_deadline)
+            navigate(mock_page, url)
+            clock.now += 6.5
+            return captured(mock_page, extracted("Job results"))
+
+        with (
+            patch.object(jobs_module, "time", clock),
+            patch.object(scraper._pages, "_extract_search_page", side_effect=read_page),
+            patch.object(
+                scraper._pages,
+                "_extract_job_ids",
+                new_callable=AsyncMock,
+                side_effect=[["1", "2"], ["3", "4"]],
+            ),
+            patch.object(
+                scraper._pages,
+                "_get_total_search_pages",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "linkedin_mcp_server.scraping.jobs.asyncio.sleep",
+                new_callable=AsyncMock,
+            ),
+        ):
+            await scraper.search_jobs("python", max_pages=2, tool_timeout=50)
+
+        assert seen == [47.0, 47.0]
+
     async def test_empty_results(self, mock_page):
         """Should handle empty results gracefully and skip ID extraction."""
         scraper = _scraper(mock_page)
