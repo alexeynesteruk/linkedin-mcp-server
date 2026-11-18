@@ -140,6 +140,12 @@ def serve_extractor(monkeypatch: pytest.MonkeyPatch) -> Callable[[Any], AsyncMoc
             "job_id is not a LinkedIn id",
         ),
         (
+            "post",
+            "search_posts",
+            {"keywords": "python", "date_posted": "last-year"},
+            "Invalid date_posted",
+        ),
+        (
             "feed",
             "get_post_comments",
             {"post_url": "https://www.linkedin.com/in/alice/"},
@@ -282,6 +288,7 @@ async def test_invalid_reference_is_rejected_before_extractor(
     from linkedin_mcp_server.tools.messaging import register_messaging_tools
     from linkedin_mcp_server.tools.network import register_network_tools
     from linkedin_mcp_server.tools.person import register_person_tools
+    from linkedin_mcp_server.tools.post import register_post_tools
 
     register_by_module = {
         "feed": register_feed_tools,
@@ -290,6 +297,7 @@ async def test_invalid_reference_is_rejected_before_extractor(
         "messaging": register_messaging_tools,
         "network": register_network_tools,
         "person": register_person_tools,
+        "post": register_post_tools,
     }
     mcp = FastMCP("test")
     register_by_module[module_name](mcp)
