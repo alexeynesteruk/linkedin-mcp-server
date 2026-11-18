@@ -895,7 +895,7 @@ def test_clear_profile_and_exit_clears_all_auth_state(
 
     cleared = {}
 
-    def fake_clear(profile):
+    def fake_clear(profile, **_kwargs):
         cleared["profile"] = profile
         return True
 
@@ -1171,9 +1171,32 @@ class TestForwardingToASharedOwner:
             lambda **kwargs: built.update(kwargs) or MagicMock(),
         )
 
+        monkeypatch.delenv("LINKEDIN_HTTP_TOKEN", raising=False)
+
         cli_main.main([])
 
         assert set(built) == {"tool_timeout"}
+
+    def test_http_app_token_is_handed_to_the_direct_server(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        config = self._config(daemon_enabled=False, transport="streamable-http")
+        config.server.transport_explicitly_set = True
+        _patch_main_dependencies(monkeypatch, config)
+        monkeypatch.setenv("LINKEDIN_HTTP_TOKEN", "  app-token  ")
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main._obtain_shared_owner", lambda _config: None
+        )
+        built = {}
+        monkeypatch.setattr(
+            "linkedin_mcp_server.cli_main.create_mcp_server",
+            lambda **kwargs: built.update(kwargs) or MagicMock(),
+        )
+
+        cli_main.main([])
+
+        assert built["http_auth_token"] == "app-token"
+        assert "auth_token" not in built
 
     def test_an_interactively_chosen_http_transport_elects_no_daemon(
         self, monkeypatch: pytest.MonkeyPatch
@@ -2208,3 +2231,100 @@ class TestRetiringASharedBrowser:
 
         assert exit_info.value.code == 1
         assert "Another LinkedIn MCP client" in capsys.readouterr().out
+
+
+class TestStatusUnderAHeldProfile:
+    """``--status`` while another process holds the profile lease."""
+
+    @pytest.fixture(autouse=True)
+    def _machine(self, monkeypatch, tmp_path, isolate_profile_dir):
+        from linkedin_mcp_server import daemon_descriptor
+        from linkedin_mcp_server.exceptions import BrowserBusyError
+        from linkedin_mcp_server.session_state import (
+            get_runtime_id,
+            portable_cookie_path,
+            source_state_path,
+        )
+        from linkedin_mcp_server.storage_class import Classification, StorageClass
+
+        self.home = tmp_path / "home"
+        self.home.mkdir()
+        monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: self.home)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.storage_class.classify",
+            lambda path: Classification(StorageClass.LOCAL, "local test filesystem"),
+        )
+        self.profile = isolate_profile_dir
+        (self.profile / "Default").mkdir(parents=True)
+        (self.profile / "Default" / "Cookies").write_text("placeholder")
+        portable_cookie_path(self.profile).write_text(json.dumps([{"name": "li_at"}]))
+        source_state_path(self.profile).write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "source_runtime_id": get_runtime_id(),
+                    "login_generation": "gen-1",
+                    "created_at": "2026-03-12T17:00:00Z",
+                    "profile_path": str(self.profile),
+                    "cookies_path": str(portable_cookie_path(self.profile)),
+                }
+            )
+        )
+        self.config = AppConfig()
+        self.config.server.daemon_enabled = True
+        self.config.browser.user_data_dir = str(self.profile)
+        monkeypatch.setattr(cli_main, "get_config", lambda: self.config)
+        monkeypatch.setattr(cli_main, "configure_logging", lambda **_kwargs: None)
+        monkeypatch.setattr(cli_main, "get_version", lambda: "4.0.0")
+
+        async def held() -> None:
+            raise BrowserBusyError()
+
+        monkeypatch.setattr(cli_main, "get_or_create_browser", held)
+        monkeypatch.setattr(cli_main, "close_browser", AsyncMock(return_value=None))
+        self.monkeypatch = monkeypatch
+
+    def _status(self, capsys, caplog) -> str:
+        with caplog.at_level(logging.ERROR):
+            with pytest.raises(SystemExit) as exit_info:
+                cli_main.profile_info_and_exit()
+        assert exit_info.value.code == 1
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+        out = capsys.readouterr().out.lower()
+        assert "another process holds the browser profile" in out
+        assert "your saved session was not changed" in out
+        assert "check logs" not in out
+        assert "call this exact tool again" not in out
+        return out
+
+    def test_a_recorded_shared_browser_is_named_without_contacting_it(
+        self, capsys, caplog
+    ):
+        owner = _Owner(self.monkeypatch, self.home, self.profile)
+
+        out = self._status(capsys, caplog)
+
+        assert "shared browser" in out
+        assert owner.requests == []
+
+    def test_nothing_recorded_names_no_shared_browser(self, capsys, caplog):
+        assert "shared browser" not in self._status(capsys, caplog)
+
+    def test_a_process_that_would_not_share_never_looks(self, capsys, caplog):
+        self.config.server.daemon_enabled = False
+        _Owner(self.monkeypatch, self.home, self.profile)
+        looked = MagicMock(side_effect=AssertionError("looked for an owner"))
+        self.monkeypatch.setattr("linkedin_mcp_server.daemon.look_up_owner", looked)
+
+        out = self._status(capsys, caplog)
+
+        looked.assert_not_called()
+        assert "shared browser" not in out
+
+    def test_an_unreadable_record_names_nothing(self, capsys, caplog):
+        self.monkeypatch.setattr(
+            "linkedin_mcp_server.daemon.look_up_owner",
+            MagicMock(side_effect=OSError("state storage went away")),
+        )
+
+        assert "shared browser" not in self._status(capsys, caplog)
