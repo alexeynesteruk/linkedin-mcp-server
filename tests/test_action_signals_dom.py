@@ -1236,12 +1236,21 @@ class TestNov2026LabeledConnectAnchor:
     async def test_english_labeled_connect_anchor_is_connectable_not_pending(
         self, dom_page
     ):
+        mount_dialog = (
+            "event.preventDefault();"
+            "document.body.dataset.invited = 'yes';"
+            "const d = document.createElement('dialog');"
+            "d.setAttribute('open', '');"
+            "const b = document.createElement('button');"
+            "b.type = 'button'; b.textContent = 'Send without a note';"
+            "d.appendChild(b); document.body.appendChild(d);"
+        )
         html = f"""<!DOCTYPE html><html lang="en"><body><main>
           <section class="topcard">
             <h1>Jane Doe</h1>
             <div class="actions">
               <a href="/in/{USER}/" aria-label="Invite Jane Doe to connect"
-                onclick="event.preventDefault(); document.body.dataset.invited = 'yes'"
+                onclick="{mount_dialog}"
                 >Connect</a>
               <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AEEE"
                 >Message</a>

@@ -226,7 +226,10 @@ ACTION_SIGNALS_JS = (
   const hasInvite = !!document.querySelector(inviteSel);
   const hasEditIntro = !!main.querySelector(editSel);
 
+  const topCard = main.querySelector('section') || main.firstElementChild || main;
   const actionRoot = findActionRoot(main);
+  const topCardActionRoot =
+    actionRoot && topCard.contains(actionRoot) ? actionRoot : null;
 
   let hasComposeInActionRoot = false;
   let hasLabeledActionButton = false;
@@ -244,6 +247,16 @@ ACTION_SIGNALS_JS = (
     for (const a of actionRoot.querySelectorAll('a')) {
       if (a.hasAttribute('aria-label')) {
         hasLabeledActionAnchor = true;
+      }
+    }
+  }
+  if (topCardActionRoot) {
+    for (const a of topCardActionRoot.querySelectorAll('a[aria-label]')) {
+      const href = a.getAttribute('href') || '';
+      if (
+        !href.includes('/preload/custom-invite/') &&
+        !href.includes('/messaging/compose/')
+      ) {
         actionAnchorLabels.push(a.getAttribute('aria-label') || '');
       }
     }
@@ -281,10 +294,16 @@ CLICK_LABELED_INVITE_ANCHOR_JS = (
     + r"""
   const main = document.querySelector('main');
   if (!main) return false;
+  const topCard = main.querySelector('section') || main.firstElementChild || main;
   const actionRoot = findActionRoot(main);
-  if (!actionRoot) return false;
+  if (!actionRoot || !topCard.contains(actionRoot)) return false;
   for (const a of actionRoot.querySelectorAll('a[aria-label]')) {
-    if (a.getAttribute('aria-label') === label) {
+    const href = a.getAttribute('href') || '';
+    if (
+      !href.includes('/preload/custom-invite/') &&
+      !href.includes('/messaging/compose/') &&
+      a.getAttribute('aria-label') === label
+    ) {
       a.click();
       return true;
     }
