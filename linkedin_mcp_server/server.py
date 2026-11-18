@@ -78,7 +78,7 @@ class _StaticTokenAuth(TokenVerifier):
     is for.
     """
 
-    def __init__(self, token: str) -> None:
+    def __init__(self, token: str, *, client_id: str = "linkedin-mcp-frontend") -> None:
         super().__init__()
         # A digest rather than the token, so the verifier's own repr does not
         # carry the credential — the surrounding code logs whole objects at
@@ -90,13 +90,14 @@ class _StaticTokenAuth(TokenVerifier):
         # Anything able to read this process's memory has already won, and the
         # token is the least of what it finds there.
         self._expected = hashlib.sha256(token.encode()).digest()
+        self._client_id = client_id
 
     async def verify_token(self, token: str) -> AccessToken | None:
         if not hmac.compare_digest(
             self._expected, hashlib.sha256(token.encode()).digest()
         ):
             return None
-        return AccessToken(token=token, client_id="linkedin-mcp-frontend", scopes=[])
+        return AccessToken(token=token, client_id=self._client_id, scopes=[])
 
 
 @lifespan
@@ -164,6 +165,7 @@ def create_mcp_server(
     tool_timeout: float = DEFAULT_TOOL_TIMEOUT_SECONDS,
     role: ServerRole = ServerRole.DIRECT,
     auth_token: str | None = None,
+    http_auth_token: str | None = None,
     proxy_backend: "DaemonProxyBackend | None" = None,
 ) -> FastMCP:
     """Create and configure the MCP server with all LinkedIn tools.
@@ -175,6 +177,13 @@ def create_mcp_server(
     *auth_token* is the bearer token a daemon owner requires. Only an owner has
     one: it listens on a loopback port that every process on the machine can
     reach, and a browser the user merely points at a page can reach it too.
+
+    *http_auth_token* is a different credential: the app bearer
+    (``LINKEDIN_HTTP_TOKEN``) on a direct streamable-HTTP server. It is not the
+    daemon token and not a LinkedIn cookie. Unset leaves the historical
+    unauthenticated server. A direct HTTP deployment that publishes past
+    loopback sets it so a request that cleared the outer proxy still has to
+    present this bearer.
 
     *proxy_backend* is the owner a proxy forwards to, held as an object rather
     than as a bare attachment because which owner that is can change: an upgrade
@@ -191,6 +200,12 @@ def create_mcp_server(
         raise ValueError(
             f"Only a daemon owner authenticates requests, not {role.value}"
         )
+    if http_auth_token is not None and role is not ServerRole.DIRECT:
+        raise ValueError(
+            f"LINKEDIN_HTTP_TOKEN authenticates a direct HTTP server, not {role.value}"
+        )
+    if http_auth_token is not None and not http_auth_token.strip():
+        raise ValueError("LINKEDIN_HTTP_TOKEN must be non-empty")
     if role is ServerRole.PROXY and proxy_backend is None:
         # A proxy registers no tools of its own, so without an owner it would
         # serve an empty tool list and look like a server whose tools vanished.
@@ -222,7 +237,13 @@ def create_mcp_server(
         # and then claim to be closing a browser it never had.
         lifespan=browser_lifespan if role.drives_browser else None,
         mask_error_details=True,
-        auth=_StaticTokenAuth(auth_token) if auth_token is not None else None,
+        auth=(
+            _StaticTokenAuth(auth_token)
+            if auth_token is not None
+            else _StaticTokenAuth(http_auth_token, client_id="linkedin-http")
+            if http_auth_token is not None
+            else None
+        ),
     )
     # First, so it is the outermost layer on every role: a proxy forwards the
     # cleaned arguments, and a replay after sign-in repair starts from them too.

@@ -46,25 +46,48 @@ def _owner_serving(*tool_names: str) -> FastMCP:
 
 
 def _a_backend() -> DaemonProxyBackend:
-    """A real backend around a stood-in owner.
-
-    The backend itself is production's, so the client it builds is production's
-    too: pointed at a port nothing listens on, it fails to connect exactly as a
-    proxy whose owner is gone does. Only the *attachment* is stood in, because a
-    real one needs a published descriptor; the real URL, token, timeout and
-    proxy-environment wiring are covered in ``tests/test_daemon_proxy.py``.
-    """
-    attachment = MagicMock(name="attachment")
-    attachment.descriptor.url = "http://127.0.0.1:1/mcp"
-    attachment.token = "a-token"
-    # A mock answers every attribute with something truthy, and a truthy
-    # `control_only` is the one attachment a backend must refuse.
-    attachment.control_only = False
+    """A real backend around a stood-in owner."""
     return DaemonProxyBackend(
-        attachment=attachment,
+        attachment=_a_dead_attachment(port=1),
         auth_root=Path("/nonexistent"),
         profile=Path("/nonexistent/profile"),
         config=AppConfig(),
+    )
+
+
+def _a_dead_attachment(*, port: int) -> Any:
+    attachment = MagicMock(name="attachment")
+    attachment.descriptor.url = f"http://127.0.0.1:{port}/mcp"
+    attachment.token = "a-token"
+    attachment.control_only = False
+    return attachment
+
+
+_THE_OWNER_IS_GONE = (
+    "This server lost the shared browser process and could not reach a new one. "
+    "Reconnect or restart your MCP client to start a new one."
+)
+
+
+def _no_replacement_to_find(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    elect: Any = None,
+) -> None:
+    from linkedin_mcp_server import daemon_descriptor
+    from linkedin_mcp_server.daemon import OwnerLookup, OwnerState
+    from linkedin_mcp_server.daemon_election import ElectionOutcome
+
+    def nobody(*_args: object, **_kwargs: object) -> ElectionOutcome:
+        return ElectionOutcome(
+            OwnerLookup(state=OwnerState.ABSENT, reason="nobody answered"),
+            started_owner=False,
+        )
+
+    monkeypatch.setattr(daemon_descriptor, "_account_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        "linkedin_mcp_server.daemon_election.obtain_owner", elect or nobody
     )
 
 
@@ -619,28 +642,80 @@ class TestProxyRole:
         bootstrap.assert_called_once()
         close.assert_awaited_once()
 
-    @pytest.mark.parametrize(
-        ("mode", "says"),
-        [("legacy", "connect"), ("auto", "Internal server error")],
-        ids=["handshake era", "2026-07-28 era"],
-    )
+    @_BOTH_ERAS
     async def test_a_dead_owner_is_an_error_rather_than_an_empty_tool_list(
-        self, mode: str, says: str
+        self,
+        mode: str,
+        protocol: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ):
-        # FastMCP logs a failing provider and carries on by default. For a proxy
-        # the provider *is* the server, so that default turns an unreachable
-        # owner into a client that sees no tools and no reason why. Measured on
-        # 3.4.4: `tools/list` returned `[]`.
-        #
-        # Both eras a client may speak to this proxy. Only the handshake era
-        # carries the reason: in 2026-07-28 the SDK answers a failure that is
-        # not an `MCPError` with a generic one (`mcp/server/runner.py`,
-        # `modern_error_data`), so there it is an error and no more.
+        _no_replacement_to_find(monkeypatch, tmp_path)
         proxy = create_mcp_server(role=ServerRole.PROXY, proxy_backend=_a_backend())
 
         async with Client(proxy, mode=mode) as client:
-            with pytest.raises(Exception, match=says):
+            assert client.protocol_version == protocol
+            with pytest.raises(Exception) as failed:
                 await client.list_tools()
+
+        assert str(failed.value) == _THE_OWNER_IS_GONE
+
+    @_BOTH_ERAS
+    async def test_a_tool_call_to_a_dead_owner_says_what_happened(
+        self,
+        mode: str,
+        protocol: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        _no_replacement_to_find(monkeypatch, tmp_path)
+        proxy = create_mcp_server(role=ServerRole.PROXY, proxy_backend=_a_backend())
+
+        async with Client(proxy, mode=mode) as client:
+            assert client.protocol_version == protocol
+            result = await client.call_tool(
+                "get_person_profile", {}, raise_on_error=False
+            )
+
+        assert result.is_error
+        assert [getattr(block, "text", None) for block in result.content] == [
+            _THE_OWNER_IS_GONE
+        ]
+
+    @pytest.mark.parametrize(
+        ("mode", "says"),
+        [
+            ("legacy", "something unrelated broke"),
+            ("auto", "Internal server error"),
+        ],
+        ids=["handshake era", "2026-07-28 era"],
+    )
+    async def test_a_failure_that_is_not_the_owners_is_not_called_one(
+        self,
+        mode: str,
+        says: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ):
+        class _BrokenBackend(DaemonProxyBackend):
+            def open_client(self, *, timeout: float) -> ProxyClient:
+                raise ValueError("something unrelated broke")
+
+        base = _a_backend()
+        backend = _BrokenBackend(
+            attachment=base.attachment,
+            auth_root=base.auth_root,
+            profile=base.profile,
+            config=base.config,
+        )
+        _no_replacement_to_find(monkeypatch, tmp_path)
+        proxy = create_mcp_server(role=ServerRole.PROXY, proxy_backend=backend)
+
+        async with Client(proxy, mode=mode) as client:
+            with pytest.raises(Exception) as failed:
+                await client.list_tools()
+
+        assert str(failed.value) == says
 
     async def test_the_update_notice_still_reaches_a_forwarded_result(
         self, monkeypatch: pytest.MonkeyPatch
@@ -772,6 +847,39 @@ class TestOwnerAuthentication:
 
         assert token not in repr(owner.auth)
         assert token not in repr(vars(owner.auth))
+
+    def test_http_app_token_authenticates_a_direct_server(self):
+        # The public HTTP server uses a different credential from the daemon
+        # owner. Unset still means no auth, which is the stdio server.
+        token = "app-secret-token"
+        direct = create_mcp_server(http_auth_token=token)
+
+        assert direct.auth is not None
+        assert token not in repr(direct.auth)
+        assert token not in repr(vars(direct.auth))
+
+    async def test_http_app_token_accepts_only_that_token(self):
+        direct = create_mcp_server(http_auth_token="app-token")
+        verifier = direct.auth
+        assert verifier is not None
+
+        assert await verifier.verify_token("app-token") is not None
+        assert await verifier.verify_token("app-tokeN") is None
+        assert await verifier.verify_token("") is None
+
+    def test_http_app_token_is_refused_on_other_roles(self):
+        with pytest.raises(ValueError, match="direct HTTP server"):
+            create_mcp_server(role=ServerRole.OWNER, http_auth_token="app-token")
+        with pytest.raises(ValueError, match="direct HTTP server"):
+            create_mcp_server(
+                role=ServerRole.PROXY,
+                proxy_backend=_a_backend(),
+                http_auth_token="app-token",
+            )
+
+    def test_an_empty_http_app_token_is_refused(self):
+        with pytest.raises(ValueError, match="non-empty"):
+            create_mcp_server(http_auth_token="   ")
 
 
 class TestSequentialToolExecutionMiddleware:

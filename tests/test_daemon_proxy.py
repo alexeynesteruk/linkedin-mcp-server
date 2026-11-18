@@ -1581,7 +1581,7 @@ class TestRepeatingOnlyWhatIsSafe:
             )
 
         middleware = FrontendOwnerRecoveryMiddleware(backend)
-        with pytest.raises(OwnerUnreachableError, match="did not answer"):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await middleware.on_call_tool(
                 self._context(read_only=True),
                 call_next,  # ty: ignore
@@ -2878,7 +2878,7 @@ class TestWritingAnOwnerOff:
                 classification=OwnerFailure.RETIRING,
             )
 
-        with pytest.raises(OwnerUnreachableError):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await FrontendOwnerRecoveryMiddleware(backend).on_call_tool(
                 MagicMock(),
                 call_next,  # ty: ignore
@@ -3045,7 +3045,7 @@ class TestWhatOneCallCanCost:
         context.message.name = "get_person_profile"
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
 
-        with pytest.raises(OwnerUnreachableError):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
                 context,
                 through_recovery,
@@ -3164,7 +3164,7 @@ class TestWhatOneCallCanCost:
         context.message.name = "get_person_profile"
         context.fastmcp_context.fastmcp.get_tool = AsyncMock(return_value=tool)
 
-        with pytest.raises(OwnerUnreachableError):
+        with pytest.raises(ToolError, match="could not reach a new one"):
             await FrontendAuthRepairMiddleware(tool_timeout=30.0).on_call_tool(
                 context,
                 through_recovery,
