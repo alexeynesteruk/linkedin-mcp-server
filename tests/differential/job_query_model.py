@@ -190,6 +190,7 @@ class World:
         held: Sequence[int | None] = (INSTALLER_JOB, None),
         inventory: Sequence[bool] = (True,),
         spared: Sequence[int] = (),
+        infrastructure: Mapping[int, float] | None = None,
     ) -> None:
         self.members = {member.pid: member for member in members}
         #: The owner's live Jobs; None is one whose handle is already gone.
@@ -197,6 +198,11 @@ class World:
         self.inventory = tuple(inventory)
         #: Ids in the inventory that the drain must leave alone.
         self.spared = tuple(spared)
+        #: Processes recorded at adoption, by id and creation time. The gate is
+        #: one of them: the candidate opens it and spares it when the time matches.
+        self.infrastructure = (
+            {GATE: 4.0} if infrastructure is None else dict(infrastructure)
+        )
         self.iteration = 0
         self.now = 0.0
         self.calls = 0
@@ -220,6 +226,11 @@ class World:
 
     def IsProcessInJob(self, handle: _Handle, job: Any) -> bool:
         self.calls += 1
+        if handle.pid not in self.members:
+            # Infrastructure recorded at adoption is still in the adopted Job.
+            if job == ADOPTED_JOB and handle.pid in self.infrastructure:
+                return True
+            raise Win32Error(6, "IsProcessInJob", "The handle is invalid.")
         member = self.members[handle.pid]
         if job == ADOPTED_JOB:
             answer = _at(member.adopted, self.iteration)
@@ -236,6 +247,10 @@ class World:
     def OpenProcess(self, access: int, inherit: bool, pid: int) -> _Handle:
         self.calls += 1
         self.asked_to_open.append(pid)
+        if pid in self.infrastructure and pid not in self.members:
+            handle = _Handle(self, pid, access)
+            self.handles.append(handle)
+            return handle
         member = self.members.get(pid)
         if member is None or pid in self.dead or not _at(member.opens, self.iteration):
             raise Win32Error(87, "OpenProcess", "The parameter is incorrect.")
@@ -317,9 +332,20 @@ class Case:
     def run(self, routine: Routine) -> Outcome:
         world = self.world()
         namespace = routine.namespace()
+
+        def _windows_process_created(handle: Any) -> Any:
+            world.calls += 1
+            if handle.pid in world.infrastructure:
+                return world.infrastructure[handle.pid]
+            return world.members[handle.pid].created
+
         namespace.update(
             _adopted_windows_job=ADOPTED_JOB if self.adopted else None,
+            # The baseline spares this id without opening it. The candidate
+            # records the same process by creation time instead.
             _adopted_windows_gate=GATE,
+            _adopted_windows_infrastructure=dict(world.infrastructure),
+            _windows_process_created=_windows_process_created,
             _live_windows_jobs=[SimpleNamespace(job_handle=h) for h in world.held],
             _windows_modules=world.modules,
             time=world,
@@ -361,7 +387,8 @@ class Case:
             opened_spared=tuple(
                 pid
                 for pid in world.asked_to_open
-                if pid in (0, os.getpid(), GATE) or pid in world.spared
+                if pid in (0, os.getpid())
+                or (pid in world.spared and pid not in world.infrastructure)
             ),
             calls=world.calls,
             witnessed=tuple(sorted(set(witnessed), key=str)),
@@ -534,7 +561,8 @@ CASES: tuple[Case, ...] = (
     ),
     Case(
         "exclusions",
-        "the owner, its gate and the idle id are never opened",
+        "the owner and the idle id are never opened; the gate is opened and "
+        "spared when its creation time is still the one recorded at adoption",
         lambda: World(spared=(0, os.getpid(), GATE)),
         _both(Expect(True, iterations=1)),
     ),

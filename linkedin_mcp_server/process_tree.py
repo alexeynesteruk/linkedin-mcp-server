@@ -23,13 +23,19 @@ logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = os.name == "nt"
 _adopted_windows_job: int | None = None
-#: The gate that launched this owner, which is a member of the same Job and must
-#: survive every drain below. It spawns the owner and waits, so it is the process
-#: the frontend reads an exit status from, and a drain that ends it replaces that
-#: status with the termination code. Recorded while it is provably the parent and
-#: provably alive, which is what makes the id safe to hold: Windows cannot reuse
-#: it while the gate is still waiting on this process.
-_adopted_windows_gate: int | None = None
+#: Every process the adopted Job held when this owner adopted it, by id and
+#: creation time, all of which must survive every drain below. A frontend
+#: assigns the Job before the owner exists, so the gate that spawns this owner
+#: and waits on it is a member, and so is what Windows started on the way: a
+#: venv launcher in front of each interpreter, which runs the real one as its
+#: child, and the gate's console host. Ending the gate costs the frontend this
+#: owner's exit status, and each time a drain ended this chain on Windows CI the
+#: owner's next browser start failed. Not the parent alone: under a venv that
+#: is the owner's own launcher, and the gate above it went. Nothing in the Job
+#: is a browser's yet when this is recorded (see
+#: ``WindowsJob.adopt_current_process``), and the creation time keeps an id
+#: reused after one of these exited from being spared in its place.
+_adopted_windows_infrastructure: dict[int, Any] = {}
 _retained_windows_jobs: list[WindowsJob] = []
 _BROWSER_PROCESS_MARKER = "LINKEDIN_MCP_BROWSER_PROCESS_MARKER"
 
@@ -61,6 +67,10 @@ _POSIX_PROCESS_SNAPSHOT_SECONDS = 1.0
 #: enough for a wedged Chromium to answer SIGKILL, short enough that a close
 #: which cannot prove it still returns and lets the caller keep the profile.
 _MARKER_DRAIN_SECONDS = 10.0
+#: Environment scans need more headroom than ancestry snapshots; see
+#: ``docs/daemon-measurements.md``, Process scans. The per-scan allowance must
+#: still yield to the remaining drain budget, including group-wait polls.
+_MARKER_SCAN_SECONDS = _MARKER_DRAIN_SECONDS / 2
 #: The kernel's own word for "this process has exited and only its unreaped
 #: table entry is left". Nothing else in a process row says it: PID, PGID and
 #: the start timestamp all survive the exit unchanged, which is exactly why the
@@ -237,7 +247,7 @@ def _linux_process_rows() -> dict[int, _ProcessRow]:
     return rows
 
 
-def _ps_process_rows() -> dict[int, _ProcessRow]:
+def _ps_process_rows(deadline: float | None = None) -> dict[int, _ProcessRow]:
     """Read process ancestry on POSIX systems without procfs."""
     ps = next(
         (
@@ -249,13 +259,18 @@ def _ps_process_rows() -> dict[int, _ProcessRow]:
     )
     if ps is None:
         return {}
+    timeout = _POSIX_PROCESS_SNAPSHOT_SECONDS
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            return {}
     try:
         snapshot = subprocess.run(
             [ps, "-A", "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "state="],
             check=True,
             capture_output=True,
             text=True,
-            timeout=_POSIX_PROCESS_SNAPSHOT_SECONDS,
+            timeout=timeout,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return {}
@@ -279,11 +294,11 @@ def _ps_process_rows() -> dict[int, _ProcessRow]:
     return rows
 
 
-def _posix_process_rows() -> dict[int, _ProcessRow]:
+def _posix_process_rows(deadline: float | None = None) -> dict[int, _ProcessRow]:
     return (
         _linux_process_rows()
         if sys.platform.startswith("linux")
-        else _ps_process_rows()
+        else _ps_process_rows(deadline)
     )
 
 
@@ -328,8 +343,15 @@ class _MarkerScan(NamedTuple):
     conclusive: bool
 
 
-def _scan_marked_posix_processes(marker: str) -> _MarkerScan:
-    """Scan for processes carrying this browser launch's private environment marker."""
+def _scan_marked_posix_processes(
+    marker: str, deadline: float | None = None
+) -> _MarkerScan:
+    """Scan for processes carrying this browser launch's private environment marker.
+
+    A drain passes its *deadline*, and outside Linux the ``ps`` then gets no
+    longer than the drain has left. A scan with nothing left does not start and
+    answers inconclusive, which is what a ``ps`` given no time would answer.
+    """
     expected = f"{_BROWSER_PROCESS_MARKER}={marker}".encode()
     if sys.platform.startswith("linux"):
         found: list[int] = []
@@ -362,12 +384,17 @@ def _scan_marked_posix_processes(marker: str) -> _MarkerScan:
             "identified by their launch marker on this platform."
         )
         return _MarkerScan((), False)
+    timeout = _MARKER_SCAN_SECONDS
+    if deadline is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            return _MarkerScan((), False)
     try:
         snapshot = subprocess.run(
             [ps, "eww", "-A", "-o", "pid=", "-o", "command="],
             check=True,
             capture_output=True,
-            timeout=_POSIX_PROCESS_SNAPSHOT_SECONDS,
+            timeout=timeout,
         ).stdout
     except (OSError, subprocess.SubprocessError) as exc:
         logger.debug(
@@ -496,12 +523,13 @@ def forget_browser_process_marker(marker: str) -> None:
 def _refresh_marked_process_groups(
     rows: dict[int, _ProcessRow],
     markers: tuple[str, ...] | None = None,
+    deadline: float | None = None,
 ) -> None:
     """Add every currently marked browser group to the group registry.
 
     *markers* narrows the scan to one launch. Without it every marker known so
     far is scanned; a single browser's close passes its own, so it cannot adopt
-    a sibling launch's group on the way past.
+    a sibling launch's group on the way past. *deadline* bounds each scan.
     """
     owner_group = os.getpgrp()
     grouped: dict[int, dict[int, str]] = {}
@@ -512,7 +540,7 @@ def _refresh_marked_process_groups(
         # group, which costs nothing here: the registrations already filed keep
         # being checked against the process rows, and the proof that ends a
         # drain is taken from its own scan rather than from this registry.
-        for process in _scan_marked_posix_processes(marker).processes:
+        for process in _scan_marked_posix_processes(marker, deadline).processes:
             row = rows.get(process)
             if row is not None:
                 group = row[1]
@@ -619,10 +647,10 @@ def _wait_for_process_groups(
                 with contextlib.suppress(ChildProcessError, OSError):
                     os.waitpid(process, os.WNOHANG)
         try:
-            rows = _posix_process_rows()
+            rows = _posix_process_rows(deadline)
         except OSError:
             rows = {}
-        _refresh_marked_process_groups(rows, markers)
+        _refresh_marked_process_groups(rows, markers, deadline)
         remaining = {
             group
             for group in remaining
@@ -632,13 +660,18 @@ def _wait_for_process_groups(
             )
         }
         if remaining:
-            if deadline is not None and time.monotonic() >= deadline:
-                return False
-            time.sleep(_JOB_POLL_SECONDS)
+            pause = _JOB_POLL_SECONDS
+            if deadline is not None:
+                pause = min(pause, deadline - time.monotonic())
+                if pause <= 0:
+                    return False
+            time.sleep(pause)
     return True
 
 
-def _kill_marked_process_groups(marker: str) -> tuple[int, ...]:
+def _kill_marked_process_groups(
+    marker: str, deadline: float | None = None
+) -> tuple[int, ...]:
     """Kill the groups this one launch marker is known to account for.
 
     Narrow in two ways, because this runs while the owner keeps living. Only
@@ -648,10 +681,10 @@ def _kill_marked_process_groups(marker: str) -> tuple[int, ...]:
     registered.
     """
     try:
-        rows = _posix_process_rows()
+        rows = _posix_process_rows(deadline)
     except OSError:
         rows = {}
-    _refresh_marked_process_groups(rows, (marker,))
+    _refresh_marked_process_groups(rows, (marker,), deadline)
 
     owner_group = os.getpgrp()
     targeted: list[int] = []
@@ -675,7 +708,7 @@ def _drain_marked_posix_groups(marker: str, deadline: float) -> bool:
     an unproven drain rather than a clean one.
     """
     while True:
-        groups = _kill_marked_process_groups(marker)
+        groups = _kill_marked_process_groups(marker, deadline)
         if groups and not _wait_for_process_groups(
             groups, markers=(marker,), deadline=deadline
         ):
@@ -684,32 +717,46 @@ def _drain_marked_posix_groups(marker: str, deadline: float) -> bool:
         # process sharing the owner's own group. This is the proof rather than
         # the action: the drain is complete only once nothing carries the
         # marker, whichever group it sat in.
-        scan = _scan_marked_posix_processes(marker)
+        scan = _scan_marked_posix_processes(marker, deadline)
         if scan.conclusive and not scan.processes:
             return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        # Capped, and checked again after, so a pause that uses up the budget
+        # ends the drain on the scan that answered rather than on a round
+        # with no time left to scan at all.
+        time.sleep(min(_JOB_POLL_SECONDS, remaining))
         if time.monotonic() >= deadline:
-            if not scan.conclusive:
-                logger.error(
-                    "The browser launch marker could not be scanned for, so "
-                    "this shutdown stays unproven rather than assumed clean."
-                )
-            return False
-        time.sleep(_JOB_POLL_SECONDS)
+            break
+    if not scan.conclusive:
+        logger.error(
+            "The browser launch marker could not be scanned for, so "
+            "this shutdown stays unproven rather than assumed clean."
+        )
+    return False
 
 
 def _drain_exclusions() -> frozenset[int]:
-    """Process ids no adopted-Job drain may end.
+    """Process ids no adopted-Job drain may open, let alone end.
 
-    This owner, which has to survive its own browser, and the gate that launched
-    it, which is in the same Job because that is how a frontend assigns the Job
-    before the owner exists. The gate then waits and mirrors the owner's exit
-    status, so ending it costs the frontend that status and says nothing about
-    the browser the drain was aimed at.
+    The idle id and this owner, which has to survive its own browser. The rest
+    of the owner's infrastructure is not here: an id alone does not say it is
+    still the same process, so the drain opens it and compares its creation
+    time against ``_adopted_windows_infrastructure`` instead.
     """
-    spared = {0, os.getpid()}
-    if _adopted_windows_gate is not None:
-        spared.add(_adopted_windows_gate)
-    return frozenset(spared)
+    return frozenset({0, os.getpid()})
+
+
+def _windows_process_created(handle: Any) -> Any:
+    """When the process behind *handle* was created, from ``GetProcessTimes``.
+
+    pywin32 converts the FILETIME through a SYSTEMTIME, so this is to the
+    millisecond. That still tells two holders of one id apart: the second can
+    only start once the first has exited.
+    """
+    win32process = importlib.import_module("win32process")
+    return win32process.GetProcessTimes(handle)["CreationTime"]
 
 
 def _patchright_driver_process(playwright: Any) -> Any:
@@ -869,6 +916,10 @@ def _drain_adopted_windows_job_members(deadline: float) -> bool:
                 if not win32job.IsProcessInJob(handle, _adopted_windows_job):
                     # The id left the Job between the query and here, so it
                     # names somebody else's process now.
+                    continue
+                created = _adopted_windows_infrastructure.get(process)
+                if created is not None and _windows_process_created(handle) == created:
+                    # In the Job before any browser was, and still that process.
                     continue
                 elsewhere = _in_another_owned_job(win32job, handle)
                 if elsewhere:
@@ -1213,11 +1264,20 @@ class WindowsJob:
 
     @staticmethod
     def adopt_current_process(name: str) -> None:
-        """Retain a verified named Job handle until process teardown."""
-        global _adopted_windows_job, _adopted_windows_gate
+        """Retain a verified named Job handle until process teardown.
+
+        Also records what the Job holds right now as this owner's
+        infrastructure, which every drain spares. That is sound only because no
+        browser exists yet: the owner adopts before it commits its descriptor,
+        a browser starts only for a tool call made with the token that
+        descriptor publishes, and an owner's lifespan starts no installer
+        (``browser_lifespan``). A member that cannot be recorded fails the
+        adoption, since a drain would otherwise end it.
+        """
+        global _adopted_windows_job, _adopted_windows_infrastructure
         if _adopted_windows_job is not None:
             raise ProcessTreeError("The owner already adopted a Windows Job")
-        win32api, _win32con, win32job, _winerror = _windows_modules()
+        win32api, win32con, win32job, _winerror = _windows_modules()
         handle: Any | None = None
         try:
             handle = win32job.OpenJobObject(win32job.JOB_OBJECT_QUERY, False, name)
@@ -1225,8 +1285,23 @@ class WindowsJob:
                 raise ProcessTreeError(
                     "The owner is not a member of its named Windows Job"
                 )
+            infrastructure: dict[int, Any] = {}
+            for entry in win32job.QueryInformationJobObject(
+                handle, win32job.JobObjectBasicProcessIdList
+            ):
+                if entry is None:
+                    raise ProcessTreeError("Windows listed the owner Job in part")
+                member = win32api.OpenProcess(
+                    win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, int(entry)
+                )
+                try:
+                    infrastructure[int(entry)] = _windows_process_created(member)
+                finally:
+                    member.Close()
+            if os.getpid() not in infrastructure:
+                raise ProcessTreeError("Windows listed the owner Job without the owner")
             _adopted_windows_job = int(handle.Detach())
-            _adopted_windows_gate = os.getppid()
+            _adopted_windows_infrastructure = infrastructure
             handle = None
         except ProcessTreeError:
             raise
@@ -1446,7 +1521,12 @@ def _reap_and_wait_for_group(
             except ProcessLookupError:
                 pass
         if time.monotonic() >= deadline:
-            return False
+            # A slow snapshot under load can spend the rest of the budget after
+            # the group already ended, so the clock alone is no verdict: one
+            # last look at whether the group still exists decides. Only its
+            # absence counts here; a snapshot of zombies may have missed a
+            # member it could not read.
+            return not process_group_exists(pgid)
         time.sleep(0.01)
     return True
 
@@ -1485,6 +1565,7 @@ def terminate_process_group(
         raise ProcessTreeError("POSIX child identity cannot be observed safely")
 
     deadline = time.monotonic() + max(timeout, 0.0)
+    signalled = False
     while True:
         try:
             os.killpg(pgid, signal.SIGKILL)
@@ -1494,9 +1575,22 @@ def terminate_process_group(
         except PermissionError as exc:
             if child_exited_without_reaping(child):
                 return _reap_and_wait_for_group(pgid, child, deadline, leader_identity)
-            logger.warning("The process group %s could not be signalled: %s", pgid, exc)
-            return False
+            if not signalled:
+                logger.warning(
+                    "The process group %s could not be signalled: %s", pgid, exc
+                )
+                return False
+            # Darwin's killpg answers EPERM once only exiting or zombie members
+            # remain, and waitid can report the leader's exit a little later.
+            # An earlier kill already reached the leader, so this waits for that
+            # exit rather than report a group nobody can signal, which turned a
+            # finished install into 70.
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+            continue
 
+        signalled = True
         if child_exited_without_reaping(child):
             try:
                 os.killpg(pgid, signal.SIGKILL)

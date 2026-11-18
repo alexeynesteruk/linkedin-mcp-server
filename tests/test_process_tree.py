@@ -330,6 +330,7 @@ class TestWindowsJobSetup:
         handle: _JobHandle,
         *,
         active: Iterator[object] | None = None,
+        members: tuple[int | None, ...] = (909, 4242),
     ) -> dict[str, object]:
         accounting = active or iter([0])
 
@@ -346,15 +347,30 @@ class TestWindowsJobSetup:
             def GetLastError() -> int:
                 return 0
 
+            @staticmethod
+            def OpenProcess(access: int, _inherit: bool, process: int) -> _JobHandle:
+                opened = _JobHandle(process)
+                events.append(("open-process", (access, opened)))
+                return opened
+
         class _Win32Con:
             HANDLE_FLAG_INHERIT = 1
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
         class _WinError:
             ERROR_ALREADY_EXISTS = 183
 
+        class _Win32Process:
+            @staticmethod
+            def GetProcessTimes(process: _JobHandle) -> dict[str, Any]:
+                # A time of its own per id, so a record pairing an id with
+                # another member's creation time would show.
+                return {"CreationTime": f"created-{process.value}"}
+
         class _Win32Job:
             JobObjectExtendedLimitInformation = 1
             JobObjectBasicAccountingInformation = 2
+            JobObjectBasicProcessIdList = 3
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 4
             JOB_OBJECT_QUERY = 8
 
@@ -369,11 +385,12 @@ class TestWindowsJobSetup:
                 return handle
 
             @staticmethod
-            def QueryInformationJobObject(
-                _handle: object, info_class: int
-            ) -> dict[str, Any]:
+            def QueryInformationJobObject(_handle: object, info_class: int) -> Any:
                 if info_class == _Win32Job.JobObjectExtendedLimitInformation:
                     return {"BasicLimitInformation": {"LimitFlags": 16}}
+                if info_class == _Win32Job.JobObjectBasicProcessIdList:
+                    events.append(("members", _handle))
+                    return members
                 events.append(("accounting", (_handle, info_class)))
                 value = next(accounting)
                 if isinstance(value, BaseException):
@@ -402,6 +419,7 @@ class TestWindowsJobSetup:
             "win32con": _Win32Con,
             "win32job": _Win32Job,
             "winerror": _WinError,
+            "win32process": _Win32Process,
         }
 
     def _patch_modules(
@@ -409,12 +427,10 @@ class TestWindowsJobSetup:
         monkeypatch: pytest.MonkeyPatch,
         modules: dict[str, object],
     ) -> None:
-        # getppid alongside name: adoption records the gate it was launched
-        # by, and a namespace without it reports the whole adoption as failed.
+        # getpid alongside name: adoption refuses a member list without this
+        # owner in it, and a namespace without getpid fails the adoption.
         monkeypatch.setattr(
-            process_tree,
-            "os",
-            SimpleNamespace(name="nt", getpid=lambda: 4242, getppid=lambda: 909),
+            process_tree, "os", SimpleNamespace(name="nt", getpid=lambda: 4242)
         )
         monkeypatch.setattr(
             process_tree.importlib, "import_module", modules.__getitem__
@@ -507,7 +523,7 @@ class TestWindowsJobSetup:
         job_api = cast(Any, modules["win32job"])
         monkeypatch.setattr(job_api, "OpenJobObject", lambda *_args: next(handles))
         monkeypatch.setattr(process_tree, "_adopted_windows_job", None)
-        monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
+        monkeypatch.setattr(process_tree, "_adopted_windows_infrastructure", {})
         self._patch_modules(monkeypatch, modules)
 
         process_tree.WindowsJob.verify_current_process("named-owner")
@@ -518,9 +534,59 @@ class TestWindowsJobSetup:
         assert adopted.detached
         assert not adopted.closed
         assert process_tree._adopted_windows_job == 2
-        assert process_tree._adopted_windows_gate == 909, (
-            "the gate that waits on this owner was recorded while it was alive"
-        )
+        assert ("members", adopted) in events, "listed through the adopted handle"
+        assert process_tree._adopted_windows_infrastructure == {
+            909: "created-909",
+            4242: "created-4242",
+        }, "every member then, each with its own creation time"
+        members = [event[1] for event in events if event[0] == "open-process"]
+        assert [access for access, _ in members] == [0x1000, 0x1000]
+        assert all(member.closed for _, member in members)
+
+    @pytest.mark.parametrize(
+        ("members", "failure", "message"),
+        [
+            pytest.param((909, None, 4242), None, "in part", id="unnamed-member"),
+            pytest.param((909,), None, "without the owner", id="owner-missing"),
+            pytest.param((909, 4242), OSError(5), "could not adopt", id="unreadable"),
+        ],
+    )
+    def test_an_owner_job_member_that_cannot_be_recorded_fails_adoption(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        members: tuple[int | None, ...],
+        failure: BaseException | None,
+        message: str,
+    ):
+        """A drain ends any member the adoption did not record.
+
+        So adopting with a member missing from the record is the defect this
+        record exists to prevent, and the adoption fails instead.
+        """
+        events: list[tuple[str, Any]] = []
+        handle = _JobHandle()
+        modules = self._modules(events, handle, members=members)
+        if failure is not None:
+
+            def unreadable(_process: _JobHandle) -> dict[str, Any]:
+                raise failure
+
+            monkeypatch.setattr(
+                cast(Any, modules["win32process"]), "GetProcessTimes", unreadable
+            )
+        monkeypatch.setattr(process_tree, "_adopted_windows_job", None)
+        monkeypatch.setattr(process_tree, "_adopted_windows_infrastructure", {})
+        self._patch_modules(monkeypatch, modules)
+
+        with pytest.raises(process_tree.ProcessTreeError, match=message):
+            process_tree.WindowsJob.adopt_current_process("named-owner")
+
+        assert handle.closed
+        assert not handle.detached
+        assert process_tree._adopted_windows_job is None
+        assert process_tree._adopted_windows_infrastructure == {}
+        opened = [event[1][1] for event in events if event[0] == "open-process"]
+        assert all(member.closed for member in opened)
 
     def test_failed_owner_adoption_closes_the_named_handle(
         self, monkeypatch: pytest.MonkeyPatch
@@ -975,6 +1041,112 @@ class TestPosixProcessGroups:
 
         assert process_tree.process_group_has_live_member(12345)
 
+    @staticmethod
+    def _settle_past_deadline(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        exists: Iterator[bool],
+        live: Iterator[bool],
+    ) -> tuple[bool, list[int], int, float]:
+        """Run one group settlement whose first run-state poll outlasts the budget.
+
+        The clock is the module's own, so the poll's two seconds are the whole
+        delay and the deadline passes during it and nowhere else. Returns the
+        verdict, every signal sent, how many run-state polls ran and the clock
+        at the end, so neither a verdict bought with another group kill nor
+        one bought by waiting past the deadline passes unseen.
+        """
+        clock = SimpleNamespace(now=0.0)
+        signals: list[int] = []
+        polls: list[float] = []
+        observations = iter([None, object()])
+
+        def slow_poll(pgid: int) -> bool:
+            polls.append(clock.now)
+            clock.now += 2.0
+            return next(live)
+
+        monkeypatch.setattr(
+            process_tree,
+            "time",
+            SimpleNamespace(
+                monotonic=lambda: clock.now,
+                sleep=lambda seconds: setattr(clock, "now", clock.now + seconds),
+            ),
+        )
+        monkeypatch.setattr(
+            process_tree.os,
+            "waitid",
+            lambda *a, **k: next(observations),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            process_tree.os, "killpg", lambda pgid, sent: signals.append(sent)
+        )
+        monkeypatch.setattr(
+            process_tree, "process_group_exists", lambda pgid: next(exists)
+        )
+        monkeypatch.setattr(process_tree, "process_group_has_live_member", slow_poll)
+        monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda pid: None)
+
+        class _Child:
+            pid = 12345
+            returncode: int | None = None
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        settled = process_tree.terminate_process_group(
+            12345, timeout=1.0, child=cast(Any, _Child())
+        )
+        return settled, signals, len(polls), clock.now
+
+    @_POSIX_ONLY
+    def test_a_group_that_ended_during_a_slow_snapshot_is_settled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The flake under load: the budget ran out, the group did not outlive it.
+
+        The run-state poll answers from a snapshot taken while the group was
+        still there and returns after the deadline. The group is gone by then,
+        and reporting it as undrained turns a finished browser install into a
+        failed one. The verdict comes from one last look, not from waiting on.
+        """
+        settled, signals, polls, ended = self._settle_past_deadline(
+            monkeypatch, exists=iter([True, False]), live=iter([True])
+        )
+
+        assert settled
+        assert signals == [signal.SIGKILL, signal.SIGKILL]
+        assert (polls, ended) == (1, 2.0), "the deadline was waited past"
+
+    @_POSIX_ONLY
+    def test_a_group_still_live_at_the_deadline_is_not_settled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        settled, signals, polls, ended = self._settle_past_deadline(
+            monkeypatch, exists=repeat(True), live=repeat(True)
+        )
+
+        assert not settled
+        assert signals == [signal.SIGKILL, signal.SIGKILL]
+        assert (polls, ended) == (1, 2.0), "the deadline was waited past"
+
+    @_POSIX_ONLY
+    def test_a_group_that_still_exists_at_the_deadline_is_not_settled_by_zombies(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Past the deadline a snapshot showing only zombies is not trusted: a
+        member it could not read may still run. Only the group's absence is."""
+        settled, signals, polls, ended = self._settle_past_deadline(
+            monkeypatch, exists=repeat(True), live=iter([True, False])
+        )
+
+        assert not settled
+        assert signals == [signal.SIGKILL, signal.SIGKILL]
+        assert (polls, ended) == (1, 2.0), "the deadline was waited past"
+
     @_LINUX_ONLY
     def test_a_zombie_only_group_settles_under_a_reaper_that_never_waits(
         self, tmp_path: Path
@@ -1036,6 +1208,100 @@ class TestPosixProcessGroups:
             12345, timeout=1.0, child=cast(Any, _Child())
         )
         assert signals == [signal.SIGKILL, signal.SIGKILL]
+
+    @_POSIX_ONLY
+    def test_eperm_before_the_killed_leader_is_waitable_is_waited_out(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The loaded-macOS shape: the kill landed, waitid has not caught up."""
+        observations = iter([None, None, None, object()])
+        signals: list[int] = []
+        monkeypatch.setattr(
+            process_tree.os,
+            "waitid",
+            lambda *a, **k: next(observations),
+            raising=False,
+        )
+
+        def signal_group(pgid: int, sent: int) -> None:
+            signals.append(sent)
+            if len(signals) > 1:
+                raise PermissionError("only an exiting leader is left")
+
+        monkeypatch.setattr(process_tree.os, "killpg", signal_group)
+        monkeypatch.setattr(process_tree, "process_group_exists", lambda pgid: False)
+        monkeypatch.setattr(process_tree.time, "sleep", lambda seconds: None)
+
+        class _Child:
+            pid = 12345
+            returncode: int | None = None
+
+            def wait(self, timeout: float | None = None) -> int:
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        child = _Child()
+        assert process_tree.terminate_process_group(
+            12345, timeout=1.0, child=cast(Any, child)
+        )
+        assert child.returncode == -signal.SIGKILL
+
+    @_POSIX_ONLY
+    def test_eperm_after_the_kill_still_gives_up_at_the_deadline(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A leader that never becomes waitable cannot hold cleanup forever."""
+        clock = [0.0]
+        signals: list[int] = []
+        monkeypatch.setattr(
+            process_tree.os, "waitid", lambda *a, **k: None, raising=False
+        )
+
+        def signal_group(pgid: int, sent: int) -> None:
+            signals.append(sent)
+            if len(signals) > 1:
+                raise PermissionError("only an exiting leader is left")
+
+        def advance(seconds: float) -> None:
+            clock[0] += seconds
+            assert clock[0] < 60.0, "cleanup kept waiting past its deadline"
+
+        monkeypatch.setattr(process_tree.os, "killpg", signal_group)
+        monkeypatch.setattr(process_tree.time, "monotonic", lambda: clock[0])
+        monkeypatch.setattr(process_tree.time, "sleep", advance)
+
+        class _Child:
+            pid = 12345
+            returncode: int | None = None
+
+        assert not process_tree.terminate_process_group(
+            12345, timeout=1.0, child=cast(Any, _Child())
+        )
+        assert 1.0 <= clock[0] < 2.0
+
+    @_POSIX_ONLY
+    def test_a_group_never_signalled_fails_without_waiting_out_the_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """EPERM on the first kill means no SIGKILL reached the leader."""
+        monkeypatch.setattr(
+            process_tree.os, "waitid", lambda *a, **k: None, raising=False
+        )
+
+        def refuse(pgid: int, sent: int) -> None:
+            raise PermissionError("not ours to signal")
+
+        monkeypatch.setattr(process_tree.os, "killpg", refuse)
+
+        class _Child:
+            pid = 12345
+            returncode: int | None = None
+
+        started = time.monotonic()
+        assert not process_tree.terminate_process_group(
+            12345, timeout=5.0, child=cast(Any, _Child())
+        )
+        assert time.monotonic() - started < 1.0
 
     @_POSIX_ONLY
     def test_a_reaped_leader_never_authorizes_a_numeric_group_kill(
@@ -1246,12 +1512,15 @@ def test_marked_group_kill_revalidates_kernel_identity(
     monkeypatch.setattr(
         process_tree,
         "_posix_process_rows",
-        lambda: {457: (1, 456, "same-member", "S"), 790: (1, 789, None, "S")},
+        lambda _deadline=None: {
+            457: (1, 456, "same-member", "S"),
+            790: (1, 789, None, "S"),
+        },
     )
     monkeypatch.setattr(
         process_tree,
         "_scan_marked_posix_processes",
-        lambda _marker: process_tree._MarkerScan((), True),
+        lambda _marker, _deadline=None: process_tree._MarkerScan((), True),
     )
     monkeypatch.setattr(process_tree, "process_group_exists", lambda group: True)
     monkeypatch.setattr(os, "getpgrp", lambda: 100)
@@ -1315,12 +1584,12 @@ def test_marked_kill_rescans_for_later_browser_groups(
     monkeypatch.setattr(
         process_tree,
         "_scan_marked_posix_processes",
-        lambda marker: process_tree._MarkerScan((900,), True),
+        lambda _marker, _deadline=None: process_tree._MarkerScan((900,), True),
     )
     monkeypatch.setattr(
         process_tree,
         "_posix_process_rows",
-        lambda: {900: (1, 789, "late-member", "S")},
+        lambda _deadline=None: {900: (1, 789, "late-member", "S")},
     )
     monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda process: None)
     monkeypatch.setattr(process_tree, "process_group_exists", lambda group: True)
@@ -1361,7 +1630,7 @@ def test_group_wait_polls_until_targeted_groups_disappear(
     monkeypatch.setattr(
         process_tree,
         "_posix_process_rows",
-        lambda: {457: (1, 456, "member-start", "S")},
+        lambda _deadline=None: {457: (1, 456, "member-start", "S")},
     )
     monkeypatch.setattr(
         process_tree, "process_group_exists", lambda group: next(checks)
@@ -1395,7 +1664,9 @@ def test_group_wait_stops_when_a_group_identity_is_reused(
             )
         },
     )
-    monkeypatch.setattr(process_tree, "_posix_process_rows", lambda: next(snapshots))
+    monkeypatch.setattr(
+        process_tree, "_posix_process_rows", lambda _deadline=None: next(snapshots)
+    )
     monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
     monkeypatch.setattr(process_tree.time, "sleep", slept.append)
 
@@ -1482,7 +1753,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: process_tree._MarkerScan((), True),
+            lambda _m, _deadline=None: process_tree._MarkerScan((), True),
         )
         monkeypatch.setattr(process_tree, "_kernel_start_identity", lambda _p: None)
         monkeypatch.setattr(os, "getpgrp", lambda: 100)
@@ -1512,7 +1783,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_posix_process_rows",
-            lambda: {
+            lambda _deadline=None: {
                 457: (1, 456, "browser-member", "S"),
                 790: (1, 789, "installer-member", "S"),
             },
@@ -1545,7 +1816,9 @@ class TestOneLaunchesResidualBrowser:
             },
         )
         monkeypatch.setattr(
-            process_tree, "_posix_process_rows", lambda: {101: (1, 100, "member", "S")}
+            process_tree,
+            "_posix_process_rows",
+            lambda _deadline=None: {101: (1, 100, "member", "S")},
         )
         monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
         monkeypatch.setattr(os, "killpg", lambda group, _sig: killed.append(group))
@@ -1571,7 +1844,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_posix_process_rows",
-            lambda: {457: (1, 456, "browser-member", "S")},
+            lambda _deadline=None: {457: (1, 456, "browser-member", "S")},
         )
         monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
         monkeypatch.setattr(os, "killpg", lambda group, _sig: killed.append(group))
@@ -1590,12 +1863,12 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: process_tree._MarkerScan((900,), True),
+            lambda _m, _deadline=None: process_tree._MarkerScan((900,), True),
         )
         monkeypatch.setattr(
             process_tree,
             "_posix_process_rows",
-            lambda: {900: (1, 100, "owner-group", "S")},
+            lambda _deadline=None: {900: (1, 100, "owner-group", "S")},
         )
         monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
 
@@ -1610,7 +1883,9 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: pytest.fail("scanned for a marker no browser was given"),
+            lambda _m, _deadline=None: pytest.fail(
+                "scanned for a marker no browser was given"
+            ),
         )
 
         assert process_tree.drain_browser_process_marker("browser") is True
@@ -1628,7 +1903,7 @@ class TestOneLaunchesResidualBrowser:
         monkeypatch.setattr(
             process_tree,
             "_scan_marked_posix_processes",
-            lambda _m: process_tree._MarkerScan((), False),
+            lambda _m, _deadline=None: process_tree._MarkerScan((), False),
         )
         monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
 
@@ -1732,6 +2007,100 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
             process_tree._MarkerScan((902,), True)
         )
 
+    def test_a_ps_slowed_by_load_still_answers(self, monkeypatch: pytest.MonkeyPatch):
+        """A slow ``ps`` is still a working one, and its answer is still proof."""
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: True)
+        answers_after = 3.0
+        rows = b"  902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=marker\n"
+
+        def run(*_args: Any, timeout: float, **_kwargs: Any) -> Any:
+            if timeout < answers_after:
+                raise subprocess.TimeoutExpired(cmd="ps", timeout=timeout)
+            return SimpleNamespace(stdout=rows)
+
+        monkeypatch.setattr(process_tree.subprocess, "run", run)
+
+        assert process_tree._scan_marked_posix_processes("marker") == (
+            process_tree._MarkerScan((902,), True)
+        )
+
+    @pytest.mark.parametrize(
+        ("group", "ancestry_delays", "marker_delays", "proved", "unscanned"),
+        [
+            pytest.param(None, (0.1,), (3.0, 6.0), False, True, id="marker-proof"),
+            pytest.param(456, (0.1,), (3.0, 6.0), False, False, id="marker-wait"),
+            pytest.param(100, (0.01, 1.0), (4.95,), False, True, id="ancestry-kill"),
+            pytest.param(
+                456, (0.01, 0.01, 1.0), (4.95,), False, False, id="ancestry-wait"
+            ),
+            pytest.param(100, (0.005, 1.0), (4.995,), False, False, id="pause-proof"),
+            pytest.param(
+                456, (0.005, 0.0, 1.0), (4.995,), False, False, id="pause-wait"
+            ),
+            pytest.param(None, (0.1,), (3.0,), True, False, id="slow-but-conclusive"),
+        ],
+    )
+    def test_slow_scans_do_not_stretch_the_drain_past_its_budget(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        group: int | None,
+        ancestry_delays: tuple[float, ...],
+        marker_delays: tuple[float, ...],
+        proved: bool,
+        unscanned: bool,
+    ):
+        self._bsd(monkeypatch)
+        monkeypatch.setattr(process_tree.Path, "is_file", lambda _self: True)
+        now = 0.0
+        ancestry = chain(ancestry_delays, repeat(ancestry_delays[-1]))
+        markers = chain(marker_delays, repeat(marker_delays[-1]))
+        rows = b"  902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=browser\n"
+        killed: list[int] = []
+
+        def run(args: list[str], *, timeout: float, **_kwargs: Any) -> Any:
+            nonlocal now
+            assert now < process_tree._MARKER_DRAIN_SECONDS, (
+                "A drain must not start another ps after its deadline"
+            )
+            marked = "eww" in args
+            need = next(markers if marked else ancestry)
+            if need > timeout:
+                now += timeout
+                raise subprocess.TimeoutExpired(cmd="ps", timeout=timeout)
+            now += need
+            if marked:
+                return SimpleNamespace(stdout=rows if group is not None else b"")
+            return SimpleNamespace(stdout=f"902 1 {group} S\n" if group else "")
+
+        def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        monkeypatch.setattr(process_tree.subprocess, "run", run)
+        monkeypatch.setattr(
+            process_tree, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep)
+        )
+        monkeypatch.setattr(process_tree, "_registered_browser_markers", {"browser"})
+        monkeypatch.setattr(process_tree, "_registered_posix_groups", {})
+        monkeypatch.setattr(process_tree, "process_group_exists", lambda _group: True)
+        monkeypatch.setattr(
+            process_tree, "_kernel_start_identity", lambda _p: "browser-member"
+        )
+        monkeypatch.setattr(os, "getpgrp", lambda: 100)
+        monkeypatch.setattr(os, "getpgid", lambda _pid: group)
+        monkeypatch.setattr(os, "killpg", lambda group, _sig: killed.append(group))
+        monkeypatch.setattr(os, "waitpid", lambda _pid, _options: (0, 0))
+
+        with caplog.at_level(logging.ERROR, logger=process_tree.__name__):
+            assert process_tree.drain_browser_process_marker("browser") is proved
+        assert now <= process_tree._MARKER_DRAIN_SECONDS + 1e-9, (
+            "Ancestry scans and polling must share the marker drain's deadline"
+        )
+        assert killed == ([456] if group == 456 else [])
+        assert ("could not be scanned" in caplog.text) is unscanned
+
     @pytest.mark.parametrize("mode", ["missing", "failing"])
     def test_an_unusable_ps_is_reported_once_rather_than_once_per_poll(
         self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, mode
@@ -1761,19 +2130,18 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
 
         monkeypatch.setattr(process_tree, "_registered_browser_markers", {"browser"})
         monkeypatch.setattr(process_tree, "_registered_posix_groups", {})
-        monkeypatch.setattr(process_tree, "_posix_process_rows", dict)
-        monkeypatch.setattr(os, "getpgrp", lambda: 100)
-        # A shim rather than a patch on the real module: ``process_tree.time``
-        # *is* ``time``, so replacing ``monotonic`` there hands a scripted clock
-        # to pytest and asyncio as well and the run never ends.
-        #
-        # One reading sets the deadline, then one per round decides whether to
-        # poll again. Three rounds of polling, then a clock past the deadline.
-        clock = chain([0.0] * 4, repeat(100.0))
         monkeypatch.setattr(
-            process_tree,
-            "time",
-            SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _seconds: None),
+            process_tree, "_posix_process_rows", lambda _deadline=None: {}
+        )
+        monkeypatch.setattr(os, "getpgrp", lambda: 100)
+        now = 0.0
+
+        def sleep(seconds: float) -> None:
+            nonlocal now
+            now += seconds
+
+        monkeypatch.setattr(
+            process_tree, "time", SimpleNamespace(monotonic=lambda: now, sleep=sleep)
         )
 
         # Counted around the real scan rather than around ``ps``, so a missing
@@ -1781,10 +2149,12 @@ class TestTheMarkerScanSeparatesEmptyFromUnanswerable:
         scans = 0
         real_scan = process_tree._scan_marked_posix_processes
 
-        def counting(marker: str) -> process_tree._MarkerScan:
+        def counting(
+            marker: str, deadline: float | None = None
+        ) -> process_tree._MarkerScan:
             nonlocal scans
             scans += 1
-            return real_scan(marker)
+            return real_scan(marker, deadline)
 
         monkeypatch.setattr(process_tree, "_scan_marked_posix_processes", counting)
 
@@ -2083,7 +2453,7 @@ def test_windows_marker_drain_ends_only_a_member_every_held_job_declined(
 
     monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
     monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
-    monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
+    monkeypatch.setattr(process_tree, "_adopted_windows_infrastructure", {})
     monkeypatch.setattr(
         process_tree,
         "_live_windows_jobs",
@@ -2187,18 +2557,17 @@ daemon_owner._exit_hard(None)
         text=True,
     )
     try:
-        for _ in range(500):
-            if marker.exists():
-                break
-            if process.poll() is not None:
+        deadline = time.monotonic() + 30.0
+        while not marker.exists():
+            if process.poll() is not None and not marker.exists():
                 stderr = process.stderr.read() if process.stderr is not None else ""
                 pytest.fail(
                     "the daemon exited before creating its descendant: "
                     f"stderr={stderr!r}"
                 )
+            if time.monotonic() >= deadline:
+                pytest.fail("the daemon did not create its descendant")
             time.sleep(0.01)
-        else:
-            pytest.fail("the daemon did not create its descendant")
 
         descendant_pid = int(marker.read_text())
         assert process.wait(timeout=30) == 1
@@ -2269,6 +2638,24 @@ def test_crash_guardian_requires_a_quiet_interval_after_an_empty_scan(
     process_guardian._drain({"marker"})
 
     assert killed == [456]
+
+
+def test_crash_guardian_scan_waits_for_a_ps_slowed_by_load(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A slow ``ps`` still answers, and the guardian has to wait for it."""
+    answers_after = 3.0
+    rows = b"  902   902 /chromium LINKEDIN_MCP_BROWSER_PROCESS_MARKER=marker\n"
+
+    def run(*_args: Any, timeout: float, **_kwargs: Any) -> Any:
+        if timeout < answers_after:
+            raise subprocess.TimeoutExpired(cmd="ps", timeout=timeout)
+        return SimpleNamespace(stdout=rows)
+
+    monkeypatch.setattr(process_guardian.Path, "is_file", lambda _self: True)
+    monkeypatch.setattr(process_guardian.subprocess, "run", run)
+
+    assert process_guardian._ps_groups({"marker"}) == {902}
 
 
 @_POSIX_ONLY
@@ -2495,68 +2882,102 @@ print(browser.pid, flush=True)
         assert _wait_gone(browser_pid)
 
 
-def test_adopted_windows_job_spares_the_gate_that_waits_on_it(
-    monkeypatch: pytest.MonkeyPatch,
+class _OwnerJobWindows:
+    """The Win32 an owner's adoption and its later drains both see."""
+
+    JOB_OBJECT_QUERY = 4
+    JobObjectBasicProcessIdList = 3
+    PROCESS_TERMINATE = 1
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+
+    def __init__(self, members: dict[int, float]) -> None:
+        self.members = dict(members)
+        self.terminated: list[int] = []
+
+    def OpenJobObject(self, _access: int, _inherit: bool, _name: str) -> _JobHandle:
+        return _JobHandle(123)
+
+    def GetCurrentProcess(self) -> int:
+        return -1
+
+    def IsProcessInJob(self, process: Any, _job: Any) -> bool:
+        return process == -1 or process.pid in self.members
+
+    def QueryInformationJobObject(self, _job: Any, information: int) -> tuple:
+        assert information == self.JobObjectBasicProcessIdList
+        return tuple(self.members)
+
+    def OpenProcess(self, _access: int, _inherit: bool, pid: int) -> Any:
+        return SimpleNamespace(pid=pid, created=self.members[pid], Close=lambda: None)
+
+    def GetProcessTimes(self, handle: Any) -> dict[str, float]:
+        return {"CreationTime": handle.created}
+
+    def TerminateProcess(self, handle: Any, _status: int) -> None:
+        self.terminated.append(handle.pid)
+        if self.members.get(handle.pid) == handle.created:
+            del self.members[handle.pid]
+
+
+_GATE_LAUNCHER, _GATE, _CONSOLE, _OWNER_LAUNCHER, _OWNER = 3972, 8768, 6228, 7292, 6648
+
+
+@pytest.mark.parametrize(
+    "joined",
+    [
+        pytest.param({700: 50.0}, id="escapee"),
+        pytest.param({_CONSOLE: 51.0}, id="reused-id"),
+    ],
+)
+def test_a_drain_after_adoption_ends_only_what_joined_the_owner_job_later(
+    monkeypatch: pytest.MonkeyPatch, joined: dict[int, float]
 ):
-    """The gate is in the same Job and relays this owner's exit status.
-
-    It spawns the owner and waits, so terminating it hands the frontend the
-    termination code instead of whatever the owner exited with, and it does
-    that while saying nothing about the browser the drain is aimed at.
-    """
-    current = os.getpid()
-    gate = current + 1
-    # A third answer so the mutation that drops the exclusion ends rather than
-    # spinning: it terminates the gate, sees it once more, and stops on the
-    # empty round, leaving the gate in what this asserts.
-    queries = iter([(current, gate, 700), (current, gate), (current,)])
-    terminated: list[int] = []
-
-    class ProcessHandle:
-        def __init__(self, process: int) -> None:
-            self.process = process
-
-        def Close(self) -> None:
-            return None
-
-    class Api:
-        @staticmethod
-        def OpenProcess(_access: int, _inherit: bool, process: int) -> ProcessHandle:
-            return ProcessHandle(process)
-
-        @staticmethod
-        def TerminateProcess(handle: ProcessHandle, _status: int) -> None:
-            terminated.append(handle.process)
-
-    class Con:
-        PROCESS_TERMINATE = 1
-        PROCESS_QUERY_LIMITED_INFORMATION = 2
-
-    class Job:
-        JobObjectBasicProcessIdList = 3
-
-        @staticmethod
-        def QueryInformationJobObject(_handle: int, _information: int):
-            return next(queries)
-
-        @staticmethod
-        def IsProcessInJob(_handle: ProcessHandle, _job: int) -> bool:
-            return True
-
-    monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
-    monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
-    monkeypatch.setattr(process_tree, "_adopted_windows_gate", gate)
-    monkeypatch.setattr(process_tree, "_live_windows_jobs", [])
-    monkeypatch.setattr(
-        process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
+    """Everything the owner's Job held at adoption outlives a browser close."""
+    windows = _OwnerJobWindows(
+        {
+            _GATE_LAUNCHER: 1.0,
+            _GATE: 2.0,
+            _CONSOLE: 3.0,
+            _OWNER_LAUNCHER: 4.0,
+            _OWNER: 5.0,
+        }
     )
+    modules = {
+        "win32api": windows,
+        "win32con": windows,
+        "win32job": windows,
+        "win32process": windows,
+        "winerror": SimpleNamespace(),
+    }
+    monkeypatch.setattr(
+        process_tree,
+        "os",
+        SimpleNamespace(
+            name="nt", getpid=lambda: _OWNER, getppid=lambda: _OWNER_LAUNCHER
+        ),
+    )
+    monkeypatch.setattr(process_tree.importlib, "import_module", modules.__getitem__)
+    monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
+    monkeypatch.setattr(process_tree, "_adopted_windows_job", None)
+    monkeypatch.setattr(process_tree, "_adopted_windows_infrastructure", {})
+    monkeypatch.setattr(process_tree, "_live_windows_jobs", [])
     monkeypatch.setattr(process_tree.time, "sleep", lambda _seconds: None)
 
-    process_tree.drain_browser_process_marker(
-        "browser", containment=_a_buried_browser_job()
+    process_tree.WindowsJob.adopt_current_process("named-owner")
+    windows.members.update(joined)
+    proved = process_tree.drain_browser_process_marker(
+        "browser", timeout=1.0, containment=_a_buried_browser_job()
     )
 
-    assert terminated == [700], "the browser went and the gate stayed"
+    assert windows.terminated == list(joined)
+    assert proved is True
+    assert set(windows.members) == {
+        _GATE_LAUNCHER,
+        _GATE,
+        _CONSOLE,
+        _OWNER_LAUNCHER,
+        _OWNER,
+    } - set(joined)
 
 
 def test_adopted_windows_job_revalidates_process_membership(
@@ -2596,7 +3017,7 @@ def test_adopted_windows_job_revalidates_process_membership(
 
     monkeypatch.setattr(process_tree, "_IS_WINDOWS", True)
     monkeypatch.setattr(process_tree, "_adopted_windows_job", 123)
-    monkeypatch.setattr(process_tree, "_adopted_windows_gate", None)
+    monkeypatch.setattr(process_tree, "_adopted_windows_infrastructure", {})
     monkeypatch.setattr(process_tree, "_live_windows_jobs", [])
     monkeypatch.setattr(
         process_tree, "_windows_modules", lambda: (Api(), Con(), Job(), object())
