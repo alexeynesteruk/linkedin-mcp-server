@@ -168,7 +168,8 @@ AI agent? Get a quick confirmation from the user before enabling automatic updat
 **Browser:**
 
 - `--no-headless` - Show the browser window (useful for debugging)
-- `--chrome-path PATH` - Path to a Chrome/Chromium executable
+- `--chrome-path PATH` - Path to a Chrome/Chromium executable. Ignored when attaching over CDP.
+- `--attach-cdp` - Drive a Chrome that is already running, instead of launching Patchright. Default endpoint is `http://127.0.0.1:9322`, the Mac tunnel to web-headed's agent-chrome (`LINKEDIN_CDP_URL` or `--cdp-url` overrides it; the host must be loopback). Opens a new tab in that Chrome and uses the LinkedIn session already there. If LinkedIn is not signed in, the server stops and tells you to log in once in that Chrome (web-headed noVNC at `http://localhost:6080/vnc.html?autoconnect=1&resize=scale`). It does not launch a second browser and does not import cookies from the Mac keychain. Omit the flag and the local Patchright profile (`~/.linkedin-mcp/profile`) works as before. The LinkedIn server itself still runs on this machine; only the browser is the existing agent-chrome.
 
 **Other:**
 
@@ -401,6 +402,7 @@ macOS / Linux:
 # Create the directory first so the container can save your session into it
 mkdir -p ~/.linkedin-mcp
 docker run -it --rm \
+  --hostname linkedin-mcp \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:6080:6080 \
   stickerdaniel/linkedin-mcp-server:latest \
@@ -413,6 +415,7 @@ PowerShell (Windows):
 $sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
 New-Item -ItemType Directory -Force -Path $sessionDir | Out-Null
 docker run -it --rm `
+  --hostname linkedin-mcp `
   -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
   -p 127.0.0.1:6080:6080 `
   stickerdaniel/linkedin-mcp-server:latest `
@@ -421,7 +424,7 @@ docker run -it --rm `
 
 Open the full URL the command prints (it carries the access token) and sign in. The viewer closes itself afterwards; let the command exit on its own so the session is stored completely. It gives up after 30 minutes.
 
-Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session.
+Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every later `docker run`, otherwise the server cannot find the session. Keep `--hostname linkedin-mcp` on every run as well. Chromium's profile lock records the container's host name, Docker gives each new container a new one, and a lock left by a killed container then blocks every later start until it is deleted by hand.
 
 **Add to your MCP client's `mcpServers` configuration**
 
@@ -434,6 +437,7 @@ Keep the same host directory mounted at `/home/pwuser/.linkedin-mcp` on every la
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--hostname", "linkedin-mcp",
         "-v", "/absolute/path/to/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "stickerdaniel/linkedin-mcp-server:latest"
       ]
@@ -456,6 +460,7 @@ username.
       "command": "docker",
       "args": [
         "run", "--rm", "-i",
+        "--hostname", "linkedin-mcp",
         "-v", "C:/Users/Alice/.linkedin-mcp:/home/pwuser/.linkedin-mcp",
         "stickerdaniel/linkedin-mcp-server:latest"
       ]
@@ -538,6 +543,7 @@ Bash / macOS / Linux:
 
 ```bash
 docker run -it --rm \
+  --hostname linkedin-mcp \
   -v ~/.linkedin-mcp:/home/pwuser/.linkedin-mcp \
   -p 127.0.0.1:8080:8080 \
   stickerdaniel/linkedin-mcp-server:latest \
@@ -549,6 +555,7 @@ PowerShell (Windows):
 ```powershell
 $sessionDir = Join-Path $env:USERPROFILE ".linkedin-mcp"
 docker run -it --rm `
+  --hostname linkedin-mcp `
   -v "${sessionDir}:/home/pwuser/.linkedin-mcp" `
   -p 127.0.0.1:8080:8080 `
   stickerdaniel/linkedin-mcp-server:latest `

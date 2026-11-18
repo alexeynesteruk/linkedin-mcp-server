@@ -1221,3 +1221,15 @@ def test_an_unusable_standard_input_becomes_dev_null(tmp_path: Path, kind: str) 
         f"than a readable {os.devnull}. stderr={stderr!r}"
     )
     assert process.returncode == 0, (stdout, stderr)
+
+
+def test_docker_compose_pins_container_hostname_to_keep_singleton_lock_valid():
+    """Recreating the container without a fixed hostname changes Docker's random
+    short ID hostname, stranding Chromium's SingletonLock (#1381 / #1383)."""
+    compose_path = Path(__file__).resolve().parent.parent / "docker-compose.yml"
+    lines = [
+        line.strip()
+        for line in compose_path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    assert "hostname: linkedin-mcp" in lines
