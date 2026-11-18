@@ -343,7 +343,15 @@ def harden_file(path: Path) -> None:
     # nothing else can plant the link there, but a promise this specific should
     # not rest on where it happens to be called from.
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        # O_NONBLOCK so a FIFO swapped in between lstat and open cannot block
+        # waiting for a writer before fstat refuses it below (#1317).
+        fd = os.open(
+            path,
+            os.O_RDONLY
+            | os.O_NOFOLLOW
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
     except OSError as exc:
         if exc.errno in (errno.ELOOP, errno.EMLINK):
             raise PrivateStateError(
