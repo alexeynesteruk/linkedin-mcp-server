@@ -20,6 +20,7 @@ from linkedin_mcp_server.error_handler import raise_tool_error
 from linkedin_mcp_server.scraping.contracts import (
     SEND_INTERRUPTED_WARNING,
     THREAD_REPLY_PROFILE_URN_REFUSAL,
+    before_the_reply_deadline,
     refuse_an_invalid_message,
     refuse_an_invalid_thread_message,
 )
@@ -223,6 +224,11 @@ def register_messaging_tools(
         A result without that diagnostic does not guarantee that every
         conversation was enumerated.
 
+        When the search opens a conversation and no result rows attach,
+        sections is empty and section_errors.search_results reports
+        search_opened_thread. That is an empty result, not a failed read:
+        the open thread and the empty-state list are not returned.
+
         Args:
             keywords: Search keywords to filter conversations
             ctx: FastMCP context for progress reporting
@@ -234,7 +240,8 @@ def register_messaging_tools(
         Returns:
             Dict with url, sections (search_results -> raw text), optional
             references, and optional section_errors (search_results -> where
-            click-derived references stopped).
+            click-derived references stopped, or search_opened_thread when
+            the search opened a conversation and returned no text).
         """
         try:
             extractor = await get_ready_extractor(ctx, tool_name="search_conversations")
@@ -414,14 +421,11 @@ def register_messaging_tools(
                 )
 
             try:
-                await ctx.report_progress(progress=100, total=100, message="Complete")
+                with before_the_reply_deadline():
+                    await ctx.report_progress(
+                        progress=100, total=100, message="Complete"
+                    )
             except BaseException:
-                # The send has already answered, and this notification is the
-                # last await inside FastMCP's `anyio.fail_after()`. A deadline
-                # landing here discards a result that may say the send was
-                # confirmed, and nothing can hand it back afterwards, so the
-                # log line is all that is left. Quiet where the result says a
-                # retry is safe, because then there is nothing to warn about.
                 if result.get("retry_safe") is False:
                     logger.warning(SEND_INTERRUPTED_WARNING)
                 raise

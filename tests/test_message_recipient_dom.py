@@ -340,6 +340,26 @@ class TestProfileMessageTargetDom:
 
         assert result == {"status": "unresolved"}
 
+    async def test_resolves_top_card_containing_decorative_nested_section(
+        self, dom_page
+    ):
+        """A headingless decorative nested <section> inside the top card (#1529)
+        must not shadow the enclosing top card that holds the heading and compose link."""
+        await _set_composer_content(
+            dom_page,
+            self._nested_page(
+                """<section><figure><img alt="Cover banner"></figure></section>
+                <div><a href="/in/testuser/"><h2>Test User</h2></a></div>
+                <div><a href="/messaging/compose/?recipient=ACoAAB">Message</a></div>"""
+            ),
+        )
+
+        result = await dom_page.evaluate(_PROFILE_MESSAGE_TARGET_JS)
+
+        assert result["status"] == "resolved"
+        assert result["displayName"] == "Test User"
+        assert result["composeHrefs"] == ["/messaging/compose/?recipient=ACoAAB"]
+
 
 class TestMessageComposerDom:
     async def test_owner_handle_pins_one_dom_instance_and_disposes(self, dom_page):

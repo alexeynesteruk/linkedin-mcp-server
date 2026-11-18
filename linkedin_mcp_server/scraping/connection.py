@@ -21,7 +21,30 @@ read for any state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Literal
+
+# Since November 2026 LinkedIn renders the top-card Connect action as a
+# labeled ``<a>`` linking to the profile itself, with no
+# ``/preload/custom-invite/`` href. The Pending control has the very same
+# shape (a labeled ``<a>`` linking to the profile), so the label value is the
+# only signal that tells an invitation to send from one already sent
+# (upstream issue #1494). Per the AGENTS.md Scraping Rules that text is
+# guarded behind this per-locale table. A label in a language not listed here
+# matches nothing and keeps the old reading (``pending``), so an unknown
+# label can never open the write path.
+INVITE_ANCHOR_LABELS: dict[str, re.Pattern[str]] = {
+    "en": re.compile(r"^Invite .+ to connect$"),
+}
+
+
+def invite_anchor_label(labels: list[str]) -> str | None:
+    """Return the first label that is a known 'Invite … to connect' label."""
+    for label in labels:
+        if any(p.match(label.strip()) for p in INVITE_ANCHOR_LABELS.values()):
+            return label
+    return None
+
 
 ConnectionState = Literal[
     "already_connected",
@@ -90,6 +113,27 @@ class ActionSignals:
     finds no top-card root on incoming profiles (they have no Message
     button) and would otherwise mis-anchor on sidebar cards."""
 
+    invite_anchor_label: str | None = None
+    """The ``aria-label`` of a labeled ``<a>`` in the action root that
+    matches :data:`INVITE_ANCHOR_LABELS` — the Connect control in the
+    November 2026 layout, which carries no invite URL. ``None`` when no
+    label matched."""
+
+    menu_invite_label: str | None = None
+    """The same label read from inside an open More menu: a
+    ``[role="menuitem"]`` that carries it, or holds an element that does.
+    ``None`` when the menu is closed or no label matched."""
+
+    @property
+    def can_invite(self) -> bool:
+        """LinkedIn exposes a way to invite: the invite URL, the labeled
+        Connect anchor, or the Connect item of an open More menu."""
+        return (
+            self.has_invite_anchor
+            or self.invite_anchor_label is not None
+            or self.menu_invite_label is not None
+        )
+
 
 def detect_connection_state(signals: ActionSignals) -> ConnectionState:
     """Determine the relationship state for a profile from structural signals.
@@ -97,7 +141,9 @@ def detect_connection_state(signals: ActionSignals) -> ConnectionState:
     Resolution order:
 
     1. ``self_profile`` — edit-intro anchor (URL).
-    2. ``connectable`` — vanityName invite anchor (URL).
+    2. ``connectable`` — vanityName invite anchor (URL), or a labeled
+       action ``<a>`` whose label is a known Connect label. Must precede
+       the pending check: both are labeled anchors in the action root.
     3. ``incoming_request`` — structural action-row fingerprint. Must
        precede the pending check: incoming profiles have no Message
        button in the top card, so the compose-anchor action-root walk
@@ -119,7 +165,7 @@ def detect_connection_state(signals: ActionSignals) -> ConnectionState:
     """
     if signals.has_edit_intro_anchor:
         return "self_profile"
-    if signals.has_invite_anchor:
+    if signals.can_invite:
         return "connectable"
     if signals.has_incoming_action_row:
         return "incoming_request"

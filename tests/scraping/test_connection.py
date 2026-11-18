@@ -3,6 +3,7 @@
 from linkedin_mcp_server.scraping.connection import (
     ActionSignals,
     detect_connection_state,
+    invite_anchor_label,
 )
 
 
@@ -101,3 +102,19 @@ class TestDetectConnectionState:
         assert (
             detect_connection_state(self._signals(labeled_action=True)) == "unavailable"
         )
+
+
+class TestInviteAnchorLabel:
+    def test_matches_english_invite_anchor_only(self):
+        assert (
+            invite_anchor_label(["Invite Jane Doe to connect"])
+            == "Invite Jane Doe to connect"
+        )
+        assert (
+            invite_anchor_label(
+                ["Pending, click to withdraw invitation sent to Jane Doe"]
+            )
+            is None
+        )
+        assert invite_anchor_label(["Rahul als Kontakt einladen"]) is None
+        assert invite_anchor_label([]) is None

@@ -49,6 +49,7 @@ from linkedin_mcp_server.scraping.connection_actions import (
     CLICK_INCOMING_ACCEPT_JS,
     CLICK_WITHDRAW_ANCHOR_JS,
     CONFIRM_DIALOG_BUTTON_COUNT_JS,
+    INVITATION_PENDING_JS,
     OPEN_INCOMING_ROW_MORE_JS,
     OPEN_MORE_BUTTON_JS,
     ConnectionActions,
@@ -1198,3 +1199,69 @@ class TestIncomingDisproveIsStructural:
             (True, False, "expander"),
             _disprove,
         )
+
+
+class TestSentInvitationsLookup:
+    """INVITATION_PENDING_JS finds an invitee by the URL of their profile (#1425)."""
+
+    @staticmethod
+    async def _pending(page, html: str, username: str = USER) -> bool:
+        await page.set_content(_page_html(html))
+        return bool(await page.evaluate(INVITATION_PENDING_JS, username))
+
+    async def test_finds_the_invitee(self, dom_page):
+        html = (
+            '<ul><li><a href="https://www.linkedin.com/in/someone/">Someone</a></li>'
+            f'<li><a href="https://www.linkedin.com/in/{USER}/">Name</a></li></ul>'
+        )
+        assert await self._pending(dom_page, html) is True
+
+    async def test_other_profiles_and_nav_anchors_do_not_match(self, dom_page):
+        html = (
+            f'<a href="https://www.linkedin.com/in/{USER}-two/">Other</a>'
+            f'<a href="https://www.linkedin.com/in/x{USER}/">Other</a>'
+            '<a href="https://www.linkedin.com/company/testuser/">Company</a>'
+        )
+        assert await self._pending(dom_page, html) is False
+        await dom_page.set_content(
+            f'<html><body><nav><a href="/in/{USER}/">Me</a></nav>'
+            "<main></main></body></html>"
+        )
+        assert await dom_page.evaluate(INVITATION_PENDING_JS, USER) is False
+
+
+class TestNov2026LabeledConnectAnchor:
+    """Nov 2026 layout (#1494): Connect rendered as a profile-href <a aria-label="Invite X to connect">."""
+
+    async def test_english_labeled_connect_anchor_is_connectable_not_pending(
+        self, dom_page
+    ):
+        html = f"""<!DOCTYPE html><html lang="en"><body><main>
+          <section class="topcard">
+            <h1>Jane Doe</h1>
+            <div class="actions">
+              <a href="/in/{USER}/" aria-label="Invite Jane Doe to connect"
+                onclick="event.preventDefault(); document.body.dataset.invited = 'yes'"
+                >Connect</a>
+              <a href="/messaging/compose/?profileUrn=urn%3Ali%3Afsd_profile%3AEEE"
+                >Message</a>
+              <button type="button" aria-expanded="false">More</button>
+            </div>
+          </section>
+        </main></body></html>"""
+        await dom_page.set_content(html)
+
+        actions = _actions_reading(dom_page, "Jane Doe")
+        signals = await actions._read_action_signals(USER)
+        assert detect_connection_state(signals) == "connectable"
+
+        # withdraw_invitation must NOT mistake this Connect anchor for Pending.
+        withdraw = await actions.withdraw_invitation(USER)
+        assert withdraw["status"] == "not_pending"
+        assert await dom_page.evaluate("document.body.dataset.invited") is None
+
+        assert (
+            await actions._click_labeled_invite_anchor("Invite Jane Doe to connect")
+            is True
+        )
+        assert await dom_page.evaluate("document.body.dataset.invited") == "yes"

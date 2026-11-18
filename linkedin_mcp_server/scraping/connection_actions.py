@@ -34,6 +34,8 @@ import logging
 from patchright.async_api import ElementHandle, JSHandle
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.destination import linkedin_element
+from linkedin_mcp_server.core.exceptions import OffLinkedInLandingError
 import linkedin_mcp_server.scraping.connection as connection
 from linkedin_mcp_server.scraping.connection import ActionSignals
 from linkedin_mcp_server.scraping.identifiers import (
@@ -53,6 +55,14 @@ _NOT_MESSAGING = ':not(:has([contenteditable="true"]))'
 _DIALOG_SELECTOR = f'dialog[open]{_NOT_MESSAGING}, [role="dialog"]{_NOT_MESSAGING}'
 _DIALOG_PREMIUM_LINK_SELECTOR = (
     'dialog[open] a[href*="/premium/"], [role="dialog"] a[href*="/premium/"]'
+)
+# The invite dialog the labeled Connect anchor opens on the profile page
+# itself (November 2026 layout, upstream issue #1494).
+_PROFILE_INVITE_DIALOG_SELECTOR = (
+    f"dialog[open]:has(button:not([aria-label])){_NOT_MESSAGING}"
+)
+_PROFILE_INVITE_SEND_SELECTOR = (
+    f"{_PROFILE_INVITE_DIALOG_SELECTOR} button:not([aria-label])"
 )
 # Every visible non-messaging dialog. A wait for this to be hidden ends only
 # once none is left: without the filter the wait judges the first match alone,
@@ -221,6 +231,7 @@ ACTION_SIGNALS_JS = (
   let hasComposeInActionRoot = false;
   let hasLabeledActionButton = false;
   let hasLabeledActionAnchor = false;
+  const actionAnchorLabels = [];
   if (actionRoot) {
     hasComposeInActionRoot =
       !!actionRoot.querySelector('a[href*="/messaging/compose/"]');
@@ -233,8 +244,18 @@ ACTION_SIGNALS_JS = (
     for (const a of actionRoot.querySelectorAll('a')) {
       if (a.hasAttribute('aria-label')) {
         hasLabeledActionAnchor = true;
-        break;
+        actionAnchorLabels.push(a.getAttribute('aria-label') || '');
       }
+    }
+  }
+
+  const menuItemLabels = [];
+  for (const item of document.querySelectorAll('[role="menu"] [role="menuitem"]')) {
+    if (item.hasAttribute('aria-label')) {
+      menuItemLabels.push(item.getAttribute('aria-label') || '');
+    }
+    for (const el of item.querySelectorAll('[aria-label]')) {
+      menuItemLabels.push(el.getAttribute('aria-label') || '');
     }
   }
 
@@ -244,8 +265,31 @@ ACTION_SIGNALS_JS = (
     hasEditIntro,
     hasLabeledActionButton,
     hasLabeledActionAnchor,
+    actionAnchorLabels,
+    menuItemLabels,
     hasIncomingActionRow: !!findIncomingActionRow(main),
   };
+})
+"""
+)
+
+CLICK_LABELED_INVITE_ANCHOR_JS = (
+    r"""
+((label) => {
+"""
+    + _FIND_ACTION_ROOT_FN_JS
+    + r"""
+  const main = document.querySelector('main');
+  if (!main) return false;
+  const actionRoot = findActionRoot(main);
+  if (!actionRoot) return false;
+  for (const a of actionRoot.querySelectorAll('a[aria-label]')) {
+    if (a.getAttribute('aria-label') === label) {
+      a.click();
+      return true;
+    }
+  }
+  return false;
 })
 """
 )
@@ -322,6 +366,22 @@ OPEN_INCOMING_ROW_MORE_JS = (
 })
 """
 )
+
+CLICK_MENU_INVITE_ITEM_JS = r"""
+((label) => {
+  for (const item of document.querySelectorAll('[role="menu"] [role="menuitem"]')) {
+    const own = item.getAttribute('aria-label') === label;
+    const held = [...item.querySelectorAll('[aria-label]')].some(
+      (el) => el.getAttribute('aria-label') === label
+    );
+    if (own || held) {
+      item.click();
+      return true;
+    }
+  }
+  return false;
+})
+"""
 
 
 # Click the Pending control that withdraws a sent invitation. LinkedIn renders
@@ -654,6 +714,16 @@ def _connection_result(
 # the facade is, and the day the read moves again only the wiring does.
 ReadMainProfile = Callable[[str], Awaitable[dict[str, Any]]]
 
+# LinkedIn can hide the Pending control inside the profile's More menu (#1425).
+SENT_INVITATIONS_URL = "https://www.linkedin.com/mynetwork/invitation-manager/sent/"
+_SENT_INVITATION_ANCHOR_SELECTOR = 'main a[href*="/in/"]'
+INVITATION_PENDING_JS = r"""
+((username) => {
+  const safe = CSS.escape(username);
+  return !!document.querySelector(`main a[href*="/in/${safe}/"]`);
+})
+"""
+
 
 class ConnectionActions:
     """Send, accept and probe invitations for one LinkedIn member."""
@@ -981,19 +1051,35 @@ class ConnectionActions:
             logger.debug("Incoming accept click via JS failed", exc_info=True)
             return False
 
+    async def _invitation_is_pending(self, username: str) -> bool:
+        """Report whether the sent-invitations page lists an invitation to
+        ``username`` (#1425).
+
+        Used only to settle ``already_connected``, whose structural signals
+        cannot tell a 1st-degree connection from a pending invitation whose
+        Pending control sits in the More menu. Any failure to read the page
+        reports False so the caller keeps its structural answer.
+        """
+        try:
+            await self._navigator._navigate_to_page(SENT_INVITATIONS_URL)
+            try:
+                await self._session.page.wait_for_selector(
+                    _SENT_INVITATION_ANCHOR_SELECTOR, timeout=5000
+                )
+            except PlaywrightTimeoutError:
+                return False
+            return bool(
+                await self._session.page.evaluate(INVITATION_PENDING_JS, username)
+            )
+        except OffLinkedInLandingError:
+            raise
+        except Exception:
+            logger.debug("Sent-invitations check failed", exc_info=True)
+            return False
+
     async def _read_action_signals(self, username: str) -> ActionSignals:
         """Read locale-independent structural signals for a profile's
         relationship state.
-
-        Detection uses URL patterns and ARIA attribute presence only — never
-        text values — per the AGENTS.md Scraping Rules. The vanityName invite
-        anchor is searched document-wide because LinkedIn renders the More
-        menu's contents in a portal-mounted ``[role='menu']`` outside ``<main>``;
-        the URL is uniquely scoped to the target user, so document-wide
-        search introduces no false positives. The compose anchor used for
-        action-root discovery is scoped to ``<main>`` to avoid the
-        portal-rendered "Send profile in a message" anchor that appears
-        inside the More menu after click.
         """
         data = await self._session.page.evaluate(ACTION_SIGNALS_JS, username)
         if not isinstance(data, dict):
@@ -1012,7 +1098,102 @@ class ConnectionActions:
             has_labeled_action_button=bool(data.get("hasLabeledActionButton")),
             has_labeled_action_anchor=bool(data.get("hasLabeledActionAnchor")),
             has_incoming_action_row=bool(data.get("hasIncomingActionRow")),
+            invite_anchor_label=connection.invite_anchor_label(
+                [
+                    label
+                    for label in data.get("actionAnchorLabels") or []
+                    if isinstance(label, str)
+                ]
+            ),
+            menu_invite_label=connection.invite_anchor_label(
+                [
+                    label
+                    for label in data.get("menuItemLabels") or []
+                    if isinstance(label, str)
+                ]
+            ),
         )
+
+    async def _read_signals_behind_more(self, username: str) -> ActionSignals | None:
+        """Read the signals with the More menu open, then close it."""
+        if not await self._open_more_menu():
+            return None
+        signals = await self._read_action_signals(username)
+        try:
+            await self._session.page.keyboard.press("Escape")
+        except Exception:
+            logger.debug("Escape after More-menu reread failed", exc_info=True)
+        return signals
+
+    async def _click_menu_invite_item(self, label: str) -> bool:
+        """Open the More menu and click its Connect item carrying *label*."""
+        if not await self._open_more_menu():
+            return False
+        try:
+            clicked = await self._session.page.evaluate(
+                CLICK_MENU_INVITE_ITEM_JS, label
+            )
+        except Exception:
+            logger.debug("More-menu Connect click via JS failed", exc_info=True)
+            clicked = False
+        if not clicked:
+            try:
+                await self._session.page.keyboard.press("Escape")
+            except Exception:
+                logger.debug("Escape after a missed menu click failed", exc_info=True)
+            return False
+        try:
+            await self._session.page.wait_for_selector(
+                _PROFILE_INVITE_DIALOG_SELECTOR, state="visible", timeout=5000
+            )
+            return True
+        except PlaywrightTimeoutError:
+            logger.debug("Profile invite dialog did not open from the More menu")
+            return False
+
+    async def _click_labeled_invite_anchor(self, label: str) -> bool:
+        """Click the top-card Connect anchor carrying exactly *label*."""
+        try:
+            clicked = await self._session.page.evaluate(
+                CLICK_LABELED_INVITE_ANCHOR_JS, label
+            )
+        except Exception:
+            logger.debug("Connect anchor click via JS failed", exc_info=True)
+            return False
+        if not clicked:
+            return False
+        try:
+            await self._session.page.wait_for_selector(
+                _PROFILE_INVITE_DIALOG_SELECTOR, state="visible", timeout=5000
+            )
+            return True
+        except PlaywrightTimeoutError:
+            logger.debug("Profile invite dialog did not open after the click")
+            return False
+
+    async def _submit_profile_invite_dialog(self) -> bool:
+        """Send, without a note, from the invite dialog opened on the profile."""
+        buttons = self._session.page.locator(_PROFILE_INVITE_SEND_SELECTOR)
+        try:
+            count = await buttons.count()
+            if count == 0:
+                await self._session.page.keyboard.press("Escape")
+                return False
+            async with linkedin_element(buttons.nth(count - 1), timeout=5000) as send:
+                await send.click(timeout=5000)
+        except OffLinkedInLandingError:
+            raise
+        except Exception:
+            logger.debug("Profile invite send click failed", exc_info=True)
+            await self._session.page.keyboard.press("Escape")
+            return False
+        try:
+            await self._session.page.wait_for_selector(
+                _PROFILE_INVITE_DIALOG_SELECTOR, state="hidden", timeout=5000
+            )
+        except PlaywrightTimeoutError:
+            logger.debug("Profile invite dialog did not close after submit")
+        return True
 
     async def _submit_invite_dialog(
         self, note: str | None
@@ -1289,6 +1470,8 @@ class ConnectionActions:
                 "Cannot send a connection request to your own profile.",
                 profile=page_text,
             )
+        if state == "already_connected" and await self._invitation_is_pending(username):
+            state = "pending"
         if state == "already_connected":
             return _connection_result(
                 url,
@@ -1332,9 +1515,9 @@ class ConnectionActions:
             logger.info(
                 "Incoming-row More signals for %s: signals=%s", username, menu_signals
             )
-            if menu_signals.has_invite_anchor:
+            if menu_signals.can_invite:
                 # Connect was in the menu all along: this is a creator-mode
-                # profile, and the invite anchor opens the same write gate
+                # profile, and the invite control opens the same write gate
                 # the connectable state does.
                 signals = menu_signals
                 state = "connectable"
@@ -1426,7 +1609,7 @@ class ConnectionActions:
         # deeplink only as a non-submitting probe so we can report the Premium
         # note-quota block without accidentally sending from a follow-only or
         # otherwise unavailable profile.
-        if not signals.has_invite_anchor:
+        if not signals.can_invite:
             if note:
                 logger.info(
                     "No visible invite anchor for %s; probing custom-invite deeplink "
@@ -1450,12 +1633,30 @@ class ConnectionActions:
                 profile=page_text,
             )
 
-        await self._navigator._navigate_to_page(invite_url)
+        dialog_opened = False
+        via_menu = False
+        if not note and not signals.has_invite_anchor:
+            if signals.invite_anchor_label is not None:
+                dialog_opened = await self._click_labeled_invite_anchor(
+                    signals.invite_anchor_label
+                )
+            elif signals.menu_invite_label is not None:
+                dialog_opened = await self._click_menu_invite_item(
+                    signals.menu_invite_label
+                )
+                via_menu = dialog_opened
 
         try:
-            submitted, note_sent, note_limit_message = await self._submit_invite_dialog(
-                note
-            )
+            if dialog_opened:
+                submitted = await self._submit_profile_invite_dialog()
+                note_sent, note_limit_message = False, None
+            else:
+                await self._navigator._navigate_to_page(invite_url)
+                (
+                    submitted,
+                    note_sent,
+                    note_limit_message,
+                ) = await self._submit_invite_dialog(note)
         except InviteNotSent as refusal:
             return _connection_result(
                 url,
@@ -1480,14 +1681,41 @@ class ConnectionActions:
                 profile=page_text,
             )
 
+        if via_menu:
+            verified = await self._read_main_profile(username)
+            menu_signals = await self._read_signals_behind_more(username)
+            if menu_signals is not None and menu_signals.can_invite:
+                await asyncio.sleep(3.0)
+                verified = await self._read_main_profile(username)
+                menu_signals = await self._read_signals_behind_more(username)
+            verified_text = verified.get("sections", {}).get("main_profile", "")
+            if menu_signals is None:
+                return _connection_result(
+                    url,
+                    "send_failed",
+                    "Submitted the invite dialog but could not reopen the More "
+                    "menu to confirm it. Check the profile before retrying.",
+                    profile=verified_text or page_text,
+                )
+            if menu_signals.can_invite:
+                return _connection_result(
+                    url,
+                    "send_failed",
+                    "Submitted the invite dialog but the More menu still offers "
+                    "Connect.",
+                    profile=verified_text or page_text,
+                )
+            return _connection_result(
+                url,
+                "connected",
+                "Connection request sent. State after send: pending "
+                "(the More menu no longer offers Connect).",
+                profile=verified_text or page_text,
+            )
+
         verified = await self._read_main_profile(username)
         verified_signals = await self._read_action_signals(username)
-        if verified_signals.has_invite_anchor:
-            # The same settle retry as the accept path: an immediate re-read
-            # can still render Connect for an invitation LinkedIn already
-            # recorded (observed live 2026-09-26: send_failed, then Pending).
-            # Only a pending or already accepted invitation is evidence it
-            # landed.
+        if verified_signals.can_invite:
             await asyncio.sleep(3.0)
             retry = await self._read_main_profile(username)
             retry_signals = await self._read_action_signals(username)
@@ -1498,8 +1726,14 @@ class ConnectionActions:
                 verified, verified_signals = retry, retry_signals
         verified_text = verified.get("sections", {}).get("main_profile", "")
         verified_state = connection.detect_connection_state(verified_signals)
+        if (
+            verified_state == "already_connected"
+            and not verified_signals.can_invite
+            and await self._invitation_is_pending(username)
+        ):
+            verified_state = "pending"
 
-        if verified_signals.has_invite_anchor:
+        if verified_signals.can_invite:
             return _connection_result(
                 url,
                 "send_failed",

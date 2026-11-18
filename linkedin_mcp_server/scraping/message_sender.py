@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
+import math
 import re
 import time
 from typing import Any, Literal
@@ -14,6 +15,7 @@ import anyio
 import anyio.lowlevel
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
+from linkedin_mcp_server.core.destination import raise_if_off_linkedin
 from linkedin_mcp_server.core.exceptions import (
     InvalidReferenceError,
     LinkedInScraperException,
@@ -88,20 +90,26 @@ _PROFILE_MESSAGE_TARGET_JS = r"""() => {
     const main = document.querySelector('main');
     if (!main) return {status: 'unresolved'};
 
-    // The top card is the first section that wraps no other section. LinkedIn
-    // nests it inside a wrapper section and has moved the name between h1 and
-    // h2, so neither its depth nor its heading level is pinned. It is chosen
-    // before its heading is checked, so a card whose name has not rendered yet
-    // stays unresolved instead of yielding to the next section. Sidebar
-    // sections are skipped: they carry other people's Message links.
+    // The top card is the first visible non-sidebar section that wraps no
+    // other card section (one carrying a heading or compose link). LinkedIn
+    // nests decorative leaf sections inside the top card (cover banner image,
+    // volunteer causes card; #1529), so decorative nested sections with no
+    // heading and no compose link do not disqualify the enclosing top card.
+    const isCardContent = child =>
+        Array.from(child.querySelectorAll('h1, h2, h3')).some(visible) ||
+        Array.from(child.querySelectorAll('a[href*="/messaging/compose/"]')).some(visible);
     const section = Array.from(main.querySelectorAll('section')).find(
         element =>
             visible(element) &&
             !element.closest('aside') &&
-            !element.querySelector('section')
+            !Array.from(element.querySelectorAll('section')).some(
+                child => visible(child) && isCardContent(child)
+            )
     );
     if (!section) return {status: 'unresolved'};
-    const headings = Array.from(section.querySelectorAll('h1, h2, h3')).filter(visible);
+    const headings = Array.from(section.querySelectorAll('h1, h2, h3')).filter(
+        heading => visible(heading) && heading.closest('section') === section
+    );
     const visibleComposeAnchors = Array.from(
         section.querySelectorAll('a[href*="/messaging/compose/"]')
     ).filter(anchor => visible(anchor) && anchor.closest('section') === section);
@@ -136,8 +144,17 @@ _PROFILE_MESSAGE_TARGET_READY_JS = (
     f"() => ({_PROFILE_MESSAGE_TARGET_JS})().status === 'resolved'"
 )
 _PROFILE_MESSAGE_TARGET_TIMEOUT_MS = 1_000
+# A send asks for the top card as soon as main is on the page. The 2026
+# profile renders that card a few seconds later, and a one-second wait
+# reports the recipient unresolved for a card that does appear (#1214).
+# A profile read keeps the short wait: it runs only after the section text
+# is in, and it ends early only when an action resolves, so every profile
+# without one would hold the browser for the full ten seconds.
+_SEND_PROFILE_MESSAGE_TARGET_TIMEOUT_MS = 10_000
 _MESSAGE_SUBMIT_READY_TIMEOUT_MS = 1_000
 _MESSAGE_CLEANUP_TIMEOUT_SECONDS = 1.0
+_SEND_REPLY_RESERVE_FRACTION = 1 / 6
+_SEND_REPLY_RESERVE_SECONDS = 5.0
 
 # A reply waits on the thread page itself, not on a compose surface. A long
 # thread hydrates its history before its composer settles, and the user's
@@ -1429,6 +1446,17 @@ def _thread_message_target(thread_id: str) -> _ThreadMessageTarget:
     )
 
 
+def _send_budget_deadline() -> float:
+    """When the work after dispatch has to stop, on the event loop's clock."""
+    deadline = anyio.current_effective_deadline()
+    if math.isinf(deadline):
+        return deadline
+    remaining = max(0.0, deadline - anyio.current_time())
+    return deadline - min(
+        _SEND_REPLY_RESERVE_SECONDS, remaining * _SEND_REPLY_RESERVE_FRACTION
+    )
+
+
 def _safe_linkedin_url(value: str, *, base: str | None = None) -> ParseResult | None:
     """Parse an HTTPS LinkedIn URL without credentials or an ambiguous origin."""
     if (
@@ -1566,12 +1594,14 @@ class MessageSender:
         self._navigator = navigator
         self._page = session.page
 
-    async def _read_profile_message_target(self) -> _ProfileMessageTargetResolution:
+    async def _read_profile_message_target(
+        self, *, timeout_ms: int = _PROFILE_MESSAGE_TARGET_TIMEOUT_MS
+    ) -> _ProfileMessageTargetResolution:
         """Resolve one recipient-specific top-card compose action after settling."""
         try:
             await self._page.wait_for_function(
                 _PROFILE_MESSAGE_TARGET_READY_JS,
-                timeout=_PROFILE_MESSAGE_TARGET_TIMEOUT_MS,
+                timeout=timeout_ms,
             )
         except PlaywrightTimeoutError:
             pass
@@ -1585,6 +1615,8 @@ class MessageSender:
             return _ProfileMessageTargetResolution("failed")
         if not isinstance(data, dict):
             return _ProfileMessageTargetResolution("failed")
+        if isinstance(data.get("pageUrl"), str):
+            raise_if_off_linkedin(data["pageUrl"])
         if data.get("status") == "unavailable":
             page_url = data.get("pageUrl")
             if (
@@ -1785,7 +1817,7 @@ class MessageSender:
     @staticmethod
     async def _cleanup_owned_message(message: str, owner: Any) -> None:
         """Best-effort removal of text proven to belong to this tool call."""
-        with anyio.move_on_after(
+        with contracts.before_the_reply_deadline(
             _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
         ) as scope:
             try:
@@ -1819,7 +1851,7 @@ class MessageSender:
     async def _dispose_message_owner(owner: Any) -> None:
         """Release all owner-scoped observers, pins, markers and handles."""
         try:
-            with anyio.move_on_after(
+            with contracts.before_the_reply_deadline(
                 _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
             ) as dom_scope:
                 try:
@@ -1829,7 +1861,7 @@ class MessageSender:
             if dom_scope.cancel_called:
                 logger.warning("Timed out clearing pinned message nodes")
         finally:
-            with anyio.move_on_after(
+            with contracts.before_the_reply_deadline(
                 _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
             ) as handle_scope:
                 try:
@@ -1920,7 +1952,7 @@ class MessageSender:
         self, owner: Any, confirmation: str
     ) -> None:
         """Disconnect a request-local confirmation observer."""
-        with anyio.move_on_after(
+        with contracts.before_the_reply_deadline(
             _MESSAGE_CLEANUP_TIMEOUT_SECONDS, shield=True
         ) as scope:
             try:
@@ -1972,11 +2004,15 @@ class MessageSender:
                 the recipient resolved from the loaded profile snapshot.
             thread_id: Optional id of an existing conversation to reply in.
         """
+        budget_deadline = _send_budget_deadline()
         if thread_id is not None:
             if profile_urn is not None:
                 raise InvalidReferenceError(contracts.THREAD_REPLY_PROFILE_URN_REFUSAL)
             return await self._send_in_thread(
-                thread_id, message, confirm_send=confirm_send
+                thread_id,
+                message,
+                confirm_send=confirm_send,
+                budget_deadline=budget_deadline,
             )
 
         refusal = contracts.refuse_an_invalid_message(linkedin_username, message)
@@ -1996,7 +2032,9 @@ class MessageSender:
         except PlaywrightTimeoutError:
             logger.debug("Profile page did not load for %s", linkedin_username)
 
-        resolution = await self._read_profile_message_target()
+        resolution = await self._read_profile_message_target(
+            timeout_ms=_SEND_PROFILE_MESSAGE_TARGET_TIMEOUT_MS
+        )
         if resolution.status == "unavailable":
             return contracts.message_action_result(
                 profile_url,
@@ -2022,11 +2060,6 @@ class MessageSender:
                 "The supplied profile URN did not match the loaded profile.",
             )
 
-        # The validated top-card action and its browser navigation are the
-        # recipient boundary. LinkedIn may strip the query and expose no local
-        # identity, so capture the final route now and fail on any later change or
-        # visible contradiction. Do not replace this with a Voyager/private API.
-        # See docs/decisions/2026-09-16-rendered-page.md.
         await self._navigator._navigate_to_page(target.compose_url)
         expected_route = self._page.url
         if not _message_page_url_is_safe(expected_route, target.profile_urn):
@@ -2041,6 +2074,7 @@ class MessageSender:
             expected_route=expected_route,
             confirm_send=confirm_send,
             label=linkedin_username,
+            budget_deadline=budget_deadline,
         )
 
     async def _send_in_thread(
@@ -2049,18 +2083,11 @@ class MessageSender:
         message: str,
         *,
         confirm_send: bool,
+        budget_deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Reply inside the existing thread ``thread_id`` names (#483).
-
-        The thread id is the whole target. It is validated into the exact
-        ``/messaging/thread/<id>/`` route before any browser work, the page is
-        opened there, and the route it lands on must be that one: LinkedIn
-        redirecting an unknown or foreign thread elsewhere is
-        ``thread_unavailable``, never a reason to try the profile flow. From
-        then on the route is pinned exactly like a profile send's, and the
-        composer has to be the one docked in that thread's own pane. The rest
-        of the path is the profile send's, step for step.
-        """
+        """Reply inside the existing thread ``thread_id`` names (#483)."""
+        if budget_deadline is None:
+            budget_deadline = _send_budget_deadline()
         target = _thread_message_target(thread_id)
         refusal = contracts.refuse_an_invalid_thread_message(target.thread_id, message)
         if refusal is not None:
@@ -2068,8 +2095,6 @@ class MessageSender:
         message = contracts.normalize_message(message)
 
         await self._navigator._navigate_to_page(target.thread_url)
-        # Before the landing check, so a checkpoint reached instead of the
-        # thread reports itself as one rather than as a missing thread.
         await self._session.check_rate_limit()
         expected_route = self._page.url
         if not _thread_page_url_is_safe(expected_route, target.thread_path):
@@ -2086,6 +2111,7 @@ class MessageSender:
             expected_route=expected_route,
             confirm_send=confirm_send,
             label=f"thread {target.thread_id}",
+            budget_deadline=budget_deadline,
         )
 
     async def _wait_for_main(self, target: _MessageTarget, label: str) -> None:
@@ -2108,16 +2134,11 @@ class MessageSender:
         expected_route: str,
         confirm_send: bool,
         label: str,
+        budget_deadline: float | None = None,
     ) -> dict[str, Any]:
-        """Verify, write, submit and confirm on the route captured on arrival.
-
-        Shared by both targets from the moment the route is pinned, so a thread
-        reply clears every gate a profile send does: the unchanged route after
-        each await, one verified composer, the dry run, an occupied draft,
-        Enter-to-send, one pinned submit, the verified write (line breaks
-        included, and stopped at any sign the page took it for a send), the
-        confirmation observer, and cleanup of text nothing submitted.
-        """
+        """Verify, write, submit and confirm on the route captured on arrival."""
+        if budget_deadline is None:
+            budget_deadline = _send_budget_deadline()
         await self._session.check_rate_limit()
         if self._page.url != expected_route:
             return contracts.message_action_result(
@@ -2307,63 +2328,85 @@ class MessageSender:
                         recipient_selected=recipient_selected,
                     )
 
+                if anyio.current_time() >= budget_deadline:
+                    # Too little time is left to confirm a send, and nothing
+                    # has been submitted. Wait for the deadline instead of
+                    # clicking, so this ends like every other timeout before
+                    # dispatch: an error the caller can safely retry on.
+                    await anyio.sleep_forever()
+
+                budget = anyio.CancelScope(deadline=budget_deadline)
                 try:
-                    try:
-                        # A click can dispatch before the evaluate call reports an
-                        # error, so an exception from this round trip is ambiguous.
-                        may_have_submitted = True
-                        submission = await self._submit_verified_message(
+                    with budget:
+                        try:
+                            may_have_submitted = True
+                            submission = await self._submit_verified_message(
+                                message,
+                                target=target,
+                                owner=owner,
+                            )
+                        except Exception:
+                            logger.debug(
+                                "Message submission did not complete", exc_info=True
+                            )
+                            return contracts.message_action_result(
+                                self._page.url,
+                                "send_unconfirmed",
+                                "The message submission was interrupted and "
+                                "LinkedIn did not confirm the send. Check the "
+                                "conversation before retrying; retrying may "
+                                "deliver the message twice.",
+                                recipient_selected=recipient_selected,
+                                retry_safe=False,
+                            )
+
+                        if submission != "clicked":
+                            may_have_submitted = False
+                            return contracts.message_action_result(
+                                self._page.url,
+                                "send_unavailable",
+                                "The local submit path was missing, disabled, or "
+                                "ambiguous.",
+                                recipient_selected=recipient_selected,
+                            )
+
+                        confirmed = await self._message_send_confirmed(
                             message,
                             target=target,
                             owner=owner,
+                            confirmation=confirmation,
                         )
-                    except Exception:
-                        logger.debug(
-                            "Message submission did not complete", exc_info=True
-                        )
+                        if not confirmed:
+                            return contracts.message_action_result(
+                                self._page.url,
+                                "send_unconfirmed",
+                                "The message was submitted but LinkedIn did not "
+                                "confirm the message-list transition in time. "
+                                "Check the conversation before retrying; retrying "
+                                "may deliver the message twice.",
+                                recipient_selected=recipient_selected,
+                                retry_safe=False,
+                            )
+
                         return contracts.message_action_result(
                             self._page.url,
-                            "send_unconfirmed",
-                            "The message submission was interrupted and LinkedIn did "
-                            "not confirm the send. Check the conversation before "
-                            "retrying; retrying may deliver the message twice.",
+                            "sent",
+                            "Message submitted and confirmed in the conversation UI.",
                             recipient_selected=recipient_selected,
+                            sent=True,
                             retry_safe=False,
                         )
 
-                    if submission != "clicked":
-                        may_have_submitted = False
-                        return contracts.message_action_result(
-                            self._page.url,
-                            "send_unavailable",
-                            "The local submit path was missing, disabled, or ambiguous.",
-                            recipient_selected=recipient_selected,
-                        )
-
-                    confirmed = await self._message_send_confirmed(
-                        message,
-                        target=target,
-                        owner=owner,
-                        confirmation=confirmation,
-                    )
-                    if not confirmed:
-                        return contracts.message_action_result(
-                            self._page.url,
-                            "send_unconfirmed",
-                            "The message was submitted but LinkedIn did not confirm "
-                            "the message-list transition in time. Check the "
-                            "conversation before retrying; retrying may deliver the "
-                            "message twice.",
-                            recipient_selected=recipient_selected,
-                            retry_safe=False,
-                        )
-
+                    # Reached only when the budget ran out.
+                    logger.debug("Message send reached its deadline unconfirmed")
                     return contracts.message_action_result(
                         self._page.url,
-                        "sent",
-                        "Message submitted and confirmed in the conversation UI.",
+                        "send_unconfirmed",
+                        "The tool deadline arrived before LinkedIn confirmed the "
+                        "send, and the message may already have been submitted. "
+                        "Check the conversation before retrying; retrying may "
+                        "deliver the message twice.",
                         recipient_selected=recipient_selected,
-                        sent=True,
                         retry_safe=False,
                     )
                 finally:

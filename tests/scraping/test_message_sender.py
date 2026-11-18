@@ -1,11 +1,13 @@
 """Tests for the browser-UI message sender."""
 
 from contextlib import ExitStack
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
 import logging
 
+import anyio
 from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -316,6 +318,34 @@ class TestSendMessage:
         submit.assert_not_awaited()
         mock_page.keyboard.type.assert_not_awaited()
         mock_page.keyboard.press.assert_not_awaited()
+
+    async def test_a_profile_send_waits_ten_seconds_for_the_top_card(self, mock_page):
+        """The top card can appear after main (#1214). One second reports the
+        recipient unresolved for a card that shows up later.
+        """
+        sender = _sender(mock_page)
+        mock_page.evaluate = AsyncMock(
+            return_value={
+                "status": "unavailable",
+                "pageUrl": "https://www.linkedin.com/in/testuser/",
+            }
+        )
+
+        with (
+            patch.object(PageNavigator, "_navigate_to_page", new_callable=AsyncMock),
+            patch.object(ScrapingSession, "check_rate_limit", new_callable=AsyncMock),
+        ):
+            await sender.send_message("testuser", "Hello!", confirm_send=False)
+
+        assert mock_page.wait_for_function.await_args.kwargs["timeout"] == 10_000
+
+    async def test_a_profile_read_keeps_the_one_second_top_card_wait(self, mock_page):
+        sender = _sender(mock_page)
+        mock_page.evaluate = AsyncMock(return_value={"status": "failed"})
+
+        await sender._read_profile_message_target()
+
+        assert mock_page.wait_for_function.await_args.kwargs["timeout"] == 1_000
 
     async def test_unresolved_profile_target_is_not_connection_handoff(self, mock_page):
         sender = _sender(mock_page)
@@ -1222,6 +1252,102 @@ class TestSendMessage:
             owner=mock_page.evaluate_handle.return_value,
             confirmation=1,
         )
+
+
+async def _stall(*_args, **_kwargs):
+    await anyio.sleep_forever()
+
+
+class TestSendMessageDeadline:
+    """The tool's own deadline never takes the answer of a started send (#889)."""
+
+    _TOOL_TIMEOUT = 0.5
+
+    @staticmethod
+    async def _call(sender, monkeypatch):
+        from fastmcp import Client, FastMCP
+
+        from linkedin_mcp_server.tools.messaging import register_messaging_tools
+
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.messaging.get_ready_extractor",
+            AsyncMock(return_value=SimpleNamespace(send_message=sender.send_message)),
+        )
+        mcp = FastMCP("test")
+        register_messaging_tools(
+            mcp, tool_timeout=TestSendMessageDeadline._TOOL_TIMEOUT
+        )
+        async with Client(mcp) as client:
+            return await client.call_tool(
+                "send_message",
+                {
+                    "linkedin_username": "testuser",
+                    "message": "Hello!",
+                    "confirm_send": True,
+                },
+                raise_on_error=False,
+            )
+
+    @staticmethod
+    def _composer(stack, sender, mock_page):
+        patches = TestSendMessage._patch_to_composer(sender, mock_page)
+        for index in range(1, 6):
+            stack.enter_context(patches[index])
+        return SimpleNamespace(
+            write=stack.enter_context(patches[6]),
+            submit=stack.enter_context(patches[7]),
+            prepare=stack.enter_context(patches[9]),
+            confirmed=stack.enter_context(patches[10]),
+        )
+
+    @pytest.mark.parametrize("stage", ["dispatch", "confirmation"])
+    async def test_a_stalled_send_answers_unconfirmed(
+        self, mock_page, monkeypatch, stage
+    ):
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            if stage == "dispatch":
+                mocks.submit.side_effect = _stall
+            else:
+                mocks.confirmed.side_effect = _stall
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "send_unconfirmed"
+        assert result.structured_content["sent"] is False
+        assert result.structured_content["retry_safe"] is False
+        assert mocks.submit.call_count == 1
+
+    @pytest.mark.parametrize("stage", ["cleanup", "notification"])
+    async def test_a_stalled_ending_keeps_the_answer(
+        self, mock_page, monkeypatch, stage
+    ):
+        from fastmcp import Context
+
+        async def report_progress(self, progress, total=None, message=None):
+            if progress == 100:
+                await anyio.sleep_forever()
+
+        sender = _sender(mock_page)
+        with ExitStack() as stack:
+            mocks = self._composer(stack, sender, mock_page)
+            if stage == "cleanup":
+                mock_page.evaluate_handle.return_value.dispose = AsyncMock(
+                    side_effect=_stall
+                )
+            else:
+                stack.enter_context(
+                    patch.object(Context, "report_progress", report_progress)
+                )
+            result = await self._call(sender, monkeypatch)
+
+        assert result.is_error is False, result.content
+        assert result.structured_content is not None
+        assert result.structured_content["status"] == "sent"
+        assert result.structured_content["sent"] is True
+        assert mocks.submit.call_count == 1
 
 
 class TestResolveMessageComposeBox:

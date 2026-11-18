@@ -855,7 +855,7 @@
     "annotations": {
       "openWorldHint": true
     },
-    "description": "Search messages by keyword.\n\nClick-derived references require an observed different thread path\nafter each row click. The first unverifiable click stops further row\nclicks and is reported in section_errors.search_results. Already-read\ntext and independently extracted anchors retain their normal handling.\nA result without that diagnostic does not guarantee that every\nconversation was enumerated.",
+    "description": "Search messages by keyword.\n\nClick-derived references require an observed different thread path\nafter each row click. The first unverifiable click stops further row\nclicks and is reported in section_errors.search_results. Already-read\ntext and independently extracted anchors retain their normal handling.\nA result without that diagnostic does not guarantee that every\nconversation was enumerated.\n\nWhen the search opens a conversation and no result rows attach,\nsections is empty and section_errors.search_results reports\nsearch_opened_thread. That is an empty result, not a failed read:\nthe open thread and the empty-state list are not returned.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

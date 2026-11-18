@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
+
+import anyio
 
 from linkedin_mcp_server.scraping.identifiers import (
     normalize_person_identifier,
@@ -43,6 +46,26 @@ SEND_INTERRUPTED_WARNING = (
     "unknown; check the conversation before retrying, as a retry may deliver "
     "the message twice."
 )
+
+
+def before_the_reply_deadline(
+    limit: float = math.inf, *, shield: bool = False
+) -> anyio.CancelScope:
+    """Bound work that runs while a send's answer waits to leave.
+
+    The scope ends after ``limit`` seconds and never later than halfway to the
+    deadline the call runs under, so what follows keeps the other half to hand
+    the answer back before that deadline discards it (#889). A shielded scope
+    ignores that deadline, so without this bound a slow cleanup outlasts it.
+    Without a deadline, or once the call is already cancelled and its answer
+    gone, only ``limit`` applies.
+    """
+    now = anyio.current_time()
+    end = now + limit
+    deadline = anyio.current_effective_deadline()
+    if now < deadline < math.inf:
+        end = min(end, now + (deadline - now) / 2)
+    return anyio.CancelScope(deadline=end, shield=shield)
 
 
 # `profile_urn` verifies the recipient a profile page resolves. A reply never
