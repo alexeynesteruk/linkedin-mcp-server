@@ -154,6 +154,52 @@ def test_raises_tool_error_for_scraping_error():
         raise_tool_error(ScrapingError("bad html"))
 
 
+def test_scraping_error_log_does_not_contain_the_proxy_password(
+    monkeypatch, caplog, tmp_path
+):
+    """ScrapingError logs str(exception). That line has to be redacted first.
+
+    The client sentence stays the fixed one. The password is present only as
+    a quote_plus encoding with lowercase hex, which ``quote`` of the decoded
+    secret does not equal.
+    """
+    import re
+    from urllib.parse import quote_plus
+
+    from linkedin_mcp_server.config.schema import AppConfig
+
+    password = "p:ss" + " word"
+    plus_lower = re.sub(
+        r"%[0-9A-F]{2}",
+        lambda match: match.group(0).lower(),
+        quote_plus(password, safe=""),
+    )
+    config = AppConfig()
+    config.browser.proxy_server = "http://gate.example:7000"
+    config.browser.proxy_password = password
+    monkeypatch.setattr("linkedin_mcp_server.config.get_config", lambda: config)
+    monkeypatch.setenv("USER_DATA_DIR", str(tmp_path / "profile"))
+    monkeypatch.setattr(
+        "linkedin_mcp_server.error_diagnostics._find_existing_issues",
+        lambda payload: [],
+    )
+
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(ToolError, match="Scraping failed") as caught,
+    ):
+        raise_tool_error(
+            ScrapingError(f"page quoted {plus_lower}"),
+            "search_conversations",
+        )
+
+    assert password not in caplog.text
+    assert plus_lower not in caplog.text
+    assert password not in str(caught.value)
+    assert plus_lower not in str(caught.value)
+    assert "Scraping failed" in str(caught.value)
+
+
 def test_raises_tool_error_for_base_scraper_exception():
     with pytest.raises(ToolError, match="generic scraper error"):
         raise_tool_error(LinkedInScraperException("generic scraper error"))

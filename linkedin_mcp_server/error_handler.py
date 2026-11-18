@@ -23,6 +23,7 @@ from linkedin_mcp_server.core.exceptions import (
     ElementNotFoundError,
     LinkedInScraperException,
     NetworkError,
+    OffLinkedInLandingError,
     ProfileNotFoundError,
     ProxyConnectionError,
     RateLimitError,
@@ -53,6 +54,20 @@ from linkedin_mcp_server.error_diagnostics import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _keeps_its_own_message(exception: Exception) -> bool:
+    """Whether *exception* already says what to do, so no hint is appended.
+
+    Attach mode refuses to launch a browser. Telling the caller to run
+    ``--login`` would send them down the path the error just closed.
+    """
+    return "will not start a second browser" in str(exception)
+
+
+def _log_detail(exception: BaseException) -> str:
+    """Exception text safe to interpolate into a log line."""
+    return redact_proxy_credentials(str(exception))
 
 
 def _raise_tool_error_with_diagnostics(
@@ -125,7 +140,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         raise safe from None
 
     if isinstance(exception, CredentialsNotFoundError):
-        logger.warning("Credentials not found%s: %s", ctx, exception)
+        logger.warning("Credentials not found%s: %s", ctx, _log_detail(exception))
         _raise_tool_error_with_diagnostics(
             exception,
             "Authentication not found. Run with --login to create a browser profile.",
@@ -133,11 +148,11 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         )
 
     elif isinstance(exception, BrowserSetupInProgressError):
-        logger.info("Browser setup in progress%s: %s", ctx, exception)
+        logger.info("Browser setup in progress%s: %s", ctx, _log_detail(exception))
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, BrowserSetupFailedError):
-        logger.warning("Browser setup failed%s: %s", ctx, exception)
+        logger.warning("Browser setup failed%s: %s", ctx, _log_detail(exception))
         detail = redact_proxy_credentials(str(exception))
         raise ToolError(
             f"LinkedIn browser setup was not ready: {detail}. Retry this tool to "
@@ -145,19 +160,21 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         ) from exception
 
     elif isinstance(exception, OwnerStandingDownError):
-        logger.info("Browser owner standing down%s: %s", ctx, exception)
+        logger.info("Browser owner standing down%s: %s", ctx, _log_detail(exception))
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, AuthenticationStartedError):
-        logger.info("Authentication started%s: %s", ctx, exception)
+        logger.info("Authentication started%s: %s", ctx, _log_detail(exception))
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, AuthenticationInProgressError):
-        logger.info("Authentication in progress%s: %s", ctx, exception)
+        logger.info("Authentication in progress%s: %s", ctx, _log_detail(exception))
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, AuthenticationBootstrapFailedError):
-        logger.warning("Authentication bootstrap failed%s: %s", ctx, exception)
+        logger.warning(
+            "Authentication bootstrap failed%s: %s", ctx, _log_detail(exception)
+        )
         raise ToolError(str(exception)) from exception
 
     # Not a failure at all: another client signed in while this one was asking
@@ -180,19 +197,21 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     # Contention, not a bug: no issue diagnostics, following RateLimitError.
     elif isinstance(exception, BrowserBusyError):
-        logger.info("Shared browser busy%s: %s", ctx, exception)
+        logger.info("Shared browser busy%s: %s", ctx, _log_detail(exception))
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, DockerHostLoginRequiredError):
-        logger.warning("Docker host login required%s: %s", ctx, exception)
+        logger.warning("Docker host login required%s: %s", ctx, _log_detail(exception))
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, LinuxBrowserDependencyError):
-        logger.warning("Linux browser dependency missing%s: %s", ctx, exception)
+        logger.warning(
+            "Linux browser dependency missing%s: %s", ctx, _log_detail(exception)
+        )
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, BrowserBinaryMissingError):
-        logger.warning("Browser binary missing%s: %s", ctx, exception)
+        logger.warning("Browser binary missing%s: %s", ctx, _log_detail(exception))
         raise ToolError(str(exception)) from exception
 
     # Diagnostics-free, following BrowserBusyError. A browser refusing a profile
@@ -200,7 +219,9 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     # names both versions and the two ways out. Appending an issue template
     # would send users to the tracker for something working as intended.
     elif isinstance(exception, BrowserDowngradeError):
-        logger.warning("Browser older than the profile%s: %s", ctx, exception)
+        logger.warning(
+            "Browser older than the profile%s: %s", ctx, _log_detail(exception)
+        )
         raise ToolError(str(exception)) from exception
 
     # Diagnostics-free, following BrowserDowngradeError: LinkedIn's decision
@@ -211,7 +232,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, SessionExpiredError):
-        logger.warning("Session expired%s: %s", ctx, exception)
+        logger.warning("Session expired%s: %s", ctx, _log_detail(exception))
         _raise_tool_error_with_diagnostics(
             exception,
             "Session expired. Run with --login to create a new browser profile.",
@@ -219,7 +240,9 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         )
 
     elif isinstance(exception, AuthenticationError):
-        logger.warning("Authentication failed%s: %s", ctx, exception)
+        logger.warning("Authentication failed%s: %s", ctx, _log_detail(exception))
+        if _keeps_its_own_message(exception):
+            raise ToolError(str(exception)) from exception
         _raise_tool_error_with_diagnostics(
             exception,
             "Authentication failed. Run with --login to re-authenticate.",
@@ -228,19 +251,21 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
 
     elif isinstance(exception, RateLimitError):
         wait_time = getattr(exception, "suggested_wait_time", 300)
-        logger.warning("Rate limit%s: %s (wait=%ds)", ctx, exception, wait_time)
+        logger.warning(
+            "Rate limit%s: %s (wait=%ds)", ctx, _log_detail(exception), wait_time
+        )
         raise ToolError(
             f"Rate limit detected. Wait {wait_time} seconds before trying again."
         ) from exception
 
     elif isinstance(exception, ProfileNotFoundError):
-        logger.warning("Profile not found%s: %s", ctx, exception)
+        logger.warning("Profile not found%s: %s", ctx, _log_detail(exception))
         raise ToolError(
             "Profile not found. Check the profile URL is correct."
         ) from exception
 
     elif isinstance(exception, ElementNotFoundError):
-        logger.warning("Element not found%s: %s", ctx, exception)
+        logger.warning("Element not found%s: %s", ctx, _log_detail(exception))
         _raise_tool_error_with_diagnostics(
             exception,
             "Element not found. LinkedIn page structure may have changed.",
@@ -250,11 +275,22 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     elif isinstance(exception, ProxyConnectionError):
         # Ahead of NetworkError, which it subclasses. No issue diagnostics: a
         # proxy that is down or misconfigured is not a bug worth reporting.
-        logger.warning("Proxy error%s: %s", ctx, exception)
+        logger.warning("Proxy error%s: %s", ctx, _log_detail(exception))
+        raise ToolError(str(exception)) from exception
+
+    # Also ahead of NetworkError, whose generic text drops the one useful fact:
+    # where the browser landed. No issue diagnostics, following
+    # ProxyConnectionError: a portal on the user's network is not a bug.
+    elif isinstance(exception, OffLinkedInLandingError):
+        logger.warning(
+            "Navigation ended off LinkedIn%s: %s", ctx, _log_detail(exception)
+        )
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, NetworkError):
-        logger.warning("Network error%s: %s", ctx, exception)
+        logger.warning("Network error%s: %s", ctx, _log_detail(exception))
+        if _keeps_its_own_message(exception):
+            raise ToolError(str(exception)) from exception
         _raise_tool_error_with_diagnostics(
             exception,
             "Network error. Check your connection and try again.",
@@ -262,7 +298,7 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
         )
 
     elif isinstance(exception, ScrapingError):
-        logger.warning("Scraping error%s: %s", ctx, exception)
+        logger.warning("Scraping error%s: %s", ctx, _log_detail(exception))
         _raise_tool_error_with_diagnostics(
             exception,
             "Scraping failed. LinkedIn page structure may have changed.",
@@ -275,14 +311,14 @@ def raise_tool_error(exception: Exception, context: str = "") -> NoReturn:
     # says about the reset. Chained, because that middleware finds the loss by
     # walking to this exception.
     elif isinstance(exception, BrowserLostError):
-        logger.warning("Browser lost%s: %s", ctx, exception)
+        logger.warning("Browser lost%s: %s", ctx, _log_detail(exception))
         raise ToolError(str(exception)) from exception
 
     # Ahead of the catch-all, which it subclasses. No issue diagnostics: a
     # reference the caller can correct is not a bug worth reporting, and an
     # issue template appended to it buries the correction it already names.
     elif isinstance(exception, InvalidReferenceError):
-        logger.info("Invalid reference%s: %s", ctx, exception)
+        logger.info("Invalid reference%s: %s", ctx, _log_detail(exception))
         raise ToolError(str(exception)) from exception
 
     elif isinstance(exception, (LinkedInScraperException, LinkedInMCPError)):
