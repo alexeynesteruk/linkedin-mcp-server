@@ -3135,17 +3135,8 @@ class TestInstallerSupervisorLaunch:
             with pytest.raises(BrowserSetupFailedError, match="could not be measured"):
                 bootstrap._installer_download_snapshot(tmp_path, (target,))
 
-    async def test_a_vanished_peak_leaves_the_install_its_result(
-        self, monkeypatch, caplog
-    ):
-        """The ceiling bounds the footprint that stays, not the peak (#815).
-
-        A breach the watcher reports in the same turn the installer exits is
-        never consumed by the supervision loop, so what decides is the final
-        accounting. It runs on every success, which is why an install whose
-        archive is gone and whose tree fits is kept, and said out loud rather
-        than dropped.
-        """
+    async def test_an_observed_peak_refuses_a_successful_exit(self, monkeypatch):
+        """A breach the watcher saw decides, even when the archive is gone (#837)."""
         from linkedin_mcp_server import bootstrap
         from linkedin_mcp_server.exceptions import BrowserSetupFailedError
 
@@ -3164,11 +3155,31 @@ class TestInstallerSupervisorLaunch:
             asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
         )
 
-        with caplog.at_level(logging.WARNING, logger="linkedin_mcp_server.bootstrap"):
+        with pytest.raises(BrowserSetupFailedError, match="exceeded its size limit"):
             await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
 
-        assert proc.returncode == 0, "the install kept its own result"
-        assert "exceeded a setup bound" in caplog.text
+    async def test_a_failed_install_keeps_its_message_over_a_breach(self, monkeypatch):
+        """The installer's own failure still outranks the watcher's report."""
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.exceptions import BrowserSetupFailedError
+
+        proc = _FakeProc([b"ERROR: the mirror refused the archive\n"], 1)
+
+        async def breach(*_args: object) -> None:
+            raise BrowserSetupFailedError("Browser setup exceeded its size limit")
+
+        monkeypatch.setattr(bootstrap, "_watch_installer_activity", breach)
+        monkeypatch.setattr(
+            bootstrap,
+            "_installer_download_snapshot",
+            lambda *_args: (("kept", 1024, 1),),
+        )
+        monkeypatch.setattr(
+            asyncio, "create_subprocess_exec", AsyncMock(return_value=proc)
+        )
+
+        with pytest.raises(BrowserSetupFailedError, match="mirror refused"):
+            await asyncio.wait_for(bootstrap._run_patchright_install("--no-shell"), 5)
 
     async def test_a_failed_install_keeps_its_message_over_the_scan(self, monkeypatch):
         """The installer named the cause, so the accounting may not answer for it.
@@ -8087,6 +8098,79 @@ class TestEnsureBrowserInstalled:
 
         with pytest.raises(BrowserSetupFailedError, match="the mirror refused"):
             ensure_browser_installed()
+
+    @staticmethod
+    def _terminal(monkeypatch, *, on: tuple[int, ...], foreground: bool) -> None:
+        group = os.getpgrp()
+        monkeypatch.setattr(os, "isatty", lambda fd: fd in on)
+        monkeypatch.setattr(
+            os, "tcgetpgrp", lambda _fd: group if foreground else group + 1
+        )
+
+    @pytest.mark.parametrize(
+        ("on", "foreground", "told_on"),
+        [
+            pytest.param((0, 1, 2), True, "out", id="at-a-terminal"),
+            pytest.param((1, 2), True, "out", id="stdin-redirected"),
+            pytest.param((0, 2), True, "err", id="stdout-redirected"),
+            pytest.param((0,), True, None, id="both-outputs-redirected"),
+            pytest.param((0, 1, 2), False, None, id="background-job"),
+            pytest.param((), True, None, id="no-terminal"),
+        ],
+    )
+    def test_a_terminal_user_hears_that_suspending_does_not_pause(
+        self, isolate_profile_dir, monkeypatch, capsys, on, foreground, told_on
+    ):
+        if os.name == "nt":
+            pytest.skip("Windows has no job control")
+        _patch_targets_and_version(monkeypatch)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.bootstrap.browser_ready", lambda: False
+        )
+        self._stub(monkeypatch)
+        self._terminal(monkeypatch, on=on, foreground=foreground)
+
+        ensure_browser_installed()
+
+        captured = capsys.readouterr()
+        said = {
+            name
+            for name, text in (("out", captured.out), ("err", captured.err))
+            if "does not pause the download" in text
+        }
+        assert said == ({told_on} if told_on else set())
+
+    def test_cdp_url_skips_browser_install(self, monkeypatch):
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        cfg = AppConfig()
+        cfg.browser.cdp_url = "http://127.0.0.1:9222"
+        monkeypatch.setattr("linkedin_mcp_server.bootstrap.get_config", lambda: cfg)
+        calls = self._stub(monkeypatch)
+
+        ensure_browser_installed()
+
+        assert calls["value"] == 0
+
+    async def test_cdp_url_marks_background_setup_ready_without_installing(
+        self, monkeypatch
+    ):
+        from linkedin_mcp_server import bootstrap
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        cfg = AppConfig()
+        cfg.browser.cdp_url = "http://127.0.0.1:9222"
+        monkeypatch.setattr(bootstrap, "get_config", lambda: cfg)
+        install = AsyncMock(side_effect=AssertionError("spawned browser install"))
+        monkeypatch.setattr(bootstrap, "_run_background_browser_setup", install)
+        state = bootstrap.get_bootstrap_state()
+        state.setup_state = bootstrap.SetupState.IDLE
+
+        await bootstrap.start_background_browser_setup_if_needed()
+
+        assert state.setup_state == bootstrap.SetupState.READY
+        assert state.setup_task is None
+        install.assert_not_awaited()
 
 
 class TestLoginInstallBackstop:
