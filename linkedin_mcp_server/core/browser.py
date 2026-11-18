@@ -92,6 +92,7 @@ class BrowserManager:
         headless: bool = True,
         slow_mo: int = 0,
         viewport: dict[str, int] | None = None,
+        cdp_url: str | None = None,
         **launch_options: Any,
     ):
         # ``launch_options`` is spread straight into the context options, so a
@@ -123,6 +124,16 @@ class BrowserManager:
         self.user_data_dir = str(Path(user_data_dir).expanduser())
         self.headless = headless
         self.slow_mo = slow_mo
+        # Set, this manager never launches Chromium. It attaches to a Chrome
+        # that is already listening and opens one new tab in the existing
+        # default context, which is the context that holds that profile's cookies.
+        self._cdp_url = cdp_url.strip() if isinstance(cdp_url, str) else None
+        if self._cdp_url == "":
+            self._cdp_url = None
+        #: True once ``start`` has chosen the attach path, including when the
+        #: attach itself fails. ``close`` uses it to avoid ``context.close()``,
+        #: which on a CDP default context closes every tab in that Chrome.
+        self._attached = False
         # Kept as passed, including ``None``. The old ``viewport or {...}``
         # meant "no viewport" could not be expressed at all, which is what
         # forced an emulated screen onto a headed window and produced the
@@ -297,6 +308,19 @@ class BrowserManager:
             raise
         return driver
 
+    async def _remember_detached_groups(self) -> bool:
+        """Register this launch's detached groups, and say whether a cancel came.
+
+        Off the event loop, because outside Linux this waits on a ``ps`` that
+        can take seconds, and every other caller on the loop would wait with
+        it. Cancels are held back until it finishes, because the cleanup they
+        lead to relies on this registration and must not race it.
+        """
+        _, cancelled = await await_deferring_cancels(
+            asyncio.to_thread(remember_detached_process_groups, self._process_marker)
+        )
+        return cancelled
+
     def _begin_a_launch(self) -> None:
         """Take this manager into a new launch, or refuse to.
 
@@ -361,13 +385,34 @@ class BrowserManager:
         self._lost = None
 
     async def start(self) -> None:
-        """Start Patchright and launch persistent browser context."""
+        """Start Patchright and launch persistent browser context.
+
+        With ``cdp_url`` set, attach to that Chrome instead and do not launch.
+        """
         if self._context is not None:
             raise RuntimeError("Browser already started. Call close() first.")
         # Before the driver, and before anything that could spawn a process:
         # every launch-specific answer this object carries is either replaced
         # here or refuses the launch outright.
         self._begin_a_launch()
+        if self._cdp_url:
+            # Before the first await of the attach, so a cancel still closes
+            # only our tab. The flag is what keeps ``close`` off the shared context.
+            self._attached = True
+            try:
+                await self._start_attached()
+            except BaseException as exc:
+                closed, _ = await await_deferring_cancels(self.close())
+                self._close_confirmed = closed
+                if not closed:
+                    raise BrowserShutdownUnconfirmedError(
+                        "Detaching from the existing Chrome did not finish, "
+                        "so this server will not open another tab on it. "
+                        "Restart the server to recover. The remote Chrome "
+                        "was not closed."
+                    ) from exc
+                raise
+            return
         try:
             driver = await self._start_contained_driver()
 
@@ -426,7 +471,8 @@ class BrowserManager:
                 # A launch can leave detached Chromium behind even when Patchright
                 # never returns a context. Retain its group while the Node driver's
                 # ancestry still makes it discoverable.
-                remember_detached_process_groups(self._process_marker)
+                if await self._remember_detached_groups():
+                    raise asyncio.CancelledError
                 # A headed launch needs somewhere to put a window, and whether
                 # this machine has one cannot be decided from the platform name
                 # alone: a Mac reached over SSH, a launchd daemon, or a CI
@@ -534,7 +580,8 @@ class BrowserManager:
             # Patchright starts Chromium in its own POSIX process group. Capture
             # that group before page setup or authentication can fail and before
             # the Node driver can exit and reparent it.
-            remember_detached_process_groups(self._process_marker)
+            if await self._remember_detached_groups():
+                raise asyncio.CancelledError
             logger.info(
                 "Persistent browser launched (headless=%s, user_data_dir=%s)",
                 self.headless,
@@ -567,8 +614,10 @@ class BrowserManager:
         except BaseException as e:
             # A failure before a context was returned can still have spawned a
             # detached browser. This is idempotent with the two launch checkpoints
-            # above and must run before cleanup can make ancestry disappear.
-            remember_detached_process_groups(self._process_marker)
+            # above and must run before cleanup can make ancestry disappear. A
+            # cancel arriving meanwhile is held like one during the close below,
+            # and this handler raises anyway once the profile is settled.
+            await self._remember_detached_groups()
             # BaseException so a cancelled launch is cleaned up too: Chromium may
             # already be running, and leaving it would hold the profile.
             #
@@ -632,6 +681,96 @@ class BrowserManager:
                 ) from e
             raise
 
+    async def _start_attached(self) -> None:
+        """Connect to an existing Chrome and open one new tab.
+
+        The default browser context is the profile Chrome already has open, so
+        its cookies come along. A new context would be empty. ``new_page`` adds
+        a tab and leaves every tab that was already there alone.
+
+        Nothing here calls ``launch_persistent_context``, creates a profile
+        directory, or registers a process marker against a browser this
+        process did not start. ``remember_detached_process_groups`` is what
+        would make a later drain eligible to signal a local process group;
+        skipping it keeps the remote Chrome out of that bookkeeping.
+        """
+        url = self._cdp_url
+        assert url is not None
+        driver = await self._start_contained_driver()
+        try:
+            browser = await driver.chromium.connect_over_cdp(url)
+        except Exception as exc:
+            raise NetworkError(
+                f"Could not attach to the existing Chrome at {url} "
+                f"({type(exc).__name__}: {exc}). The web-headed tunnel or "
+                "agent-chrome is down. This server will not start a second browser."
+            ) from None
+        contexts = browser.contexts
+        if not contexts:
+            raise NetworkError(
+                f"Attached to {url}, but Chrome exposed no browser context. "
+                "This server will not start a second browser."
+            )
+        # The first context is the default one: the persistent profile.
+        self._context = contexts[0]
+        self._page = await self._context.new_page()
+        self._watch_for_loss(self._context, self._page)
+        logger.info("Attached to existing Chrome over CDP at %s (new tab)", url)
+
+    async def _close_attached(self) -> bool:
+        """Close only the tab this manager opened, then drop the CDP client.
+
+        ``context.close()`` and ``browser.close()`` are not used. On a Chrome
+        connected over CDP the default context is the user's profile, and
+        closing it closes every tab. Stopping the local driver drops the
+        websocket; a Chrome that was already running keeps running.
+        """
+        if self._close_proven:
+            return True
+
+        page = self._page
+        playwright = self._playwright
+        self._context = None
+        self._page = None
+        self._playwright = None
+        self._close_interrupted = True
+
+        if page is not None:
+            try:
+                if not page.is_closed():
+                    await asyncio.wait_for(
+                        page.close(), timeout=_CLEANUP_TIMEOUT_SECONDS
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Could not close the LinkedIn tab (%s). The remote Chrome "
+                    "is left running.",
+                    type(exc).__name__,
+                )
+
+        if playwright is not None:
+            try:
+                await asyncio.wait_for(
+                    playwright.stop(), timeout=_CLEANUP_TIMEOUT_SECONDS
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not disconnect from Chrome (%s). The remote Chrome "
+                    "is left running.",
+                    type(exc).__name__,
+                )
+
+        # No browser was launched, so there is no process tree to drain. A
+        # drain that scanned a marker we never handed to a process would still
+        # be a scan, and a Windows Job terminate would be aimed at the local
+        # driver, which ``stop`` already ended.
+        self._close_proven = True
+        self._close_interrupted = False
+        self._close_confirmed = True
+        forget_browser_process_marker(self._process_marker)
+        logger.info("Disconnected from existing Chrome; remote browser left running")
+        return True
+
     async def close(self) -> bool:
         """Close persistent context and cleanup resources.
 
@@ -653,7 +792,12 @@ class BrowserManager:
         to prove the browser is. A ``start()`` after a proved close opens a new
         launch and clears that record with everything else it owns; see
         :meth:`_begin_a_launch`.
+
+        An attached session never takes the drain path. Closing the shared
+        context would close every tab in the Chrome we attached to.
         """
+        if self._attached:
+            return await self._close_attached()
         if self._close_proven:
             # Proved once, and the marker was forgotten on the strength of it.
             # Draining again would scan the machine for something no process

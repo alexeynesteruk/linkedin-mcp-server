@@ -14,7 +14,7 @@ from urllib.parse import unquote, urlsplit
 
 from dotenv import load_dotenv
 
-from .schema import AppConfig, ConfigurationError
+from .schema import DEFAULT_CDP_URL, AppConfig, ConfigurationError
 
 # Load .env file if present
 load_dotenv()
@@ -207,6 +207,7 @@ class EnvironmentKeys:
     SLOW_MO = "SLOW_MO"
     VIEWPORT = "VIEWPORT"
     CHROME_PATH = "CHROME_PATH"
+    LINKEDIN_CDP_URL = "LINKEDIN_CDP_URL"
     PROXY_SERVER = "PROXY_SERVER"
     PROXY_USERNAME = "PROXY_USERNAME"
     PROXY_PASSWORD = "PROXY_PASSWORD"
@@ -437,6 +438,11 @@ def load_from_env(config: AppConfig) -> AppConfig:
     if chrome_path_env := os.environ.get(EnvironmentKeys.CHROME_PATH):
         config.browser.chrome_path = chrome_path_env
 
+    # Attach to a Chrome that is already running. Unset keeps the Patchright
+    # persistent profile. ``_env`` drops an empty value and an MCPB placeholder.
+    if cdp_url := _env(EnvironmentKeys.LINKEDIN_CDP_URL):
+        config.browser.cdp_url = cdp_url
+
     # The public proxy settings are refused. A differential row may still name
     # a loopback proxy; that variable is not one of the retired settings.
     for key, placeholder in _RETIRED_PROXY_PLACEHOLDERS.items():
@@ -619,6 +625,27 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
         default=None,
         metavar="PATH",
         help="Path to Chrome/Chromium executable (for custom browser installations)",
+    )
+
+    parser.add_argument(
+        "--attach-cdp",
+        action="store_true",
+        help=(
+            "Drive an already-running Chrome over CDP instead of launching one. "
+            f"Uses LINKEDIN_CDP_URL, or {DEFAULT_CDP_URL} when that is unset. "
+            "Does not start a browser or read the Mac keychain."
+        ),
+    )
+
+    parser.add_argument(
+        "--cdp-url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help=(
+            "CDP endpoint for --attach-cdp. Setting this enables attach mode. "
+            f"Default when attaching: {DEFAULT_CDP_URL}."
+        ),
     )
 
     parser.add_argument(
@@ -841,6 +868,11 @@ def load_from_args(config: AppConfig, argv: Sequence[str]) -> AppConfig:
 
     if args.chrome_path:
         config.browser.chrome_path = args.chrome_path
+
+    if args.cdp_url:
+        config.browser.cdp_url = args.cdp_url
+    elif args.attach_cdp and not config.browser.cdp_url:
+        config.browser.cdp_url = DEFAULT_CDP_URL
 
     if args.proxy_server:
         raise ConfigurationError(_PROXY_REMOVED.format(setting="--proxy-server"))

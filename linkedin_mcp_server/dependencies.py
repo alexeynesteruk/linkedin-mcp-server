@@ -14,8 +14,11 @@ from linkedin_mcp_server.bootstrap import (
     invalidate_auth_and_trigger_relogin,
     invalidate_browser_setup,
 )
+from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.schema import configured_cdp_url
 from linkedin_mcp_server.core.exceptions import AuthenticationError, NetworkError
 from linkedin_mcp_server.drivers.browser import (
+    cdp_login_required_message,
     close_browser,
     ensure_authenticated,
     get_or_create_browser,
@@ -139,6 +142,12 @@ async def handle_auth_error(
         # has been opened", opened none, and left a state only a restart clears.
         raise BrowserShutdownUnconfirmedError() from error
 
+    if cdp_url := configured_cdp_url(get_config().browser):
+        # Attach mode owns neither the browser nor a local Patchright profile.
+        # Detaching our tab above is the whole cleanup; never rotate local files
+        # or launch a second browser window.
+        raise AuthenticationError(cdp_login_required_message(cdp_url)) from error
+
     if process_role() is ServerRole.OWNER:
         # The browser is down and the lease is free, so the client can take over.
         # Recorded before raising so the next forwarded call is answered from the
@@ -173,7 +182,10 @@ async def get_ready_extractor(
     except AuthenticationError as e:
         # Boundary validation may run first, but no tool work has started here,
         # so the client may safely run the call again once it has signed in.
-        await handle_auth_error(e, ctx, nothing_ran_yet=True)  # always raises
+        try:
+            await handle_auth_error(e, ctx, nothing_ran_yet=True)  # always raises
+        except AuthenticationError as relogin_exc:
+            raise_tool_error(relogin_exc, tool_name)
     except Exception as e:
         if isinstance(e, NetworkError) and _is_browser_binary_missing_error(e):
             invalidate_browser_setup()

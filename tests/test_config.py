@@ -1299,3 +1299,63 @@ class TestProxyEncodedUserinfo:
         config = BrowserConfig(proxy_server="http://gate.example:7000")
         config.validate()
         assert config.proxy_server == "http://gate.example:7000"
+
+
+class TestCdpAttachConfig:
+    """Attach mode is opt-in. Unset, the server still launches its own browser."""
+
+    def test_default_is_off(self):
+        assert BrowserConfig().cdp_url is None
+
+    def test_env_sets_the_endpoint(self, monkeypatch):
+        monkeypatch.setenv("LINKEDIN_CDP_URL", "http://127.0.0.1:9322")
+        from linkedin_mcp_server.config import load_config
+
+        assert load_config([]).browser.cdp_url == "http://127.0.0.1:9322"
+
+    def test_attach_flag_uses_the_tunnel_when_no_url_is_set(self):
+        from linkedin_mcp_server.config import load_config
+        from linkedin_mcp_server.config.schema import DEFAULT_CDP_URL
+
+        config = load_config(["--attach-cdp"])
+        assert config.browser.cdp_url == DEFAULT_CDP_URL
+
+    def test_flag_keeps_an_env_url(self, monkeypatch):
+        monkeypatch.setenv("LINKEDIN_CDP_URL", "http://localhost:9322/")
+        from linkedin_mcp_server.config import load_config
+
+        assert load_config(["--attach-cdp"]).browser.cdp_url == "http://localhost:9322/"
+
+    def test_cdp_url_flag_overrides_env(self, monkeypatch):
+        monkeypatch.setenv("LINKEDIN_CDP_URL", "http://127.0.0.1:1111")
+        from linkedin_mcp_server.config import load_config
+
+        assert (
+            load_config(["--cdp-url", "http://127.0.0.1:9322"]).browser.cdp_url
+            == "http://127.0.0.1:9322"
+        )
+
+    def test_non_loopback_is_refused(self, monkeypatch):
+        monkeypatch.setenv("LINKEDIN_CDP_URL", "http://example.com:9222")
+        from linkedin_mcp_server.config import load_config
+
+        with pytest.raises(ConfigurationError, match="loopback"):
+            load_config([])
+
+    def test_credentials_are_refused_without_being_echoed(self):
+        with pytest.raises(ConfigurationError, match="credentials") as excinfo:
+            BrowserConfig(cdp_url="http://user:secret@127.0.0.1:9322").validate()
+        assert "secret" not in str(excinfo.value)
+
+    def test_login_is_refused_while_attaching(self):
+        from linkedin_mcp_server.config import load_config
+
+        with pytest.raises(ConfigurationError, match="will not --login"):
+            load_config(["--attach-cdp", "--login"])
+
+    def test_import_is_refused_while_attaching(self, monkeypatch):
+        monkeypatch.setenv("LINKEDIN_CDP_URL", "http://127.0.0.1:9322")
+        from linkedin_mcp_server.config import load_config
+
+        with pytest.raises(ConfigurationError, match="import-from-browser"):
+            load_config(["--import-from-browser"])

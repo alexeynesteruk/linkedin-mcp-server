@@ -72,6 +72,72 @@ class TestHandleAuthError:
                     AuthenticationError("Session expired"), ctx=None
                 )
 
+    async def test_cdp_url_closes_tab_without_rotating_profile_or_relogin(self):
+        """Attached CDP sessions never rotate the local profile or open a second login window."""
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        cfg = AppConfig()
+        cfg.browser.cdp_url = "http://127.0.0.1:9222"
+        with (
+            patch("linkedin_mcp_server.dependencies.get_config", return_value=cfg),
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                new_callable=AsyncMock,
+            ) as mock_close,
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+            ) as mock_relogin,
+        ):
+            with pytest.raises(
+                AuthenticationError,
+                match=r"LinkedIn is not signed in in the existing Chrome at http://127\.0\.0\.1:9222",
+            ):
+                await handle_auth_error(
+                    AuthenticationError("Session expired"), ctx=None
+                )
+
+            mock_close.assert_awaited_once()
+            mock_relogin.assert_not_awaited()
+
+    async def test_get_ready_extractor_surfaces_cdp_auth_error_as_tool_error(self):
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        cfg = AppConfig()
+        cfg.browser.cdp_url = "http://127.0.0.1:9222"
+        with (
+            patch("linkedin_mcp_server.dependencies.get_config", return_value=cfg),
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_tool_ready_or_raise",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.get_or_create_browser",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.ensure_authenticated",
+                new_callable=AsyncMock,
+                side_effect=AuthenticationError("Session expired"),
+            ),
+            patch(
+                "linkedin_mcp_server.dependencies.close_browser",
+                new_callable=AsyncMock,
+            ) as mock_close,
+            patch(
+                "linkedin_mcp_server.dependencies.invalidate_auth_and_trigger_relogin",
+                new_callable=AsyncMock,
+            ) as mock_relogin,
+        ):
+            with pytest.raises(
+                ToolError,
+                match=r"LinkedIn is not signed in in the existing Chrome at http://127\.0\.0\.1:9222",
+            ):
+                await get_ready_extractor(ctx=None, tool_name="get_person_profile")
+
+            mock_close.assert_awaited_once()
+            mock_relogin.assert_not_awaited()
+
 
 class TestGetReadyExtractor:
     async def test_ready_resumes_to_scrape_path(self):

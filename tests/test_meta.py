@@ -114,6 +114,27 @@ class TestHealthPayload:
         assert "warnings" not in payload
         assert payload["storage"]["profile_dir"] == str(profile_dir.resolve())
 
+    def test_cdp_url_reports_healthy_without_managed_chromium_or_local_session(
+        self, monkeypatch
+    ):
+        from linkedin_mcp_server.config.schema import AppConfig
+
+        cfg = AppConfig()
+        cfg.browser.cdp_url = "http://127.0.0.1:9222"
+        monkeypatch.setattr("linkedin_mcp_server.tools.meta.get_config", lambda: cfg)
+        monkeypatch.setattr(
+            "linkedin_mcp_server.tools.meta.browser_setup_ready", lambda: False
+        )
+        get_bootstrap_state().setup_state = SetupState.READY
+
+        payload = build_health_payload()
+
+        assert payload["ok"] is True
+        assert payload["bootstrap"]["browser_ready"] is True
+        assert payload["bootstrap"]["auth_ready"] is True
+        assert payload["session"]["cdp_url"] == "http://127.0.0.1:9222"
+        assert "warnings" not in payload
+
     def test_session_is_not_ready_when_the_source_lookup_raises(
         self, profile_dir, monkeypatch
     ):

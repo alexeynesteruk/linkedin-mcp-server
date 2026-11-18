@@ -1464,3 +1464,134 @@ async def test_start_orders_driver_containment_guard_and_launch(tmp_path, monkey
             await manager.start()
 
     assert events[:4] == ["driver", "contain", "guard", "launch"]
+
+
+class TestCdpAttach:
+    """Attaching opens one tab on someone else's Chrome and closes only that tab."""
+
+    async def test_start_connects_and_close_leaves_the_browser(self, tmp_path):
+        profile = tmp_path / "profile"
+        page_closed = False
+        context_closed = False
+        browser_closed = False
+        launched = False
+        endpoint = {}
+
+        class _Page:
+            def is_closed(self):
+                return page_closed
+
+            async def close(self):
+                nonlocal page_closed
+                page_closed = True
+
+            def on(self, *_args, **_kwargs):
+                return None
+
+        class _Context:
+            def __init__(self):
+                self._page = _Page()
+
+            async def new_page(self):
+                return self._page
+
+            async def close(self):
+                nonlocal context_closed
+                context_closed = True
+
+            def on(self, *_args, **_kwargs):
+                return None
+
+            @property
+            def browser(self):
+                return _Browser()
+
+        class _Browser:
+            def __init__(self):
+                self.contexts = [_Context()]
+
+            async def close(self):
+                nonlocal browser_closed
+                browser_closed = True
+
+            def on(self, *_args, **_kwargs):
+                return None
+
+            def is_connected(self):
+                return True
+
+        opened = _Browser()
+
+        class _Chromium:
+            async def connect_over_cdp(self, url, **_kwargs):
+                endpoint["url"] = url
+                return opened
+
+            async def launch_persistent_context(self, *_args, **_kwargs):
+                nonlocal launched
+                launched = True
+                raise AssertionError("attach mode must not launch a browser")
+
+        class _Playwright:
+            chromium = _Chromium()
+            stopped = False
+
+            async def stop(self):
+                self.stopped = True
+
+        playwright = _Playwright()
+
+        async def start_driver():
+            return playwright
+
+        manager = BrowserManager(
+            user_data_dir=profile,
+            cdp_url="http://127.0.0.1:9322",
+        )
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as async_playwright:
+            async_playwright.return_value.start = start_driver
+            await manager.start()
+            confirmed = await manager.close()
+
+        assert endpoint["url"] == "http://127.0.0.1:9322"
+        assert confirmed is True
+        assert page_closed is True
+        assert context_closed is False
+        assert browser_closed is False
+        assert launched is False
+        assert playwright.stopped is True
+        assert not profile.exists()
+
+    async def test_a_dead_endpoint_does_not_launch(self, tmp_path):
+        launched = False
+
+        class _Chromium:
+            async def connect_over_cdp(self, _url, **_kwargs):
+                raise RuntimeError("connection refused")
+
+            async def launch_persistent_context(self, *_args, **_kwargs):
+                nonlocal launched
+                launched = True
+
+        class _Playwright:
+            chromium = _Chromium()
+
+            async def stop(self):
+                return None
+
+        async def start_driver():
+            return _Playwright()
+
+        manager = BrowserManager(
+            user_data_dir=tmp_path / "profile", cdp_url="http://127.0.0.1:9322"
+        )
+        with mock.patch(
+            "linkedin_mcp_server.core.browser.async_playwright"
+        ) as async_playwright:
+            async_playwright.return_value.start = start_driver
+            with pytest.raises(NetworkError, match="will not start a second browser"):
+                await manager.start()
+
+        assert launched is False

@@ -37,6 +37,9 @@ DEFAULT_BROWSER_MIN_HOLD_SECONDS: float = 20.0
 # notices on a one-second poll and then has to tear Chromium down (~0.7s
 # measured). Without it a waiter gives up moments before the handover lands.
 BROWSER_HANDOFF_MARGIN_SECONDS: float = 3.0
+# Mac end of the web-headed SSH tunnel. Chrome itself listens on the VM at
+# 127.0.0.1:9222; this process only dials the tunnel.
+DEFAULT_CDP_URL = "http://127.0.0.1:9322"
 # How long a one-shot operation waits for another process to hand the profile
 # over. A user-experience limit rather than a derived worst case, and the
 # distinction is worth stating because the arithmetic invites the wrong one: an
@@ -129,6 +132,43 @@ class ConfigurationError(Exception):
     """Raised when configuration validation fails."""
 
 
+def configured_cdp_url(browser: object) -> str | None:
+    """The attach endpoint on *browser*, or none when it has no such field.
+
+    A stand-in config used by tests omits ``cdp_url``. That is the same as an
+    unset endpoint: the server launches its own browser.
+    """
+    url = getattr(browser, "cdp_url", None)
+    if isinstance(url, str) and url:
+        return url
+    return None
+
+
+def _normalized_cdp_url(value: str) -> str:
+    """Require a loopback http(s) CDP endpoint and return it stripped.
+
+    The debugging port is not authenticated. A non-loopback URL would hand
+    this process control of whatever browser answered, so it is refused.
+    The value is not quoted in errors: a URL can carry credentials.
+    """
+    raw = value.strip()
+    parts = urlsplit(raw)
+    if parts.scheme not in {"http", "https"} or not parts.hostname:
+        raise ConfigurationError(
+            "cdp_url must be an http(s) URL with a host, "
+            f"for example {DEFAULT_CDP_URL}."
+        )
+    if parts.username is not None or parts.password is not None:
+        raise ConfigurationError("cdp_url must not include credentials.")
+    if not is_loopback_host(parts.hostname):
+        raise ConfigurationError(
+            "cdp_url must be a loopback address. On the VM that is "
+            "http://127.0.0.1:9222 (the existing agent-chrome). From the Mac, "
+            f"the tunnel default is {DEFAULT_CDP_URL}."
+        )
+    return raw
+
+
 @dataclass
 class BrowserConfig:
     """Configuration for browser settings."""
@@ -146,6 +186,10 @@ class BrowserConfig:
     viewport_height: int = 720
     default_timeout: int = 5000  # Milliseconds for page operations
     chrome_path: str | None = None  # Path to Chrome/Chromium executable
+    # None launches this server's own Patchright profile. A loopback http(s)
+    # URL attaches to a Chrome that is already running (web-headed's
+    # agent-chrome, via the Mac tunnel) and does not start a browser.
+    cdp_url: str | None = None
     user_data_dir: str = DEFAULT_USER_DATA_DIR  # Persistent browser profile
     # Always None from user configuration: PROXY_* and the --proxy-* flags are
     # refused at startup. The fields stay because SHARED_CONFIG_FIELDS hashes
@@ -280,7 +324,11 @@ class BrowserConfig:
                 latest_useful_hold,
             )
             self.browser_min_hold_seconds = latest_useful_hold
-        if self.chrome_path:
+        if self.cdp_url is not None:
+            self.cdp_url = _normalized_cdp_url(self.cdp_url)
+        # Unused while attaching: that Chrome is already running, so a missing
+        # local binary must not block the attach.
+        if self.chrome_path and not self.cdp_url:
             chrome_path = Path(self.chrome_path)
             if not chrome_path.exists():
                 raise ConfigurationError(
@@ -494,10 +542,37 @@ class AppConfig:
         """Validate all configuration values. Call after modifying config."""
         self.browser.validate()
         self.server.validate()
+        self._refuse_local_session_commands_while_attached()
         if self.server.transport == "streamable-http":
             self._validate_transport_config()
             self._validate_path_format()
         self._validate_port_range()
+
+    def _refuse_local_session_commands_while_attached(self) -> None:
+        """Login, logout, and cookie import belong to the local profile.
+
+        Attach mode drives a Chrome that is already signed in. Those commands
+        would launch another browser or read the Mac keychain, which is the
+        opposite of attaching.
+        """
+        if not self.browser.cdp_url:
+            return
+        blocked: list[str] = []
+        if self.server.login:
+            blocked.append("--login")
+        if self.server.logout:
+            blocked.append("--logout")
+        if self.server.import_from_browser is not None:
+            blocked.append("--import-from-browser")
+        if not blocked:
+            return
+        raise ConfigurationError(
+            "CDP attach uses the LinkedIn session already in that Chrome and "
+            "will not "
+            + ", ".join(blocked)
+            + ". Log into LinkedIn once in the web-headed Chrome "
+            "(http://localhost:6080/vnc.html?autoconnect=1&resize=scale)."
+        )
 
     def _validate_transport_config(self) -> None:
         """Validate transport configuration is consistent."""

@@ -1,0 +1,36 @@
+# Slim LinkedIn MCP for the router VM.
+# Attaches to the existing agent-chrome over CDP. Does not install Chromium,
+# Xvfb, or noVNC — those would duplicate agent-chrome and waste the 8 GB cap.
+FROM python:3.13-slim-bookworm
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+RUN groupadd --gid 1600 mcp \
+    && useradd --uid 1600 --gid 1600 --no-create-home --home-dir /data \
+        --shell /usr/sbin/nologin mcp \
+    && mkdir -p /data \
+    && chown 1600:1600 /data
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md ./
+RUN uv sync --frozen --no-install-project --no-dev --no-editable --compile-bytecode
+
+COPY . .
+RUN uv pip install --python /app/.venv/bin/python --no-deps --compile-bytecode \
+    --build-constraints build-constraints.txt .
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    HOME=/data \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    LINKEDIN_TRACE_MODE=off \
+    LINKEDIN_MCP_CHECK_FOR_UPDATES=off
+
+COPY docker-entrypoint-cdp.sh /usr/local/bin/linkedin-cdp-entrypoint
+RUN chmod 755 /usr/local/bin/linkedin-cdp-entrypoint
+
+USER 1600:1600
+
+ENTRYPOINT ["linkedin-cdp-entrypoint"]
+CMD []

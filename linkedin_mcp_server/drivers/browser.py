@@ -11,7 +11,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from typing import Any, TypeVar
 
 from linkedin_mcp_server.common_utils import harden_linkedin_tree, secure_mkdir
@@ -19,12 +19,16 @@ from linkedin_mcp_server.core import (
     AuthenticationError,
     BrowserManager,
     NetworkError,
+    OffLinkedInLandingError,
     await_deferring_cancels,
     detect_auth_barrier_quick,
     detect_rate_limit,
     goto_reporting_proxy_errors,
+    is_another_site,
+    is_linkedin_landing,
     is_logged_in,
     proxy_hint,
+    raise_if_off_linkedin,
     raise_if_proxy_configured,
     redact_proxy_credentials,
     raise_if_proxy_error,
@@ -36,6 +40,7 @@ from linkedin_mcp_server.core.browser_loss import browser_loss_in
 from linkedin_mcp_server.browser_launch import build_launch_options, describe_launch
 from linkedin_mcp_server.common_utils import utcnow_iso
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.schema import configured_cdp_url
 from linkedin_mcp_server.debug_trace import record_page_trace
 from linkedin_mcp_server.debug_utils import stabilize_navigation
 from linkedin_mcp_server.exceptions import (
@@ -217,12 +222,39 @@ def _unreachable_error_code(exc: BaseException) -> str | None:
     return next((code for code in _UNREACHABLE_ERROR_CODES if code in message), None)
 
 
+async def _refuse_a_landing_off_linkedin(
+    browser: BrowserManager, step: str, *, hostless_too: bool = True
+) -> None:
+    """Raise when the feed check is looking at a page LinkedIn did not serve.
+
+    Raised, never answered with a verdict. False makes the caller retire the
+    profile and open a login through the portal that is in the way, and True
+    would accept another site's page as a signed-in session.
+
+    *hostless_too* is off after a failed navigation, where a blank document or
+    the browser's own error page is what the failure left behind and the
+    failure itself is the better report.
+    """
+    url = browser.page.url
+    if is_linkedin_landing(url):
+        return
+    if not hostless_too and not is_another_site(url):
+        return
+    await record_page_trace(browser.page, step)
+    raise_if_off_linkedin(url)
+
+
 async def _feed_auth_succeeds(
     browser: BrowserManager,
     *,
     allow_remember_me: bool = True,
 ) -> bool:
-    """Validate that /feed/ loads without an auth barrier."""
+    """Validate that /feed/ loads without an auth barrier.
+
+    Raises:
+        OffLinkedInLandingError: When the navigation ended on a page LinkedIn
+            did not serve, which says nothing about the session.
+    """
     try:
         await goto_reporting_proxy_errors(
             browser.page,
@@ -235,6 +267,9 @@ async def _feed_auth_succeeds(
             "feed-after-goto",
             extra={"allow_remember_me": allow_remember_me},
         )
+        # Ahead of the remember-me click and the barrier check, so neither
+        # runs on another site's page.
+        await _refuse_a_landing_off_linkedin(browser, "feed-off-linkedin")
         if allow_remember_me:
             if await resolve_remember_me_prompt(browser.page):
                 await stabilize_navigation("remember-me resolution", logger)
@@ -245,6 +280,9 @@ async def _feed_auth_succeeds(
                 )
                 return await _feed_auth_succeeds(browser, allow_remember_me=False)
         barrier = await detect_auth_barrier_quick(browser.page)
+        # Again, because the waits above give a redirect time to land, and a
+        # verdict either way is only about LinkedIn while the page still is.
+        await _refuse_a_landing_off_linkedin(browser, "feed-off-linkedin-settled")
         if barrier is not None:
             await record_page_trace(
                 browser.page,
@@ -254,6 +292,9 @@ async def _feed_auth_succeeds(
             await _log_feed_failure_context(browser, barrier)
             return False
         return True
+    except OffLinkedInLandingError:
+        # Also the recursive retries' refusal, which runs inside this try.
+        raise
     except Exception as exc:
         # Before anything else: a proxy fault is not a dead session. Returning
         # False here would have the caller retire a valid profile and tell the
@@ -279,6 +320,12 @@ async def _feed_auth_succeeds(
         # to /login and merely missed the load event, which is real evidence
         # about the session and must outrank the proxy explanation below.
         barrier = await detect_auth_barrier_quick(browser.page)
+        # A navigation that timed out after committing a portal's page is not
+        # evidence about the session either, and neither verdict may be given
+        # about one. After the read, so a redirect during it is seen too.
+        await _refuse_a_landing_off_linkedin(
+            browser, "feed-navigation-error-off-linkedin", hostless_too=False
+        )
         detail = redact_proxy_credentials(f"{type(exc).__name__}: {exc}")
         await record_page_trace(
             browser.page,
@@ -356,6 +403,47 @@ async def _close_holding_back_cancels(browser: BrowserManager) -> tuple[bool, bo
     return await await_deferring_cancels(browser.close())
 
 
+def _jar_has_linkedin_session(cookies: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether *cookies* holds an ``li_at`` on LinkedIn's own domain."""
+    for cookie in cookies:
+        domain = cookie.get("domain") or ""
+        if cookie.get("name") == "li_at" and (
+            domain == "linkedin.com" or domain.endswith(".linkedin.com")
+        ):
+            return True
+    return False
+
+
+async def _restore_portable_session_if_the_store_lost_it(
+    browser: BrowserManager, profile_dir: Path
+) -> None:
+    """Load ``cookies.json`` when the profile store opened without a session.
+
+    The store is SQLite. A browser that exits while its journal is still hot
+    rolls that journal back on the next open, and the jar comes up empty. The
+    portable file sits beside the profile and is not part of that rollback, but
+    this path otherwise trusts the store alone. The close then exports the
+    empty jar over the file, and the session is gone for good. Measured on
+    Windows CI: the file and the store both held the staged ``li_at`` after
+    staging, every request of the next browser carried none, and the close
+    wrote zero cookies.
+
+    A jar that already has ``li_at`` is left alone, so a session newer than
+    the file is not replaced by it. An empty file is the logged-out state and
+    imports as a no-op.
+    """
+    cookie_path = portable_cookie_path(profile_dir)
+    if not cookie_path.is_file():
+        return
+    if _jar_has_linkedin_session(await browser.context.cookies()):
+        return
+    if await browser.import_cookies(cookie_path):
+        logger.info(
+            "Restored the portable session into %s; its store had no li_at",
+            profile_dir,
+        )
+
+
 async def _authenticate_existing_profile(
     profile_dir: Path,
     *,
@@ -369,6 +457,10 @@ async def _authenticate_existing_profile(
     )
     try:
         await browser.start()
+        # Before the feed check, which is itself a navigation. A store that
+        # rolled back is empty from the first request, and that request is
+        # what the close would then export over the portable file.
+        await _restore_portable_session_if_the_store_lost_it(browser, profile_dir)
         if not await _feed_auth_succeeds(browser):
             raise AuthenticationError(
                 f"Stored runtime profile is invalid: {profile_dir}. "
@@ -790,9 +882,63 @@ async def _create_browser() -> BrowserManager:
     return browser
 
 
+_AGENT_CHROME_VIEWER = "http://localhost:6080/vnc.html?autoconnect=1&resize=scale"
+
+
+def cdp_login_required_message(cdp_url: str) -> str:
+    """What to tell the operator when the attached Chrome has no LinkedIn session."""
+    return (
+        "LinkedIn is not signed in in the existing Chrome "
+        f"at {cdp_url}. Log in once in that browser through the web-headed "
+        f"viewer ({_AGENT_CHROME_VIEWER}), then retry. "
+        "This server will not start a second browser."
+    )
+
+
+async def _attach_shared_chrome(cdp_url: str) -> BrowserManager:
+    """Open one tab on an already-running Chrome and require a LinkedIn session.
+
+    The profile cookies are the ones already in that Chrome. Nothing is read
+    from the Mac keychain, and a missing login does not fall through to
+    launching Patchright.
+    """
+    config = get_config()
+    browser = BrowserManager(
+        headless=_headless,
+        slow_mo=config.browser.slow_mo,
+        cdp_url=cdp_url,
+    )
+    try:
+        await browser.start()
+        if not await _feed_auth_succeeds(browser):
+            raise AuthenticationError(cdp_login_required_message(cdp_url))
+        browser.is_authenticated = True
+        return browser
+    except BaseException as exc:
+        closed, _ = await _close_holding_back_cancels(browser)
+        if not closed:
+            raise BrowserShutdownUnconfirmedError(
+                "The LinkedIn tab on the existing Chrome did not close cleanly. "
+                "The remote Chrome was not shut down. Restart the server to "
+                "recover."
+            ) from exc
+        raise
+
+
 async def _create_browser_locked() -> BrowserManager:
     """Build the singleton browser; the profile lease is already held."""
     global _browser, _browser_cookie_export_path
+
+    cdp_url = configured_cdp_url(get_config().browser)
+    if cdp_url:
+        browser = await _attach_shared_chrome(cdp_url)
+        _apply_browser_settings(browser)
+        _browser = browser
+        # The session lives in the attached Chrome. Do not copy its cookies
+        # into the local Patchright profile.
+        _browser_cookie_export_path = None
+        logger.info("Using existing Chrome at %s", cdp_url)
+        return _browser
 
     launch_options, viewport = _launch_options()
     source_profile_dir = get_profile_dir()

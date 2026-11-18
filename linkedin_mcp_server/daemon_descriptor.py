@@ -154,6 +154,7 @@ SHARED_CONFIG_FIELDS = (
     "viewport_height",
     "default_timeout",
     "chrome_path",
+    "cdp_url",
     "proxy_server",
     "proxy_username",
     "proxy_password",
@@ -791,6 +792,9 @@ def _normalize(name: str, value: Any) -> Any:
     if name == "chrome_path":
         path = Path(str(value)).expanduser().resolve()
         return os.path.normcase(str(path))
+    if name == "cdp_url":
+        # The trailing slash is not a different browser.
+        return str(value).strip().rstrip("/")
     if name == "proxy_bypass":
         # An ordered, comma-separated list where neither the order nor the
         # spacing changes which hosts bypass the proxy.

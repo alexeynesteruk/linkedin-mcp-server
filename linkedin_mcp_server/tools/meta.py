@@ -26,6 +26,7 @@ from linkedin_mcp_server.bootstrap import (
     initialize_bootstrap,
 )
 from linkedin_mcp_server.config import get_config
+from linkedin_mcp_server.config.schema import configured_cdp_url
 from linkedin_mcp_server.sequential_tool_middleware import LOCK_FREE_TOOL_NAMES
 from linkedin_mcp_server.drivers.browser import get_profile_dir, profile_exists
 from linkedin_mcp_server.session_state import (
@@ -84,8 +85,15 @@ def build_health_payload() -> dict[str, Any]:
     config = get_config()
     profile_dir = get_profile_dir()
     bootstrap = get_bootstrap_state()
-    auth_ready = _session_auth_ready(profile_dir)
-    browser_ready = browser_setup_ready()
+    cdp_url = configured_cdp_url(config.browser)
+    if cdp_url:
+        # Attach mode uses the session inside the already-running Chrome without
+        # touching the local Patchright profile or installing Chromium.
+        auth_ready = True
+        browser_ready = True
+    else:
+        auth_ready = _session_auth_ready(profile_dir)
+        browser_ready = browser_setup_ready()
 
     warnings: list[str] = []
     if not browser_ready:
@@ -99,6 +107,15 @@ def build_health_payload() -> dict[str, Any]:
         )
     if bootstrap.last_error:
         warnings.append(f"Bootstrap last error: {bootstrap.last_error}")
+
+    session_info: dict[str, Any] = {
+        "profile_exists": profile_exists(profile_dir),
+        "cookies_present": portable_cookie_path(profile_dir).exists(),
+        "source_state_present": source_state_path(profile_dir).exists(),
+        "auth_ready": auth_ready,
+    }
+    if cdp_url:
+        session_info["cdp_url"] = cdp_url
 
     payload: dict[str, Any] = {
         "ok": auth_ready
@@ -114,12 +131,7 @@ def build_health_payload() -> dict[str, Any]:
             "browser_ready": browser_ready,
             "auth_ready": auth_ready,
         },
-        "session": {
-            "profile_exists": profile_exists(profile_dir),
-            "cookies_present": portable_cookie_path(profile_dir).exists(),
-            "source_state_present": source_state_path(profile_dir).exists(),
-            "auth_ready": auth_ready,
-        },
+        "session": session_info,
         "storage": _build_storage_paths(profile_dir),
         "timeouts_seconds": {
             "tool_default": config.server.tool_timeout_seconds,
