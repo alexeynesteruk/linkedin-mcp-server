@@ -42,6 +42,18 @@ from linkedin_mcp_server.server_role import (
 logger = logging.getLogger(__name__)
 
 
+def _docker_host_login_applies() -> bool:
+    """Whether the Docker ``--login`` sentence is the right failure.
+
+    A container that attaches to an existing Chrome is still Docker, and
+    ``--login --login-viewer`` would start a second browser. That deploy
+    keeps the CDP message instead.
+    """
+    if get_runtime_policy() != RuntimePolicy.DOCKER:
+        return False
+    return configured_cdp_url(get_config().browser) is None
+
+
 def _is_linux_browser_dependency_error(error: Exception) -> bool:
     message = str(error).lower()
     markers = (
@@ -72,7 +84,11 @@ async def handle_auth_error(
     """Close the stale browser and trigger interactive re-login.
 
     In Docker mode a GUI browser cannot be opened, so we raise
-    ``DockerHostLoginRequiredError`` for a consistent user message.
+    ``DockerHostLoginRequiredError`` for a consistent user message. That
+    sentence tells the operator to run ``--login``, which starts a browser.
+    Attach mode is also a container and must not take that branch: the CDP
+    message further down is the one that matches a Chrome this server did
+    not launch.
 
     *nothing_ran_yet* says whether the tool had done any work before the failure,
     which decides whether a client may safely run the call again after signing in.
@@ -83,7 +99,7 @@ async def handle_auth_error(
     requests. A 19th added later is non-replayable until someone says otherwise,
     which is the safe direction for a default to point.
     """
-    if get_runtime_policy() == RuntimePolicy.DOCKER:
+    if _docker_host_login_applies():
         raise DockerHostLoginRequiredError(
             "No valid LinkedIn session is available in Docker. Create one with "
             "the explicit --login --login-viewer Docker command, or run --login "

@@ -27,3 +27,13 @@ route first. The restriction shows only after signing in, so a tool call with no
 session cannot detect it.
 
 No other restriction route has been observed.
+
+## Remembered sign-in
+
+| Route | Seen | Source |
+|---|---|---|
+| `/uas/login` then `/login/` | 2026-11-19 | `agent-chrome` on the router, `li_rm` present, `li_at` absent. Feed redirected here. |
+
+The page title was "LinkedIn Login, Sign in | LinkedIn". The body said "We're signing you in" and "If you remain on this page, you'll be signed in." The account name was shown. `#rememberme-div` was absent. The only action was "Cancel sign in".
+
+Leaving the tab open for about three seconds after DOMContentLoaded left `/login/`, wrote `li_at`, and landed on `/feed/foryou/`. Closing the tab while the URL still contained `/login` aborted that exchange. Checkpoints, challenges, and `/login/login-restriction/` are not this page.

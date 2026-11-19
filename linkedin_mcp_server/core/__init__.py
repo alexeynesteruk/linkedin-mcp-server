@@ -6,8 +6,10 @@ from .auth import (
     detect_auth_barrier,
     detect_auth_barrier_quick,
     is_logged_in,
+    is_remembered_sign_in,
     resolve_remember_me_prompt,
     wait_for_manual_login,
+    wait_for_remembered_sign_in,
 )
 from .destination import is_another_site, is_linkedin_landing, raise_if_off_linkedin
 from .exceptions import (
@@ -81,8 +83,10 @@ __all__ = [
     "is_another_site",
     "is_linkedin_landing",
     "is_logged_in",
+    "is_remembered_sign_in",
     "raise_if_off_linkedin",
     "resolve_remember_me_prompt",
     "scroll_to_bottom",
     "wait_for_manual_login",
+    "wait_for_remembered_sign_in",
 ]

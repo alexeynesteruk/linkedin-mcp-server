@@ -33,6 +33,7 @@ from linkedin_mcp_server.core import (
     redact_proxy_credentials,
     raise_if_proxy_error,
     resolve_remember_me_prompt,
+    wait_for_remembered_sign_in,
 )
 from linkedin_mcp_server.core.browser_loss import browser_loss_in
 
@@ -279,6 +280,9 @@ async def _feed_auth_succeeds(
                     extra={"allow_remember_me": allow_remember_me},
                 )
                 return await _feed_auth_succeeds(browser, allow_remember_me=False)
+        # The remembered-session page is a /login URL with no chooser button.
+        # Closing it here aborts the redirect that writes li_at.
+        await wait_for_remembered_sign_in(browser.page)
         barrier = await detect_auth_barrier_quick(browser.page)
         # Again, because the waits above give a redirect time to land, and a
         # verdict either way is only about LinkedIn while the page still is.
@@ -319,6 +323,9 @@ async def _feed_auth_succeeds(
         # quick check reads only those. LinkedIn may have committed a redirect
         # to /login and merely missed the load event, which is real evidence
         # about the session and must outrank the proxy explanation below.
+        # Same interstitial as the success path: /login while LinkedIn is still
+        # exchanging the remember-me cookie is not yet a dead session.
+        await wait_for_remembered_sign_in(browser.page)
         barrier = await detect_auth_barrier_quick(browser.page)
         # A navigation that timed out after committing a portal's page is not
         # evidence about the session either, and neither verdict may be given

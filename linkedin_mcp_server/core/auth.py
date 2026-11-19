@@ -366,6 +366,112 @@ async def resolve_remember_me_prompt(page: Page, *, timeout: int | None = None) 
         return False
 
 
+# English only, same as the account-picker markers above. The apostrophes on
+# the live page are typographic, so they are folded before the compare.
+_REMEMBERED_SIGN_IN_MARKERS = (
+    "we're signing you in",
+    "you'll be signed in",
+)
+_REMEMBERED_SIGN_IN_ROUTE_PREFIXES = ("/login", "/uas/login")
+_REMEMBERED_SIGN_IN_TIMEOUT_MS = 15_000
+_REMEMBERED_SIGN_IN_POLL_SECONDS = 0.25
+
+
+def _fold_apostrophes(text: str) -> str:
+    return text.replace("\u2019", "'").replace("\u2018", "'").replace("\u02bc", "'")
+
+
+def _normalized_page_text(text: str) -> str:
+    folded = _fold_apostrophes(text)
+    return re.sub(r"\s+", " ", folded).strip().lower()
+
+
+def _is_remembered_sign_in_route(url: str) -> bool:
+    """Login routes where LinkedIn finishes a remembered session in place.
+
+    ``/checkpoint``, ``/challenge``, and the account-restriction tail are not
+    this page. Waiting does not clear those.
+    """
+    if not is_linkedin_landing(url) or _is_account_restricted_url(url):
+        return False
+    path = urlparse(url).path or "/"
+    return any(
+        path == prefix or path.startswith(f"{prefix}/")
+        for prefix in _REMEMBERED_SIGN_IN_ROUTE_PREFIXES
+    )
+
+
+def is_remembered_sign_in(url: str, body_text: str) -> bool:
+    """Whether *body_text* is LinkedIn's remembered-session interstitial.
+
+    The address is still a login route. The copy says the session completes
+    if the page is left open. There is no ``#rememberme-div`` to click.
+    Observed 2026-11-19 on the shared Chrome: ``li_rm`` was present, ``li_at``
+    was not, ``/feed/`` redirected to ``/uas/login`` and then ``/login/``, and
+    staying on the page wrote ``li_at`` and continued to ``/feed/``.
+    """
+    if not isinstance(body_text, str) or not _is_remembered_sign_in_route(url):
+        return False
+    normalized = _normalized_page_text(body_text)
+    return any(marker in normalized for marker in _REMEMBERED_SIGN_IN_MARKERS)
+
+
+async def _page_body_text(page: Page) -> str | None:
+    """Visible text, or None when a navigation has torn the document down."""
+    try:
+        body = await page.evaluate("() => document.body?.innerText || ''")
+    except (PlaywrightError, PlaywrightTimeoutError):
+        return None
+    if not isinstance(body, str):
+        return None
+    return body
+
+
+async def wait_for_remembered_sign_in(
+    page: Page, *, timeout: int = _REMEMBERED_SIGN_IN_TIMEOUT_MS
+) -> bool:
+    """Leave the remembered-session interstitial open until it redirects.
+
+    Returns True when that interstitial was showing and the document then
+    left the login route. Returns False immediately for every other page,
+    including a real sign-in form, a checkpoint, and a challenge. Returns
+    False when the timeout elapses with the interstitial still up.
+
+    Nothing is clicked. The only control on the page is "Cancel sign in".
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout / 1000
+    saw_interstitial = False
+    while True:
+        url = page.url
+        if not _is_remembered_sign_in_route(url):
+            return saw_interstitial
+        body = await _page_body_text(page)
+        if body is None:
+            # A navigation already in flight. Keep waiting only after the
+            # interstitial was identified; a login form whose text cannot be
+            # read is not this page.
+            if not saw_interstitial or loop.time() >= deadline:
+                return False
+            await asyncio.sleep(_REMEMBERED_SIGN_IN_POLL_SECONDS)
+            continue
+        if not is_remembered_sign_in(url, body):
+            return False
+        if not saw_interstitial:
+            saw_interstitial = True
+            logger.info(
+                "LinkedIn is completing a remembered sign-in; waiting for it to leave %s",
+                url.split("?", 1)[0],
+            )
+        if loop.time() >= deadline:
+            logger.warning(
+                "Remembered sign-in was still on the login page after %.0fs",
+                timeout / 1000,
+            )
+            return False
+        await asyncio.sleep(_REMEMBERED_SIGN_IN_POLL_SECONDS)
+
+
 def _is_account_restricted_url(url: str) -> bool:
     """Return True for LinkedIn's account-restriction route."""
     if not is_linkedin_landing(url):
